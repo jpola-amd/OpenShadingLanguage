@@ -48,6 +48,7 @@ function ( NVCC_COMPILE cuda_src extra_headers ptx_generated extra_nvcc_args )
             "-DFMT_DEPRECATED=\"\""
             ${LLVM_COMPILE_FLAGS}
             -DOSL_USE_FAST_MATH=1
+            -ccbin=${CMAKE_C_COMPILER}
             -m64 -arch ${CUDA_TARGET_ARCH} -ptx
             --std=c++${CMAKE_CXX_STANDARD}
             -dc --use_fast_math ${CUDA_OPT_FLAG_NVCC} ${NVCC_FTZ_FLAG}

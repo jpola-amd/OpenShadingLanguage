@@ -1,0 +1,92 @@
+{
+    "version": 4,
+    "configurePresets": [
+        {
+            "name" : "rocm",
+            "hidden": true,
+            "cacheVariables": {
+                "HIP_PATH":"/opt/rocm",
+                "ROCM_PATH":"/opt/rocm"
+            }
+        },
+        {
+            "name": "clang",
+            "inherits": "rocm",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release/bin/clang++",
+                "CMAKE_C_COMPILER":"/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release/bin/clang"
+
+            }
+        },
+        {
+            "name" : "gcc-9",
+            "inherits": "rocm",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "/usr/bin/g++-9",
+                "CMAKE_C_COMPILER":"/usr/bin/gcc-9",
+                "CXX": "/usr/bin/g++-9",
+                "CC":"/usr/bin/gcc-9"
+            }
+        },
+        
+        {
+            "name": "Debug-config",
+            "hidden": false,
+            "inherits": "gcc-9",
+            "description": "Debug build",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CUDA_TARGET_ARCH":"sm_89",
+                "CUDA_NVCC_FLAGS":"-allow-unsupported-compiler",
+                "CMAKE_PREFIX_PATH":"/home/jpola/projects/hip-osl/3rdParty/artifacts/",
+                "LLVM_ROOT":"/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release/",
+                "OSL_USE_OPTIX":"ON",
+                "OPTIXHOME":"/opt/NVIDIA-OptiX-SDK-7.7.0-linux64-x86_64/ ",
+                "CMAKE_CXX_STANDARD":"17",
+                "CMAKE_INSTALL_PREFIX":"/home/jpola/projects/hip-osl/osl-artifacts/debug",
+                "OSL_USE_HIP":"ON",
+                "CMAKE_VERBOSE_MAKEFILE": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "Release-config",
+            "hidden": false,
+            "inherits": "gcc-9",
+            "description": "Release build",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CUDA_TARGET_ARCH":"sm_89",
+                "HIP_TARGET_ARCH":"gfx1030",
+                "CUDA_NVCC_FLAGS":"-ccbin /usr/bin/gcc-9",
+                "CMAKE_PREFIX_PATH":"/home/jpola/projects/hip-osl/3rdParty/artifacts/",
+                "LLVM_ROOT":"/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release/",
+                "OSL_USE_OPTIX":"ON",
+                "OPTIXHOME":"/opt/NVIDIA-OptiX-SDK-7.7.0-linux64-x86_64/ ",
+                "CMAKE_CXX_STANDARD":"17",
+                "CMAKE_INSTALL_PREFIX":"/home/jpola/projects/hip-osl/osl-artifacts/release",
+                "CMAKE_VERBOSE_MAKEFILE": "ON",
+                "OSL_USE_HIP":"ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Debug-build",
+            "description": "Debug build",
+            "configurePreset": "Debug-config"
+        },
+        {
+            "name": "Release-build",
+            "description": "Release build",
+            "configurePreset": "Release-config"
+        }
+    ]
+
+}
