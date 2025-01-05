@@ -400,7 +400,7 @@ osl_pointcloud_search(OpaqueExecContextPtr oec, ustringhash_pod filename_,
                       int derivs_offset, int nattrs, const void* names_,
                       const void* types_, const void* values_)
 {
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     ShaderGlobals* sg = (ShaderGlobals*)oec;
     ShadingSystemImpl& shadingsys(sg->context->shadingsys());
     if (shadingsys.no_pointcloud())  // Debug mode to skip pointcloud expense
@@ -424,7 +424,7 @@ osl_pointcloud_search(OpaqueExecContextPtr oec, ustringhash_pod filename_,
                           values[i]);
     }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     shadingsys.pointcloud_stats(1, 0, count);
 #endif
 
@@ -438,7 +438,7 @@ osl_pointcloud_get(OpaqueExecContextPtr oec, ustringhash_pod filename_,
                    void* in_indices, int count, ustringhash_pod attr_name_,
                    long long attr_type, void* out_data)
 {
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     ShaderGlobals* sg = (ShaderGlobals*)oec;
     ShadingSystemImpl& shadingsys(sg->context->shadingsys());
     if (shadingsys.no_pointcloud())  // Debug mode to skip pointcloud expense
@@ -476,7 +476,7 @@ osl_pointcloud_write(OpaqueExecContextPtr oec, ustringhash_pod filename_,
                      const void* pos_, int nattribs, const void* names_,
                      const void* types_, const void* values_)
 {
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     ShaderGlobals* sg = (ShaderGlobals*)oec;
     ShadingSystemImpl& shadingsys(sg->context->shadingsys());
     if (shadingsys.no_pointcloud())  // Debug mode to skip pointcloud expense

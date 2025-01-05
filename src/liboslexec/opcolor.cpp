@@ -401,7 +401,7 @@ ColorSystem::transformc(ustringhash fromspace, ustringhash tospace,
 
 
 // For Optix, this will be defined by the renderer. Otherwise inline a getter.
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP__)
 extern "C" __device__ int
 rend_get_userdata(ustringhash name, void* data, int data_size,
                   const OSL::TypeDesc& type, int index);

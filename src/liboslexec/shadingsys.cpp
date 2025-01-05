@@ -4165,7 +4165,7 @@ ShadingSystemImpl::merge_instances(ShaderGroup& group, bool post_opt)
 
 
 
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP__))
 
 OIIO::ColorProcessorHandle
 OCIOColorSystem::load_transform(ustring fromspace, ustring tospace,
@@ -4403,7 +4403,7 @@ bool
 ShadingContext::ocio_transform(ustring fromspace, ustring tospace,
                                const Color3& C, Color3& Cout)
 {
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     if (auto cp = m_ocio_system.load_transform(fromspace, tospace,
                                                &shadingsys())) {
         Cout = C;
@@ -4420,7 +4420,7 @@ bool
 ShadingContext::ocio_transform(ustring fromspace, ustring tospace,
                                const Dual2<Color3>& C, Dual2<Color3>& Cout)
 {
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     if (auto cp = m_ocio_system.load_transform(fromspace, tospace,
                                                &shadingsys())) {
         // Use finite differencing to approximate the derivative. Make 3

@@ -110,7 +110,7 @@
 
 
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 DECL(osl_add_closure_closure, "CXCC")
 DECL(osl_mul_closure_float, "CXCf")
 DECL(osl_mul_closure_color, "CXCc")

@@ -134,7 +134,7 @@ osl_transformn_dvmdv(void* result, void* M_, void* v_)
     multDirMatrix(inlinedTransposed(M.inverse()), v, DVEC(result));
 }
 
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP__))
 OSL_SHADEOP int
 osl_get_matrix(OpaqueExecContextPtr oec, void* r, ustringhash_pod from_)
 {
@@ -212,7 +212,7 @@ osl_prepend_matrix_from(OpaqueExecContextPtr oec, void* r,
     bool ok = osl_get_matrix(oec, &m, from_);
     if (ok)
         MAT(r) = m * MAT(r);
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP__))
     // TODO: How do we manage this in OptiX?
     else {
         if (get_unknown_coordsys_error(oec)) {
@@ -273,7 +273,7 @@ osl_transform_triple(OpaqueExecContextPtr oec, void* Pin, int Pin_derivs,
             else
                 osl_transformn_vmv(Pout, &M, Pin);
         }
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP__))
         else
             OSL_DASSERT(0 && "Unknown transform type");
 #else
@@ -303,7 +303,7 @@ osl_transform_triple_nonlinear(OpaqueExecContextPtr oec, void* Pin,
                                ustringhash_pod from_, ustringhash_pod to_,
                                int vectype)
 {
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP__))
     ustringhash from = ustringhash_from(from_);
     ustringhash to   = ustringhash_from(to_);
 

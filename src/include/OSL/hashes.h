@@ -54,7 +54,7 @@ template<size_t V> static constexpr size_t HashConstEval = V;
 
 namespace {  // Scope Hashes variables to just this translation unit
 namespace Hashes {
-#ifdef __CUDA_ARCH__  // TODO: restrict to CUDA version < 11.4, otherwise the contexpr should work
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)  // TODO: restrict to CUDA version < 11.4, otherwise the contexpr should work
 #    define STRDECL(str, var_name) \
         __device__ const OSL::ustringhash var_name(OSL::strhash(str));
 #else

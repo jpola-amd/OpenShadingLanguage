@@ -44,6 +44,21 @@ list (APPEND CMAKE_MODULE_PATH
       "${PROJECT_SOURCE_DIR}/src/cmake/modules"
       "${PROJECT_SOURCE_DIR}/src/cmake")
 
+# For linux append /opt/rocm/hip to CMAKE_PREFIX_PATH
+# check if HIP_PATH is set
+if (DEFINED ENV{HIP_PATH})
+    set (HIP_PATH $ENV{HIP_PATH})
+else ()
+    set (HIP_PATH "/opt/rocm/hip")
+endif()
+
+if (EXISTS ${HIP_PATH}/lib/cmake/hip)
+    message(STATUS "Adding ${HIP_PATH}/lib/cmake/hip to CMAKE_PREFIX_PATH")
+    list (APPEND CMAKE_PREFIX_PATH "${HIP_PATH}/lib/cmake/hip")
+endif ()
+
+include (hip_macros)
+
 # Utilities
 include (colors)
 include (set_utils)
@@ -136,6 +151,13 @@ set (OSL_PTX_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/ptx"
      CACHE STRING "Directory where OptiX PTX files will be installed")
 set (CMAKE_DEBUG_POSTFIX "" CACHE STRING "Library naming postfix for Debug builds (e.g., '_debug')")
 option (OSL_USTRINGREP_IS_HASH "Always use ustringhash for strings" OFF)
+
+
+# HIP support
+option (OSL_USE_HIP "Include HIP support" OFF)
+set (HIP_TARGET_ARCH "gfx1030" CACHE STRING "HIP GPU architecture (e.g. gfx1030)")
+message(STATUS "OSL_USE_HIP: ${OSL_USE_HIP}")
+message(STATUS "HIP_TARGET_ARCH: ${HIP_TARGET_ARCH}")
 
 
 set (OSL_NO_DEFAULT_TEXTURESYSTEM OFF CACHE BOOL "Do not use create a raw OIIO::TextureSystem")

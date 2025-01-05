@@ -48,7 +48,7 @@ struct GaborParams {
         float TWO_to_bandwidth = exp2f(bandwidth);
 #endif
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
         //static const float SQRT_PI_OVER_LN2 = sqrtf (M_PI / M_LN2);
         // To match GCC result of sqrtf (M_PI / M_LN2)
         static constexpr float SQRT_PI_OVER_LN2 = 2.128934e+00f;

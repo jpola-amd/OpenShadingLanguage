@@ -1,5 +1,5 @@
 {
-    "version": 4,
+    "version": 3,
     "configurePresets": [
         {
             "name" : "rocm",
@@ -49,7 +49,8 @@
                 "CMAKE_CXX_STANDARD":"17",
                 "CMAKE_INSTALL_PREFIX":"/home/jpola/projects/hip-osl/osl-artifacts/debug",
                 "OSL_USE_HIP":"ON",
-                "CMAKE_VERBOSE_MAKEFILE": "ON",
+                "USE_FAST_MATH":"ON",
+                "USE_LLVM_BITCODE":"ON",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
             }
         },
@@ -89,4 +90,6 @@
         }
     ]
 
+
 }
+

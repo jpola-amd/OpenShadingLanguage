@@ -51,7 +51,7 @@ clamp_zero(Color3& c)
 // Choose to access 1d array vs 2d to allow better code generation of gathers
 namespace {  // anon namespace to avoid duplicate OptiX symbols
 // clang-format off
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP__)
 OSL_CONSTANT_DATA const float cie_colour_match[81*3] =
 #else
 OSL_CONSTANT_DATA const float cie_colour_match[81 * 3] OSL_ALIGNAS(64) =

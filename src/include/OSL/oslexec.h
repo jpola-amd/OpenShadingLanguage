@@ -52,7 +52,7 @@ class ShadingSystemImpl;
 
 
 namespace Strings {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #    define STRDECL(str, var_name)
 #else
 // Any strings referenced inside of a libsoslexec/wide/*.cpp

@@ -8,6 +8,8 @@
 #cmakedefine01 OSL_BUILD_BATCHED
 #define OSL_USE_BATCHED OSL_BUILD_BATCHED
 
+#cmakedefine01 OSL_USE_HIP
+
 
 #include <OSL/export.h>
 #include <OSL/oslversion.h>
@@ -28,7 +30,7 @@
 
 // The fmt library causes trouble for Cuda. Work around by telling fmt not to
 // use the troublesome int128 that Cuda doesn't understand.
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #    ifndef FMT_USE_INT128
 #        define FMT_USE_INT128 0
 #    endif

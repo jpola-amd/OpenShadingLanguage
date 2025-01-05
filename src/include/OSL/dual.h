@@ -1335,7 +1335,7 @@ OSL_HOSTDEVICE OSL_FORCEINLINE Dual<T,P> smoothstep (const Dual<T,P> &e0, const 
 }
 
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 template<> inline OSL_HOSTDEVICE constexpr float3 Dual<float3, 2>::zero() {
     return float3{0.f, 0.f, 0.f};
 }
