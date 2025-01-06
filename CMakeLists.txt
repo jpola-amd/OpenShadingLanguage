@@ -47,9 +47,10 @@ list (APPEND CMAKE_MODULE_PATH
 # For linux append /opt/rocm/hip to CMAKE_PREFIX_PATH
 # check if HIP_PATH is set
 if (DEFINED ENV{HIP_PATH})
+    message(STATUS "HIP_PATH is set to $ENV{HIP_PATH}")
     set (HIP_PATH $ENV{HIP_PATH})
 else ()
-    set (HIP_PATH "/opt/rocm/hip")
+    set (HIP_PATH "/opt/rocm")
 endif()
 
 if (EXISTS ${HIP_PATH}/lib/cmake/hip)

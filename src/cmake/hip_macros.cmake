@@ -28,7 +28,6 @@ function ( HIP_COMPILE hip_src extra_headers bc_generated extra_hip_args)
     # if (NOT CUDA_NO_FTZ)
     #     set (NVCC_FTZ_FLAG "--ftz=true")
     # endif ()
-    message(STATUS "comp HIP_INCLUDE_DIRS ${HIP_INCLUDE_DIRS}")
     add_custom_command ( OUTPUT ${hip_bc}
     COMMAND ${HIP_HIPCC_EXECUTABLE}
         "-I${HIP_INCLUDE_DIRS}"
@@ -161,12 +160,22 @@ function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args)
             ${ALL_OPENEXR_INCLUDES}
             "-I${Boost_INCLUDE_DIRS}"
             ${LLVM_COMPILE_FLAGS}  ${CLANG_MSVC_FIX}
-            -D__HIP_PLATFORM_AMD__ -DOSL_COMPILING_TO_BITCODE=1 -DNDEBUG -DOIIO_NO_SSE
-            --language=hip --offload-device-only --offload-arch=${HIP_TARGET_ARCH}
+            -D__HIP_PLATFORM_AMD__ 
+            -DOSL_COMPILING_TO_BITCODE=1 
+            -DNDEBUG 
+            -DOIIO_NO_SSE
             -DOSL_USE_FAST_MATH=1
-            -Wno-deprecated-register -Wno-format-security
+            --language=hip 
+            --offload-device-only 
+            --offload-arch=${HIP_TARGET_ARCH}
+            -Wno-deprecated-register 
+            -Wno-format-security
             -Wno-nan-infinity-disabled
-            -fno-math-errno -ffast-math ${HIP_OPT_FLAG_HIPCC} -S -emit-llvm ${extra_clang_args}
+            -fno-math-errno 
+            -ffast-math 
+            ${HIP_OPT_FLAG_HIPCC} 
+            -S -emit-llvm -fgpu-rdc
+            ${extra_clang_args}
             ${src} -o ${asm_hip}
         COMMAND ${LLVM_AS_TOOL} -f -o ${bc_hip} ${asm_hip}
         DEPENDS ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${src}
@@ -210,24 +219,27 @@ function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
         list ( APPEND shadeops_bc_list ${shadeops_bc} )
     endforeach ()
 
-    if (LLVM_NEW_PASS_MANAGER)
+    #if (LLVM_NEW_PASS_MANAGER)
       # There is no --nvptx-assign-valid-global-names flag for the new
       # pass manager, but it appears to run this pass by default.
-      string(REPLACE "-O" "O" opt_tool_flags ${HIP_OPT_FLAG_CLANG})
-      set (opt_tool_flags -passes="default<${opt_tool_flags}>")
-    else()
+    #  string(REPLACE "-O" "O" opt_tool_flags ${HIP_OPT_FLAG_CLANG})
+    #  set (opt_tool_flags -passes="default<${opt_tool_flags}>")
+    #else()
       set (opt_tool_flags ${HIP_OPT_FLAG_CLANG})
-    endif ()
-
+    #endif ()
+    #message(STATUS "Optimization flags for opt tool: ${opt_tool_flags}")
+    
     # Link all of the individual LLVM bitcode files, and emit PTX for the linked bitcode
     add_custom_command ( OUTPUT ${linked_bc} ${linked_hsaco}
-        COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${linked_bc}
-        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc} -o ${linked_bc}
-        COMMAND ${LLVM_LLC_TOOL} --march=amdgcn -mcpu=${HIP_TARGET_ARCH} ${linked_bc} -o ${linked_hsaco}
+        COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${linked_bc}.linked
+        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc}.linked -o ${linked_bc}.opt
+        COMMAND ${LLVM_LLC_TOOL} --march=amdgcn -mcpu=${HIP_TARGET_ARCH} -filetype=obj ${linked_bc}.opt -o ${linked_hsaco}
+
+        DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
         # This script converts all of the .weak functions defined in the PTX into .visible functions.
-        COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
-            ${linked_hsaco} ${linked_hsaco}
-            DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
-                "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
+        # COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
+        #     ${linked_hsaco} ${linked_hsaco}
+        #     DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
+        #         "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" )
 endfunction ()
