@@ -39,7 +39,7 @@ function ( HIP_COMPILE hip_src extra_headers bc_generated extra_hip_args)
         ${ALL_IMATH_INCLUDES}
         "-DFMT_DEPRECATED=\"\""
         ${LLVM_COMPILE_FLAGS}
-        -xhip -fgpu-rdc -c -emit-llvm --gpu-bundle-output -ffast-math --offload-arch=${HIP_TARGET_ARCH}
+        -xhip -fgpu-rdc -c -emit-llvm -ffast-math --offload-arch=${HIP_TARGET_ARCH}
         -DOSL_USE_FAST_MATH=1
         --std=c++${CMAKE_CXX_STANDARD}
         ${HIP_OPT_FLAG_HIPCC}
@@ -188,9 +188,9 @@ function ( LLVM_COMPILE_HIP llvm_src headers prefix llvm_bc_cpp_generated extra_
     get_filename_component (llvmsrc_we ${llvm_src} NAME_WE)
     set (llvm_bc_cpp "${CMAKE_CURRENT_BINARY_DIR}/${llvmsrc_we}.bc.cpp")
     set (${llvm_bc_cpp_generated} ${llvm_bc_cpp} PARENT_SCOPE)
-
+    message(STATUS "Compiling HIP: ${llvm_src} -> llvm: ${llvm_bc_cpp}")
     MAKE_HIPCC_BITCODE (${llvm_src} "" llvm_bc "${extra_clang_args}")
-
+    message(STATUS "Serializing BC: ${llvm_bc} -> llvm-cpp: ${llvm_bc_cpp}")
     add_custom_command (OUTPUT ${llvm_bc_cpp}
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/src/build-scripts/serialize-bc.py" ${llvm_bc} ${llvm_bc_cpp} ${prefix}
         MAIN_DEPENDENCY ${llvm_src}
@@ -210,7 +210,7 @@ endfunction ()
 
 function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
     set (linked_bc "${CMAKE_CURRENT_BINARY_DIR}/linked_${prefix}.bc")
-    set (linked_hsaco "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.hsaco")
+    set (linked_hsaco "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.bc.hsaco")
     set (${output_bc} ${linked_bc} PARENT_SCOPE )
     set (${output_ptx} ${linked_hsaco} PARENT_SCOPE )
 
@@ -231,10 +231,9 @@ function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
     
     # Link all of the individual LLVM bitcode files, and emit PTX for the linked bitcode
     add_custom_command ( OUTPUT ${linked_bc} ${linked_hsaco}
-        COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${linked_bc}.linked
-        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc}.linked -o ${linked_bc}.opt
+        COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${linked_bc}
+        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc} -o ${linked_bc}.opt
         COMMAND ${LLVM_LLC_TOOL} --march=amdgcn -mcpu=${HIP_TARGET_ARCH} -filetype=obj ${linked_bc}.opt -o ${linked_hsaco}
-
         DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
         # This script converts all of the .weak functions defined in the PTX into .visible functions.
         # COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
