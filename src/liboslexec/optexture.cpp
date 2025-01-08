@@ -10,6 +10,10 @@
 ///
 /////////////////////////////////////////////////////////////////////////
 
+//enable HIP device functions definitions
+#if defined (__HIP_DEVICE_COMPILE__)
+#    include <hip/hip_runtime.h>
+#endif 
 #include <OpenImageIO/fmath.h>
 #include <OpenImageIO/simd.h>
 

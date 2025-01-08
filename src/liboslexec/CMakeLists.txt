@@ -259,31 +259,39 @@ if (USE_LLVM_BITCODE)
         ${CMAKE_SOURCE_DIR}/src/liboslexec/opspline.cpp
         ${CMAKE_SOURCE_DIR}/src/liboslexec/opcolor.cpp
         ${CMAKE_SOURCE_DIR}/src/liboslexec/opmatrix.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/optexture.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/pointcloud.cpp
         ${CMAKE_SOURCE_DIR}/src/liboslnoise/gabornoise.cpp
         ${CMAKE_SOURCE_DIR}/src/liboslnoise/simplexnoise.cpp
     )
-
+    
+    # we don't have the ptx equivalent. Just compile to the bitcode
     HIP_SHADEOPS_COMPILE ( "shadeops_hip"
         shadeops_hip_bc
-        shadeops_hip_hsaco
+        shadeops_hip_llvm
         "${liboslexec_shadeops_srcs}"
         ""
     )
 
+    message(STATUS "shadeops_hip_bc: ${shadeops_hip_bc}")
+    message(STATUS "shadeops_hip_llvm: ${shadeops_hip_llvm}")
+
     # Serialize the linked bitcode into a CPP file to be embedded in the current target binary
-    set (shadeops_bc_hip_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.bc.cpp")
-    MAKE_EMBEDDED_CPP( "shadeops_hip_llvm_compiled_ops" ${shadeops_bc_hip_cpp} ${shadeops_hip_bc} )
-    list (APPEND lib_src ${shadeops_bc_hip_cpp})
+    set (shadeops_hip_bc_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.bc.cpp")
+    MAKE_EMBEDDED_CPP( "shadeops_hip_bc_compiled_ops" ${shadeops_hip_bc_cpp} ${shadeops_hip_bc} )
+    list (APPEND lib_src ${shadeops_hip_bc_cpp})
 
-    # Serialize the linked PTX into a CPP file to be embedded in the current target binary
-    set (shadeops_ptx_hip_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.hsaco.cpp")
-    MAKE_EMBEDDED_CPP( "shadeops_hip_hasco_compiled_ops" ${shadeops_ptx_hip_cpp} ${shadeops_hip_hsaco} )
-    list (APPEND lib_src ${shadeops_ptx_hip_cpp})
+    set (shadeops_hip_llvm_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.llvm.cpp")
+    MAKE_EMBEDDED_CPP( "shadeops_hip_llvm_compiled_ops" ${shadeops_hip_llvm_cpp} ${shadeops_hip_llvm} )
+    list (APPEND lib_src ${shadeops_hip_llvm_cpp})
 
-    # Installing the shadeops BC isn't necessary since the renderer can
-    # retrieve it through the shading system. But for testing purposes it is
-    # handy to make the BC available offline.
-    install (FILES ${shadeops_hip_hsaco}
+
+
+        
+    # # Installing the shadeops BC isn't necessary since the renderer can
+    # # retrieve it through the shading system. But for testing purposes it is
+    # # handy to make the BC available offline.
+    install (FILES ${shadeops_hip_bc} ${shedops_hip_llvm}
         DESTINATION ${OSL_PTX_INSTALL_DIR})
 
     endif()
@@ -570,6 +578,7 @@ foreach(batched_target ${BATCHED_TARGET_LIST})
     endif ()
         
 endforeach(batched_target)
+
 
 add_library (${local_lib} ${lib_src})
 target_include_directories (${local_lib}

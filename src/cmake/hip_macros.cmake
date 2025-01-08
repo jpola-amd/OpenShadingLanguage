@@ -52,12 +52,12 @@ endfunction(HIP_COMPILE)
 
 
 # Function to compile a C++ source file to HIP-compatible bitcode
-function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args)
+function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args )
     get_filename_component ( src_we ${src} NAME_WE )
     set (asm_hip "${CMAKE_CURRENT_BINARY_DIR}/${src_we}${suffix}.s" )
     set (bc_hip "${CMAKE_CURRENT_BINARY_DIR}/${src_we}${suffix}.bc" )
     set (${generated_bc} ${bc_hip} PARENT_SCOPE )
-
+    
     # Setup the compile flags
     get_property (CURRENT_DEFINITIONS DIRECTORY PROPERTY COMPILE_DEFINITIONS)
     message (VERBOSE "Current #defines are ${CURRENT_DEFINITIONS}")
@@ -108,6 +108,14 @@ function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args)
                 NO_CMAKE_PATH NO_DEFAULT_PATH NO_CMAKE_SYSTEM_PATH
                 NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_ENVIRONMENT_PATH)
     endif ()
+
+    if (NOT LLVM_DIS_TOOL)
+        find_program (LLVM_DIS_TOOL NAMES "llvm-dis"
+                PATHS "${LLVM_DIRECTORY}/bin" "${LLVM_DIRECTORY}/tools/llvm"
+                NO_CMAKE_PATH NO_DEFAULT_PATH NO_CMAKE_SYSTEM_PATH
+                NO_SYSTEM_ENVIRONMENT_PATH NO_CMAKE_ENVIRONMENT_PATH)
+        message(STATUS "LLVM_DIS_TOOL: ${LLVM_DIS_TOOL}")
+    endif()
 
     if (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         # fix compilation error when using MSVC
@@ -208,11 +216,11 @@ endfunction ()
 # ROCm uses a more direct LLVM IR → GFX ISA → binary approach.
 
 
-function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
-    set (linked_bc "${CMAKE_CURRENT_BINARY_DIR}/linked_${prefix}.bc")
-    set (linked_hsaco "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.bc.fatbin")
-    set (${output_bc} ${linked_bc} PARENT_SCOPE )
-    set (${output_ptx} ${linked_hsaco} PARENT_SCOPE )
+function ( HIP_SHADEOPS_COMPILE prefix output_bc output_llvm input_srcs headers )
+    set (hip_bitcode "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.bc")
+    set (hip_llvm "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.llvm")
+    set (${output_bc} ${hip_bitcode} PARENT_SCOPE)
+    set (${output_llvm} ${hip_llvm} PARENT_SCOPE )
 
     foreach ( shadeops_src ${input_srcs} )
         MAKE_HIPCC_BITCODE ( ${shadeops_src} "_hip" shadeops_bc "" )
@@ -230,16 +238,11 @@ function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
     #message(STATUS "Optimization flags for opt tool: ${opt_tool_flags}")
     
     # Link all of the individual LLVM bitcode files, and emit PTX for the linked bitcode
-    add_custom_command ( OUTPUT ${linked_bc} ${linked_hsaco}
-        COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${linked_bc}
-        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc} -o ${linked_hsaco}
-        #COMMAND ${LLVM_LLC_TOOL} --march=amdgcn -mcpu=${HIP_TARGET_ARCH} -filetype=obj ${linked_bc} -o ${linked_hsaco}
+    add_custom_command ( OUTPUT ${hip_bitcode} ${hip_llvm}
+        COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${hip_bitcode}
+        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${hip_bitcode} -o ${hip_bitcode}
+        COMMAND ${LLVM_DIS_TOOL} ${hip_bitcode} -o ${hip_llvm}
         DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
-        COMMENT "Generating HIP bitcode from ${shadeops_bc_list} linked ${linked_bc} -> ${linked_hsaco}"
-        # This script converts all of the .weak functions defined in the PTX into .visible functions.
-        # COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
-        #     ${linked_hsaco} ${linked_hsaco}
-        #     DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
-        #         "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
+        COMMENT "Generating HIP bitcode from ${shadeops_bc_list} into ${hip_bitcode}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" )
 endfunction ()
