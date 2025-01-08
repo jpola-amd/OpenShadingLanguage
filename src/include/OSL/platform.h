@@ -304,8 +304,10 @@
 // ordinary inline.
 #if OSL_DEBUG
 #    define OSL_FORCEINLINE inline
-#elif defined(__CUDACC__) || defined(__HIP__)
+#elif defined(__CUDACC__)
 #    define OSL_FORCEINLINE __inline__
+#elif defined (__HIP_DEVICE_COMPILE__)
+#    define OSL_FORCEINLINE __forceinline__
 #elif defined(__GNUC__) || defined(__clang__) || __has_attribute(always_inline)
 #    define OSL_FORCEINLINE inline __attribute__((always_inline))
 #elif defined(_MSC_VER) || defined(__INTEL_COMPILER)
@@ -526,13 +528,7 @@ OSL_FORCEINLINE OSL_HOSTDEVICE To bitcast(const From& src) noexcept {
     static_assert(sizeof(From) == sizeof(To),
                   "bit_cast must be between objects of the same size");
     To dst;
-    #if defined(__HIP_DEVICE_COMPILE__)
-        // HIP doesn't support reinterpret_cast in device code
-        memcpy((void*)&dst, &src, sizeof(From));
-      
-    #else // for CUDA and CPU
-        memcpy((void*)&dst, &src, sizeof(From));
-    #endif
+    memcpy((void*)&dst, &src, sizeof(From));
     return dst;
 }
 
@@ -547,28 +543,28 @@ OSL_FORCEINLINE OSL_HOSTDEVICE To bitcast(const From& src) noexcept {
 // version checks here, it may be that some earlier versions support these
 // intrinsics.
 
-template<> OSL_FORCEINLINE uint32_t bitcast<uint32_t, float>(const float& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE uint32_t bitcast<uint32_t, float>(const float& val) noexcept {
     return static_cast<uint32_t>(_castf32_u32(val));
 }
-template<> OSL_FORCEINLINE int32_t bitcast<int32_t, float>(const float& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE int32_t bitcast<int32_t, float>(const float& val) noexcept {
     return static_cast<int32_t>(_castf32_u32(val));
 }
-template<> OSL_FORCEINLINE float bitcast<float, uint32_t>(const uint32_t& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE float bitcast<float, uint32_t>(const uint32_t& val) noexcept {
     return _castu32_f32(val);
 }
-template<> OSL_FORCEINLINE float bitcast<float, int32_t>(const int32_t& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE float bitcast<float, int32_t>(const int32_t& val) noexcept {
     return _castu32_f32(val);
 }
-template<> OSL_FORCEINLINE uint64_t bitcast<uint64_t, double>(const double& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE uint64_t bitcast<uint64_t, double>(const double& val) noexcept {
     return static_cast<uint64_t>(_castf64_u64(val));
 }
-template<> OSL_FORCEINLINE int64_t bitcast<int64_t, double>(const double& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE int64_t bitcast<int64_t, double>(const double& val) noexcept {
     return static_cast<int64_t>(_castf64_u64(val));
 }
-template<> OSL_FORCEINLINE double bitcast<double, uint64_t>(const uint64_t& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE double bitcast<double, uint64_t>(const uint64_t& val) noexcept {
     return _castu64_f64(val);
 }
-template<> OSL_FORCEINLINE double bitcast<double, int64_t>(const int64_t& val) noexcept {
+template<> OSL_FORCEINLINE OSL_HOSTDEVICE double bitcast<double, int64_t>(const int64_t& val) noexcept {
     return _castu64_f64(val);
 }
 #endif
