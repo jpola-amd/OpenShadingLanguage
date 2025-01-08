@@ -27,6 +27,10 @@
 #   include <x86intrin.h>
 #endif
 
+#if defined(__HIP_DEVICE_COMPILE__)
+#   include <hip/amd_detail/amd_device_functions.h> // for memcpy
+#endif
+
 /////////////////////////////////////////////////////////////////////////
 // Detect which compiler and version we're using
 
@@ -300,7 +304,7 @@
 // ordinary inline.
 #if OSL_DEBUG
 #    define OSL_FORCEINLINE inline
-#elif defined(__CUDACC__)
+#elif defined(__CUDACC__) || defined(__HIP__)
 #    define OSL_FORCEINLINE __inline__
 #elif defined(__GNUC__) || defined(__clang__) || __has_attribute(always_inline)
 #    define OSL_FORCEINLINE inline __attribute__((always_inline))
@@ -369,7 +373,7 @@
 
 
 #ifndef OSL_HOSTDEVICE
-#  ifdef __CUDACC__
+#  if defined(__CUDACC__) || defined(__HIP__)
 #    define OSL_HOSTDEVICE __host__ __device__
 #  else
 #    define OSL_HOSTDEVICE
@@ -377,7 +381,7 @@
 #endif
 
 #ifndef OSL_DEVICE
-#  ifdef __CUDACC__
+#  if defined(__CUDACC__) || defined(__HIP__)
 #    define OSL_DEVICE __device__
 #  else
 #    define OSL_DEVICE
@@ -385,7 +389,7 @@
 #endif
 
 #ifndef OSL_CONSTANT_DATA
-#  ifdef __CUDACC__
+#  if defined(__CUDACC__) || defined(__HIP__)
 #    define OSL_CONSTANT_DATA __constant__
 #  else
 #    define OSL_CONSTANT_DATA
@@ -454,7 +458,7 @@
 ///
 /// OSL_ASSERT_MSG(condition,msg,...) lets you add formatted output (a la
 /// printf) to the failure message.
-#ifndef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #    define OSL_ASSERT_PRINT(...) (std::fprintf(stderr, __VA_ARGS__))
 #else
 #    define OSL_ASSERT_PRINT(...) (printf(__VA_ARGS__))
@@ -485,7 +489,7 @@
 /// These macros are no-ops when compiling for CUDA because they were found
 /// to cause strange issues in device code (e.g., function bodies being
 /// eliminated when OSL_DASSERT is used).
-#if !defined(NDEBUG) && !defined(__CUDACC__)
+#if !defined(NDEBUG) && !(defined(__CUDACC__) || defined(__HIP_DEVICE_COMPILE__))
 #    define OSL_DASSERT OSL_ASSERT
 #    define OSL_DASSERT_MSG OSL_ASSERT_MSG
 #else
@@ -522,11 +526,18 @@ OSL_FORCEINLINE OSL_HOSTDEVICE To bitcast(const From& src) noexcept {
     static_assert(sizeof(From) == sizeof(To),
                   "bit_cast must be between objects of the same size");
     To dst;
-    memcpy((void*)&dst, &src, sizeof(From));
+    #if defined(__HIP_DEVICE_COMPILE__)
+        // HIP doesn't support reinterpret_cast in device code
+        memcpy((void*)&dst, &src, sizeof(From));
+      
+    #else // for CUDA and CPU
+        memcpy((void*)&dst, &src, sizeof(From));
+    #endif
     return dst;
 }
 
-#if defined(__x86_64__) && !defined(__CUDA_ARCH__) && \
+#if defined(__x86_64__) && \
+    !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && \
     (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER) \
      || OSL_CLANG_VERSION >= 100000 || OSL_APPLE_CLANG_VERSION >= 130000)
 // On x86/x86_64 for certain compilers we can use Intel CPU intrinsics for

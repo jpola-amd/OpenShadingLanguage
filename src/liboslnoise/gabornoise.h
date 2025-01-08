@@ -23,7 +23,7 @@ namespace hostdevice {
 template<typename T>
 OSL_FORCEINLINE OSL_HOSTDEVICE T
 clamp(T x, T lo, T hi);
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 template<>
 OSL_FORCEINLINE OSL_HOSTDEVICE double
 clamp<double>(double x, double lo, double hi)

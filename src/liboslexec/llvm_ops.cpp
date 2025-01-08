@@ -109,7 +109,7 @@ void* __dso_handle = 0;  // necessary to avoid linkage issues in bitcode
 #define DCOL(x)   (*(Dual2<Color3>*)x)
 
 #ifndef OSL_SHADEOP
-#    ifdef __CUDACC__
+#    if defined(__CUDACC__) || defined(__HIP__)
 #        define OSL_SHADEOP \
             extern "C" __device__ OSL_LLVM_EXPORT __attribute__((always_inline))
 #    elif defined(OSL_COMPILING_TO_BITCODE)
@@ -263,6 +263,14 @@ void* __dso_handle = 0;  // necessary to avoid linkage issues in bitcode
         osl_##name##_dvdvdf(r_, a_, &b);                               \
     }
 
+#if defined(__HIP_DEVICE_COMPILE__)
+    #define OSL_FAST_MATH 1
+    #if OSL_FAST_MATH
+        #warning "HIP has the OSL fast math"
+    #else
+        #warning "HIP does not have the OSL fast math"
+    #endif
+#endif 
 
 #if OSL_FAST_MATH
 MAKE_UNARY_PERCOMPONENT_OP(sin, OIIO::fast_sin, fast_sin)
@@ -993,7 +1001,7 @@ osl_range_check(int indexvalue, int length, ustringhash_pod symname,
 }
 
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 extern "C" {
 __global__ void
 __direct_callable__dummy_shadeops()

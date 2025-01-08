@@ -3658,7 +3658,7 @@ LLVM_Util::mask_as_int(llvm::Value* mask)
                   builder().CreateBitCast(w8_int_masks[1], w8_float_type) }
             };
 
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), llvm::Intrinsic::x86_avx_movmsk_ps_256);
 
             llvm::Value* args[1] = { w8_float_masks[0] };
@@ -3689,7 +3689,7 @@ LLVM_Util::mask_as_int(llvm::Value* mask)
             llvm::Value* w8_float_mask = builder().CreateBitCast(wide_int_mask,
                                                                  w8_float_type);
 
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), llvm::Intrinsic::x86_avx_movmsk_ps_256);
 
             llvm::Value* args[1] = { w8_float_mask };
@@ -3717,7 +3717,7 @@ LLVM_Util::mask_as_int(llvm::Value* mask)
 
             // Now we will use the horizontal sign extraction intrinsic
             // to build a 32 bit mask value.
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), llvm::Intrinsic::x86_sse_movmsk_ps);
 
             llvm::Value* args[1] = { w4_float_mask };
@@ -3755,7 +3755,7 @@ LLVM_Util::mask_as_int(llvm::Value* mask)
                   builder().CreateBitCast(w4_int_masks[3], w4_float_type) }
             };
 
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), llvm::Intrinsic::x86_sse_movmsk_ps);
 
             llvm::Value* args[1] = { w4_float_masks[0] };
@@ -3795,7 +3795,7 @@ LLVM_Util::mask_as_int(llvm::Value* mask)
                   builder().CreateBitCast(w4_int_masks[1], w4_float_type) }
             };
 
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), llvm::Intrinsic::x86_sse_movmsk_ps);
 
             llvm::Value* args[1] = { w4_float_masks[0] };
@@ -3827,7 +3827,7 @@ LLVM_Util::mask_as_int(llvm::Value* mask)
 
             // Now we will use the horizontal sign extraction intrinsic
             // to build a 32 bit mask value.
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), llvm::Intrinsic::x86_sse_movmsk_ps);
 
             llvm::Value* args[1]   = { w4_float_mask };
@@ -3886,7 +3886,7 @@ LLVM_Util::mask4_as_int8(llvm::Value* mask)
 
         // Now we will use the horizontal sign extraction intrinsic
         // to build a 32 bit mask value.
-        llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+        llvm::Function* func = llvm::Intrinsic::getDeclaration(
             module(), llvm::Intrinsic::x86_sse_movmsk_ps);
 
         llvm::Value* args[1] = { w4_float_mask };
@@ -4060,7 +4060,7 @@ LLVM_Util::op_1st_active_lane_of(llvm::Value* mask)
     // Count trailing zeros, least significant
     llvm::Type* types[] = { intMaskType };
     llvm::Function* func_cttz
-        = llvm::Intrinsic::getOrInsertDeclaration(module(), llvm::Intrinsic::cttz,
+        = llvm::Intrinsic::getDeclaration(module(), llvm::Intrinsic::cttz,
                                           toArrayRef(types));
 
     llvm::Value* args[2] = { int_mask, constant_bool(true) };
@@ -4708,13 +4708,13 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             switch (m_vector_width) {
             case 16:
                 int_mask              = mask_as_int16(current_mask());
-                func_avx512_gather_pi = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_gather_pi = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_gather_dpi_512);
                 break;
             case 8:
             case 4:
                 int_mask              = mask_as_int8(current_mask());
-                func_avx512_gather_pi = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_gather_pi = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_gather3siv8_si);
                 break;
             default: OSL_ASSERT(0 && "unsupported native bit mask width");
@@ -4729,7 +4729,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
                                         toArrayRef(args));
         } else if (m_supports_avx2) {
             llvm::Function* func_avx2_gather_pi
-                = llvm::Intrinsic::getOrInsertDeclaration(
+                = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx2_gather_d_d_256);
             OSL_ASSERT(func_avx2_gather_pi);
 
@@ -4786,13 +4786,13 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             switch (m_vector_width) {
             case 16:
                 int_mask              = mask_as_int16(current_mask());
-                func_avx512_gather_ps = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_gather_ps = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_gather_dps_512);
                 break;
             case 8:
             case 4:
                 int_mask              = mask_as_int8(current_mask());
-                func_avx512_gather_ps = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_gather_ps = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_gather3siv8_sf);
                 break;
             default: OSL_ASSERT(0 && "unsupported native bit mask width");
@@ -4809,7 +4809,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
                                         toArrayRef(args));
         } else if (m_supports_avx2) {
             llvm::Function* func_avx2_gather_ps
-                = llvm::Intrinsic::getOrInsertDeclaration(
+                = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx2_gather_d_ps_256);
             OSL_ASSERT(func_avx2_gather_ps);
 
@@ -4872,7 +4872,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             case 16: {
                 // Gather 64bit integer, as that is binary compatible with 64bit pointers of ustring
                 llvm::Function* func_avx512_gather_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather_dpq_512);
                 OSL_ASSERT(func_avx512_gather_dpq);
 
@@ -4901,7 +4901,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             case 8: {
                 // Gather 64bit integer, as that is binary compatible with 64bit pointers of ustring
                 llvm::Function* func_avx512_gather_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv4_di);
                 OSL_ASSERT(func_avx512_gather_dpq);
 
@@ -4930,7 +4930,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             case 4: {
                 // Gather 64bit integer, as that is binary compatible with 64bit pointers of ustring
                 llvm::Function* func_avx512_gather_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv4_di);
                 OSL_ASSERT(func_avx512_gather_dpq);
 
@@ -4960,7 +4960,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             switch (m_vector_width) {
             case 16: {
                 llvm::Function* func_avx512_gather_ps
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather_dps_512);
                 OSL_ASSERT(func_avx512_gather_ps);
 
@@ -4974,7 +4974,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             }
             case 8: {
                 llvm::Function* func_avx512_gather_ps
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv8_sf);
                 OSL_ASSERT(func_avx512_gather_ps);
 
@@ -4988,7 +4988,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             }
             case 4: {
                 llvm::Function* func_avx512_gather_ps
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv8_sf);
                 OSL_ASSERT(func_avx512_gather_ps);
 
@@ -5005,7 +5005,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
 
         } else if (m_supports_avx2) {
             llvm::Function* func_avx2_gather_ps
-                = llvm::Intrinsic::getOrInsertDeclaration(
+                = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx2_gather_d_ps_256);
             OSL_ASSERT(func_avx2_gather_ps);
 
@@ -5072,7 +5072,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             switch (m_vector_width) {
             case 16: {
                 llvm::Function* func_avx512_gather_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather_dpi_512);
                 OSL_ASSERT(func_avx512_gather_pi);
 
@@ -5086,7 +5086,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             }
             case 8: {
                 llvm::Function* func_avx512_gather_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv8_si);
                 OSL_ASSERT(func_avx512_gather_pi);
 
@@ -5100,7 +5100,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             }
             case 4: {
                 llvm::Function* func_avx512_gather_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv8_si);
                 OSL_ASSERT(func_avx512_gather_pi);
 
@@ -5118,7 +5118,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             switch (m_vector_width) {
             case 16: {
                 llvm::Function* func_avx2_gather_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx2_gather_d_d_256);
                 OSL_ASSERT(func_avx2_gather_pi);
 
@@ -5143,7 +5143,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             }
             case 8: {
                 llvm::Function* func_avx2_gather_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx2_gather_d_d_256);
                 OSL_ASSERT(func_avx2_gather_pi);
 
@@ -5163,7 +5163,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             }
             case 4: {
                 llvm::Function* func_avx2_gather_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx2_gather_d_d_256);
                 OSL_ASSERT(func_avx2_gather_pi);
 
@@ -5195,7 +5195,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
                 // Gather 64bit integer, as that is binary compatible with
                 // 64bit pointers of ustring
                 llvm::Function* func_avx512_gather_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather_dpq_512);
                 OSL_ASSERT(func_avx512_gather_dpq);
 
@@ -5227,7 +5227,7 @@ LLVM_Util::op_gather(llvm::Type* src_type, llvm::Value* src_ptr,
             case 4: {
                 // Gather 64bit integer, as that is binary compatible with 64bit pointers of ustring
                 llvm::Function* func_avx512_gather_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_gather3siv4_di);
                 OSL_ASSERT(func_avx512_gather_dpq);
 
@@ -5354,13 +5354,13 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             switch (m_vector_width) {
             case 16:
                 int_mask               = mask_as_int16(current_mask());
-                func_avx512_scatter_ps = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_scatter_ps = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_scatter_dps_512);
                 break;
             case 8:
             case 4:
                 int_mask               = mask_as_int8(current_mask());
-                func_avx512_scatter_ps = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_scatter_ps = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_scattersiv8_sf);
                 break;
             default:
@@ -5387,13 +5387,13 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             switch (m_vector_width) {
             case 16:
                 int_mask               = mask_as_int16(current_mask());
-                func_avx512_scatter_pi = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_scatter_pi = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_scatter_dpi_512);
                 break;
             case 8:
             case 4:
                 int_mask               = mask_as_int8(current_mask());
-                func_avx512_scatter_pi = llvm::Intrinsic::getOrInsertDeclaration(
+                func_avx512_scatter_pi = llvm::Intrinsic::getDeclaration(
                     module(), llvm::Intrinsic::x86_avx512_scattersiv8_si);
                 break;
             default:
@@ -5419,7 +5419,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
                 llvm::Value* linear_indices = wide_index;
 
                 llvm::Function* func_avx512_scatter_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpq_512);
                 OSL_ASSERT(func_avx512_scatter_dpq);
 
@@ -5451,7 +5451,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
                 llvm::Value* linear_indices = wide_index;
 
                 llvm::Function* func_avx512_scatter_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpq_512);
                 OSL_ASSERT(func_avx512_scatter_dpq);
 
@@ -5470,7 +5470,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
                 llvm::Value* linear_indices = wide_index;
 
                 llvm::Function* func_avx512_scatter_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpq_512);
                 OSL_ASSERT(func_avx512_scatter_dpq);
 
@@ -5500,7 +5500,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             switch (m_vector_width) {
             case 16: {
                 llvm::Function* func_avx512_scatter_ps
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dps_512);
                 OSL_ASSERT(func_avx512_scatter_ps);
 
@@ -5513,7 +5513,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             }
             case 8: {
                 llvm::Function* func_avx512_scatter_ps
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scattersiv8_sf);
                 OSL_ASSERT(func_avx512_scatter_ps);
 
@@ -5526,7 +5526,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             }
             case 4: {
                 llvm::Function* func_avx512_scatter_ps
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scattersiv8_sf);
                 OSL_ASSERT(func_avx512_scatter_ps);
 
@@ -5556,7 +5556,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             switch (m_vector_width) {
             case 16: {
                 llvm::Function* func_avx512_scatter_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpi_512);
                 OSL_ASSERT(func_avx512_scatter_pi);
 
@@ -5569,7 +5569,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             }
             case 8: {
                 llvm::Function* func_avx512_scatter_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scattersiv8_si);
                 OSL_ASSERT(func_avx512_scatter_pi);
 
@@ -5582,7 +5582,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
             }
             case 4: {
                 llvm::Function* func_avx512_scatter_pi
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scattersiv8_si);
                 OSL_ASSERT(func_avx512_scatter_pi);
 
@@ -5614,7 +5614,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
                     wide_index);
 
                 llvm::Function* func_avx512_scatter_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpq_512);
                 OSL_ASSERT(func_avx512_scatter_dpq);
 
@@ -5647,7 +5647,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
                     wide_index);
 
                 llvm::Function* func_avx512_scatter_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpq_512);
                 OSL_ASSERT(func_avx512_scatter_dpq);
 
@@ -5667,7 +5667,7 @@ LLVM_Util::op_scatter(llvm::Value* wide_val, llvm::Type* src_type,
                     wide_index);
 
                 llvm::Function* func_avx512_scatter_dpq
-                    = llvm::Intrinsic::getOrInsertDeclaration(
+                    = llvm::Intrinsic::getDeclaration(
                         module(), llvm::Intrinsic::x86_avx512_scatter_dpq_512);
                 OSL_ASSERT(func_avx512_scatter_dpq);
 
@@ -6594,7 +6594,7 @@ LLVM_Util::op_zero_if(llvm::Value* cond, llvm::Value* v)
             // inexpensive (0.5 clock) instruction rather than let something more expensive
             // be duplicated.
             // We can use a ternery log operation with a mask set to reproduce the 1st argument.
-            llvm::Function* func = llvm::Intrinsic::getOrInsertDeclaration(
+            llvm::Function* func = llvm::Intrinsic::getDeclaration(
                 module(), (m_vector_width == 16)
                               ? llvm::Intrinsic::x86_avx512_pternlog_d_512
                               : llvm::Intrinsic::x86_avx512_pternlog_d_256);
@@ -6725,7 +6725,7 @@ LLVM_Util::op_fabs(llvm::Value* v)
     llvm::Type* types[] = { v->getType() };
 
     llvm::Function* func
-        = llvm::Intrinsic::getOrInsertDeclaration(module(), llvm::Intrinsic::fabs,
+        = llvm::Intrinsic::getDeclaration(module(), llvm::Intrinsic::fabs,
                                           types);
 
     llvm::Value* fabs_call = builder().CreateCall(func, { v });
@@ -6740,7 +6740,7 @@ LLVM_Util::op_is_not_finite(llvm::Value* v)
 
     if (m_supports_avx512f && v->getType() == type_wide_float()) {
         OSL_ASSERT((m_vector_width == 8) || (m_vector_width == 16));
-        llvm::Value* func = llvm::Intrinsic::getOrInsertDeclaration(
+        llvm::Value* func = llvm::Intrinsic::getDeclaration(
             module(), (v->getType() == type_wide_float())
                           ? ((m_vector_width == 16)
                                  ? llvm::Intrinsic::x86_avx512_fpclass_ps_512

@@ -9,6 +9,10 @@
 #    include <cuda/atomic>
 #endif
 
+#if defined(__HIP__)
+#    include <hip/hip_runtime.h>
+#endif
+
 #include <OSL/encodedtypes.h>
 #include <OSL/oslconfig.h>
 

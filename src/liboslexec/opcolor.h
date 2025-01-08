@@ -142,7 +142,7 @@ private:
 
 
 class OCIOColorSystem {
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP__))
 public:
     OIIO::ColorProcessorHandle load_transform(ustring fromspace,
                                               ustring tospace,

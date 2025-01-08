@@ -149,7 +149,7 @@ bitcast_to_uint (float x)
 
 
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // Perform a bjmix (see OpenImageIO/hash.h) on 4 sets of values at once.
 OSL_FORCEINLINE void
 bjmix(vint4& a, vint4& b, vint4& c)
@@ -289,7 +289,7 @@ reference_inthash (const unsigned int k[N]) {
 	}
 #endif
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // Do four 2D hashes simultaneously.
 inline vint4
 inthash_simd (const vint4& key_x, const vint4& key_y)
@@ -671,7 +671,7 @@ OSL_FORCEINLINE OSL_HOSTDEVICE Dual2<float> select(const bool b, const Dual2<flo
 #endif
 }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // Already provided by oiio/simd.h
 //OSL_FORCEINLINE vint4 select (const vbool4& b, const vint4& t, const vint4& f) {
 //    return blend (f, t, b);
@@ -759,7 +759,7 @@ template <> OSL_FORCEINLINE Dual2<Vec3> negate_if(const Dual2<Vec3> &val, const 
 }
 #endif
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 OSL_FORCEINLINE vfloat4 negate_if (const vfloat4& val, const vint4& b) {
     // Special case negate_if for SIMD -- can do it with bit tricks, no branches
     vint4 highbit (0x80000000);
@@ -776,7 +776,7 @@ OSL_FORCEINLINE Dual2<vfloat4> negate_if (const Dual2<vfloat4>& val, const vint4
 #endif
 
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // Define shuffle<> template that works with Dual2<vfloat4> analogously to
 // how it works for vfloat4.
 template<int i0, int i1, int i2, int i3>
@@ -817,7 +817,7 @@ OSL_FORCEINLINE OSL_HOSTDEVICE T bilerp (VECTYPE abcd, T u, T v) {
     return OIIO::simd::extract<0>(OIIO::lerp (xx,OIIO::simd::shuffle<2>(xx), v));
 }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // Equivalent to OIIO::bilerp (a, b, c, d, u, v), but if abcd are already
 // packed into a vfloat4 and uv are already packed into the first two
 // elements of a vfloat4. We assume VECTYPE is vfloat4, but it also works if
@@ -858,7 +858,7 @@ OSL_FORCEINLINE OSL_HOSTDEVICE int imod(int a, int b) {
 #endif
 }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // imod four values at once
 inline vint4 imod(const vint4& a, int b) {
     vint4 c = a % b;
@@ -881,7 +881,7 @@ OSL_FORCEINLINE OSL_HOSTDEVICE Dual2<float> floorfrac(const Dual2<float> &x, int
     return Dual2<float>(frac, x.dx(), x.dy());
 }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
 // floatfrac for four sets of values at once.
 inline vfloat4 floorfrac(const vfloat4& x, vint4 * i) {
 #if 0
@@ -1073,7 +1073,7 @@ struct HashScalar {
 		);
     }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     // 4 2D hashes at once!
     OSL_FORCEINLINE vint4 operator() (const vint4& x, const vint4& y) const {
         return inthash_simd (x, y);
@@ -1126,7 +1126,7 @@ struct HashVector {
 							   static_cast<unsigned int>(w)));
     }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     // Vector hash of 4 3D points at once
     OSL_FORCEINLINE void operator() (vint4 *result, const vint4& x, const vint4& y) const {
         vint4 h = inthash_simd (x, y);
@@ -1211,7 +1211,7 @@ public:
 		);
     }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     // 4 2D hashes at once!
     vint4 operator() (const vint4& x, const vint4& y) const {
         return inthash_simd (imod(x,m_px), imod(y,m_py));
@@ -1283,7 +1283,7 @@ struct HashVectorPeriodic {
 							   static_cast<unsigned int>(imod (w, m_pw))));
     }
 
-#ifndef __CUDA_ARCH__
+#if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
     // Vector hash of 4 3D points at once
     void operator() (vint4 *result, const vint4& x, const vint4& y) const {
         vint4 h = inthash_simd (imod(x,m_px), imod(y,m_py));

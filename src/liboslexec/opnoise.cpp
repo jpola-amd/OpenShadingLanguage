@@ -746,7 +746,7 @@ struct GenericNoise {
             hashnoise(result.val(), s.val());
             result.clear_d();
         } else {
-#    ifndef __CUDA_ARCH__
+#    if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) 
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
 #    else
             // TODO: find a way to signal this error on the GPU
@@ -794,7 +794,7 @@ struct GenericNoise {
             hashnoise(result.val(), s.val(), t.val());
             result.clear_d();
         } else {
-#    ifndef __CUDA_ARCH__
+#    if ! (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
 #    else
             // TODO: find a way to signal this error on the GPU
@@ -839,7 +839,7 @@ struct GenericPNoise {
             hashnoise(result.val(), s.val(), sp);
             result.clear_d();
         } else {
-#    ifndef __CUDA_ARCH__
+#    if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) 
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
 #    else
             // TODO: find a way to signal this error on the GPU
@@ -873,7 +873,7 @@ struct GenericPNoise {
             hashnoise(result.val(), s.val(), t.val(), sp, tp);
             result.clear_d();
         } else {
-#    ifndef __CUDA_ARCH__
+#    if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) 
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
 #    else
             // TODO: find a way to signal this error on the GPU

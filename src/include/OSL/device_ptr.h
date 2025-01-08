@@ -23,13 +23,13 @@ public:
 
     /// On device, device_ptr can construct from a pointer.
     /// On host, it must be explicitly constructed -- use with caution.
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     device_ptr(T* ptr) : m_ptr(ptr) {}
 #else
     explicit device_ptr(T* ptr) : m_ptr(ptr) {}
 #endif
 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     /// On device, act as a pointer. None of these things are allowed on the
     /// host.
     T* operator->() const { return m_ptr; }

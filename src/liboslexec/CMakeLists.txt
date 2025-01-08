@@ -245,6 +245,48 @@ if (USE_LLVM_BITCODE)
             DESTINATION ${OSL_PTX_INSTALL_DIR})
 
     endif ()
+
+    if (HIP_FOUND)
+    add_definitions (-DOSL_LLVM_HIP_BITCODE)
+
+    # The shadeops are compiled to both LLVM bitcode and PTX, and embedded
+    # in liboslexec in binary format. The bitcode is used to seed the LLVM
+    # module for each shader, and the PTX can be retrieved by the renderer
+    # through the shading system.
+    set (liboslexec_shadeops_srcs
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/llvm_ops.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/opnoise.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/opspline.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/opcolor.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslexec/opmatrix.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslnoise/gabornoise.cpp
+        ${CMAKE_SOURCE_DIR}/src/liboslnoise/simplexnoise.cpp
+    )
+
+    HIP_SHADEOPS_COMPILE ( "shadeops_hip"
+        shadeops_hip_bc
+        shadeops_hip_hsaco
+        "${liboslexec_shadeops_srcs}"
+        ""
+    )
+
+    # Serialize the linked bitcode into a CPP file to be embedded in the current target binary
+    set (shadeops_bc_hip_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.bc.cpp")
+    MAKE_EMBEDDED_CPP( "shadeops_hip_llvm_compiled_ops" ${shadeops_bc_hip_cpp} ${shadeops_hip_bc} )
+    list (APPEND lib_src ${shadeops_bc_hip_cpp})
+
+    # Serialize the linked PTX into a CPP file to be embedded in the current target binary
+    set (shadeops_ptx_hip_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.hsaco.cpp")
+    MAKE_EMBEDDED_CPP( "shadeops_hip_hasco_compiled_ops" ${shadeops_ptx_hip_cpp} ${shadeops_hip_hsaco} )
+    list (APPEND lib_src ${shadeops_ptx_hip_cpp})
+
+    # Installing the shadeops BC isn't necessary since the renderer can
+    # retrieve it through the shading system. But for testing purposes it is
+    # handy to make the BC available offline.
+    install (FILES ${shadeops_hip_hsaco}
+        DESTINATION ${OSL_PTX_INSTALL_DIR})
+
+    endif()
 else ()
     # With MSVC/Mingw, we don't compile llvm_ops.cpp to LLVM bitcode, due
     # to clang being unable to compile MSVC C++ header files at this time.

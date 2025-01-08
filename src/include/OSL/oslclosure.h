@@ -96,7 +96,7 @@ struct OSLEXECPUBLIC ClosureColor {
 /// scaled to add parameters after the end of the struct. Alignment is
 /// set to 16 bytes so that 64 bit pointers and 128 bit SSE types in user
 /// structs have the required alignment.
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP__)
 /// Notice in the OptiX implementation we align this to 8 bytes
 /// so that it matches the alignment of the memory pools.
 struct OSLEXECPUBLIC

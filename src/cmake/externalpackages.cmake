@@ -212,6 +212,36 @@ else ()
     endfunction()
 endif ()
 
+# HIP setup
+
+if (OSL_USE_HIP)
+    checked_find_package (HIP REQUIRED)
+
+    message(STATUS "HIP_PATH = ${HIP_PATH}")
+    message(STATUS "ROCM_PATH = ${ROCM_PATH}")
+    message(STATUS "HIP_PLATFORM = ${HIP_PLATFORM}")
+    message(STATUS "HIP_COMPILER = ${HIP_COMPILER}")
+    message(STATUS "HIP_HIPCC_EXECUTABLE = ${HIP_HIPCC_EXECUTABLE}")
+    
+    set(HIP_INCLUDE_DIRS "${HIP_PATH}/include")
+    set(HIP_LIBRARY_DIR "${HIP_PATH}/lib")
+    
+    include_directories (BEFORE "${HIP_INCLUDE_DIRS}")
+    link_directories ("${HIP_LIBRARY_DIR}")
+    if (NOT HIP_HIPCC_EXECUTABLE)
+        message (FATAL_ERROR "HIP_HIPCC_EXECUTABLE must be set to the path of the HIP compiler")
+    endif ()
+    if (NOT HIP_OPT_FLAG_HIPCC)
+        set (HIP_OPT_FLAG_HIPCC "-O3")
+    endif ()
+    if (NOT HIP_OPT_FLAG_CLANG)
+        set (HIP_OPT_FLAG_CLANG "-O3")
+    endif ()
+    if (NOT HIP_EXTRA_FLAGS)
+        set (HIP_EXTRA_FLAGS "")
+    endif ()
+endif()
+
 
 ###########################################################################
 # Tessil/robin-map

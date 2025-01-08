@@ -15,11 +15,11 @@
 #include <vector>
 
 // Pull in the modified Imath headers and the OSL_HOSTDEVICE macro
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP_DEVICE_COMPILE__)
 #    include <OSL/oslconfig.h>
 #endif
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP_DEVICE_COMPILE__)
 #    include <OSL/hashes.h>
 #endif
 
@@ -1436,7 +1436,7 @@ public:
         return (
             symbols().size() == 0
             && (ops().size() == 0 ||
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
                 // TODO: is this ever run on a device, why special case it?
                 (ops().size() == 1
                  && ustringhash_from(OSL::strhash(ops()[0].opname().c_str()))
@@ -2504,7 +2504,7 @@ tex_interp_to_code(ustringhash modename)
     return mode;
 }
 
-#ifndef __CUDACC__
+#if !(defined(__CUDACC__) || defined(__HIP_DEVICE_COMPILE__))
 inline int
 tex_interp_to_code(ustring modename)
 {
