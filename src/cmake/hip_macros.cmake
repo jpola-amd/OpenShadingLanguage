@@ -171,11 +171,11 @@ function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args)
             -Wno-deprecated-register 
             -Wno-format-security
             -Wno-nan-infinity-disabled
-            -fno-math-errno 
+            -fno-math-errno
             -ffast-math 
             ${HIP_OPT_FLAG_HIPCC} 
-            -S -emit-llvm -fgpu-rdc
-            ${extra_clang_args}
+            -emit-llvm -fgpu-rdc -S 
+            ${extra_clang_args} -c 
             ${src} -o ${asm_hip}
         COMMAND ${LLVM_AS_TOOL} -f -o ${bc_hip} ${asm_hip}
         DEPENDS ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${src}
@@ -210,7 +210,7 @@ endfunction ()
 
 function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
     set (linked_bc "${CMAKE_CURRENT_BINARY_DIR}/linked_${prefix}.bc")
-    set (linked_hsaco "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.bc.hsaco")
+    set (linked_hsaco "${CMAKE_CURRENT_BINARY_DIR}/${prefix}.bc.fatbin")
     set (${output_bc} ${linked_bc} PARENT_SCOPE )
     set (${output_ptx} ${linked_hsaco} PARENT_SCOPE )
 
@@ -232,9 +232,10 @@ function ( HIP_SHADEOPS_COMPILE prefix output_bc output_ptx input_srcs headers )
     # Link all of the individual LLVM bitcode files, and emit PTX for the linked bitcode
     add_custom_command ( OUTPUT ${linked_bc} ${linked_hsaco}
         COMMAND ${LLVM_LINK_TOOL} ${shadeops_bc_list} -o ${linked_bc}
-        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc} -o ${linked_bc}.opt
-        COMMAND ${LLVM_LLC_TOOL} --march=amdgcn -mcpu=${HIP_TARGET_ARCH} -filetype=obj ${linked_bc}.opt -o ${linked_hsaco}
+        COMMAND ${LLVM_OPT_TOOL} ${opt_tool_flags} ${linked_bc} -o ${linked_hsaco}
+        #COMMAND ${LLVM_LLC_TOOL} --march=amdgcn -mcpu=${HIP_TARGET_ARCH} -filetype=obj ${linked_bc} -o ${linked_hsaco}
         DEPENDS ${shadeops_bc_list} ${exec_headers} ${PROJECT_PUBLIC_HEADERS} ${input_srcs} ${headers}
+        COMMENT "Generating HIP bitcode from ${shadeops_bc_list} linked ${linked_bc} -> ${linked_hsaco}"
         # This script converts all of the .weak functions defined in the PTX into .visible functions.
         # COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/src/build-scripts/process-ptx.py"
         #     ${linked_hsaco} ${linked_hsaco}
