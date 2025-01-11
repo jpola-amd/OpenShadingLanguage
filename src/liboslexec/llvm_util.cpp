@@ -431,6 +431,7 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
     , m_new_pass_manager(NULL)
     , m_llvm_exec(NULL)
     , m_nvptx_target_machine(nullptr)
+    , m_amdgcn_target_machine(nullptr)
     , m_vector_width(vector_width)
     , m_llvm_type_native_mask(nullptr)
     , mVTuneNotifier(nullptr)
@@ -583,6 +584,7 @@ LLVM_Util::~LLVM_Util()
     delete m_builder;
     delete m_llvm_debug_builder;
     delete m_nvptx_target_machine;
+    delete m_amdgcn_target_machine;
     module(NULL);
     // DO NOT delete m_llvm_jitmm;  // just the dummy wrapper around the real MM
 }
@@ -1845,7 +1847,52 @@ LLVM_Util::nvptx_target_machine()
     return m_nvptx_target_machine;
 }
 
+llvm::TargetMachine*
+LLVM_Util::amdgcn_target_machine()
+{
+    if (m_amdgcn_target_machine == nullptr)
+    { 
+        llvm::Triple ModuleTriple(module()->getTargetTriple());
+        llvm::TargetOptions options;
+        options.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+        // N.B. 'Standard' only allow fusion of 'blessed' ops (currently just
+        // fmuladd). To truly disable FMA and never fuse FP-ops, we need to
+        // instead use llvm::FPOpFusion::Strict.
+        options.UnsafeFPMath                           = 1;
+        options.NoInfsFPMath                           = 1;
+        options.NoNaNsFPMath                           = 1;
+        options.HonorSignDependentRoundingFPMathOption = 0;
+        options.FloatABIType          = llvm::FloatABI::Default;
+        options.AllowFPOpFusion       = llvm::FPOpFusion::Fast;
+        options.NoZerosInBSS          = 0;
+        options.GuaranteedTailCallOpt = 0;
+        options.UseInitArray = 0;
 
+        std::string error;
+        const llvm::Target* llvm_target
+            = llvm::TargetRegistry::lookupTarget(ModuleTriple.str(), error);
+        OSL_ASSERT(llvm_target
+                   && "AMDGCN compile error: LLVM Target is not initialized");
+
+        m_amdgcn_target_machine = llvm_target->createTargetMachine(
+            ModuleTriple.str(), 
+            HIP_TARGET_ARCH,
+            "", //features
+            options,
+            llvm::Reloc::Static,
+            llvm::CodeModel::Small,
+#if OSL_LLVM_VERSION >= 180
+            llvm::CodeGenOptLevel::Default
+#else
+            llvm::CodeGenOpt::Default
+#endif
+        );
+
+        OSL_ASSERT(m_amdgcn_target_machine
+                   && "Unable to create TargetMachine for AMDGPU");
+    }
+    return m_amdgcn_target_machine;
+}
 
 void*
 LLVM_Util::getPointerToFunction(llvm::Function* func)
@@ -6365,7 +6412,7 @@ LLVM_Util::op_mod(llvm::Value* a, llvm::Value* b)
         || (a->getType() == type_wide_float()
             && b->getType() == type_wide_float())) {
 #if OSL_LLVM_VERSION >= 160
-        if (m_target_isa == TargetISA::NVPTX) {
+        if (m_target_isa == TargetISA::NVPTX || m_target_isa == TargetISA::AMDGCN) {
             // Since llvm/llvm-project@2c3f82b, FRem generates an
             // optix.ptx.testp.infinite.f32 intrinsic that OptiX does not
             // currently implement. Work around with custom code.
@@ -6843,6 +6890,37 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
 #endif
 }
 
+ bool 
+ LLVM_Util::amdgcn_compile_group(llvm::Module* lib_module, const std::string& name,
+                              std::string& out)
+ {
+#if defined(OSL_USE_HIP)
+    llvm::TargetMachine* target_machine = amdgcn_target_machine();
+    llvm::legacy::PassManager mpm;
+    llvm::SmallString<4096> assembly;
+    llvm::raw_svector_ostream assembly_stream(assembly);
+
+    target_machine->addPassesToEmitFile(mpm, assembly_stream,
+                                        nullptr,  // FIXME: Correct?
+                                        llvm::CodeGenFileType::AssemblyFile);
+    mpm.run(*lib_module);
+
+// Process the assembly output if needed
+    
+    // std::istringstream raw_assembly(assembly_stream.str().str());
+    // std::stringstream gcn_stream;
+    // std::string line;
+    // while (std::getline(raw_assembly, line)) {
+    //     gcn_stream << line << std::endl;
+    // }
+    // out = gcn_stream.str();
+    std::cout << "AMDGCN Assembly: \n" << assembly_stream.str().str() << std::endl;
+    out = assembly_stream.str();
+    return true;
+#else
+    return false;
+#endif
+}
 
 
 std::string

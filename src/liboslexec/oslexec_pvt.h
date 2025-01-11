@@ -630,6 +630,7 @@ public:
     TextureSystem* texturesys() const { return m_texturesys; }
 
     bool use_optix() const { return m_use_optix; }
+    bool use_hip() const { return m_use_hip;} 
     bool debug_nan() const { return m_debugnan; }
     bool debug_uninit() const { return m_debug_uninit; }
     bool lockgeom_default() const { return m_lockgeom_default; }
@@ -733,6 +734,20 @@ public:
     int optix_force_inline_thresh() const
     {
         return m_optix_force_inline_thresh;
+    }
+
+     /// Attributes to control optimization for hip
+    bool hip_no_inline() const { return m_hip_no_inline; }
+    bool hip_no_inline_layer_funcs() const
+    {
+        return m_hip_no_inline_layer_funcs;
+    }
+    bool hip_merge_layer_funcs() const { return m_hip_merge_layer_funcs; }
+    bool hip_no_inline_rend_lib() const { return m_hip_no_inline_rend_lib; }
+    int hip_no_inline_thresh() const { return m_hip_no_inline_thresh; }
+    int hip_force_inline_thresh() const
+    {
+        return m_hip_force_inline_thresh;
     }
 
 
@@ -955,7 +970,9 @@ private:
     int m_max_local_mem_KB;           ///< Local storage can a shader use
     int m_compile_report;             ///< Print compilation report?
     bool m_use_optix;                 ///< This is an OptiX-based renderer
+    bool m_use_hip;                   ///< This is a HIP-based renderer
     int m_max_optix_groupdata_alloc;  ///< Maximum OptiX groupdata buffer allocation
+    int m_max_hip_groupdata_alloc;
     bool m_buffer_printf;             ///< Buffer/batch printf output?
     bool m_no_noise;                  ///< Substitute trivial noise calls
     bool m_no_pointcloud;             ///< Substitute trivial pointcloud calls
@@ -973,6 +990,14 @@ private:
     bool m_optix_no_inline_rend_lib;  ///< Disable inlining the rend_lib functions
     int m_optix_no_inline_thresh;  ///< Disable inlining for functions larger than the threshold
     int m_optix_force_inline_thresh;  ///< Force inling for functions smaller than the threshold
+
+    bool m_hip_no_inline;              ///< Disable function inlining
+    bool m_hip_no_inline_layer_funcs;  ///< Disable inlining for group layer funcs
+    bool m_hip_merge_layer_funcs;  ///< Merge layer functions that have only one caller
+    bool m_hip_no_inline_rend_lib;  ///< Disable inlining the rend_lib functions
+    int m_hip_no_inline_thresh;  ///< Disable inlining for functions larger than the threshold
+    int m_hip_force_inline_thresh;  ///< Force inling for functions smaller than the threshold
+
 
     ustring m_colorspace;  ///< What RGB colors mean
 

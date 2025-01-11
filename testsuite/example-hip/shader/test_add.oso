@@ -1,0 +1,37 @@
+OpenShadingLanguage 1.00
+# Compiled by oslc 1.14.3.0dev
+# options: -o shader/test_add.oso
+surface test_add
+oparam	color	Cout	0 0 0		%read{2147483647,-1} %write{2147483647,-1}
+global	point	P	%read{1,1} %write{2147483647,-1}
+global	normal	N	%read{4,4} %write{2147483647,-1}
+global	closure color	Ci	%read{2147483647,-1} %write{6,6}
+local	point	Po	%read{2,2} %write{1,1}
+local	float	n	%read{5,5} %write{3,3}
+const	string	$const1	"myspace"		%read{1,1} %write{2147483647,-1}
+const	string	$const2	"transform"		%read{0,0} %write{2147483647,-1}
+const	string	$const3	"common"		%read{1,1} %write{2147483647,-1}
+temp	point	$tmp1	%read{3,3} %write{2,2}
+const	float	$const5	10		%read{2,2} %write{2147483647,-1}
+temp	closure color	$tmp2	%read{6,6} %write{4,4}
+const	string	$const6	"diffuse"		%read{4,4} %write{2147483647,-1}
+temp	color	$tmp3	%read{6,6} %write{5,5}
+const	color	$const7	1 0 0		%read{5,5} %write{2147483647,-1}
+const	color	$const8	0 1 0		%read{5,5} %write{2147483647,-1}
+code ___main___
+# shader/test_add.osl:6
+#     point Po = transform("myspace", P);
+	functioncall	$const2 2 	%filename{"shader/test_add.osl"} %line{6} %argrw{"r"}
+# /home/jpola/projects/hip-osl/osl-artifacts/debug/share/OSL/shaders/stdosl.h:263
+# point  transform (string to, point p)  { return transform("common",to,p); }
+	transform	Po $const3 $const1 P 	%filename{"/home/jpola/projects/hip-osl/osl-artifacts/debug/share/OSL/shaders/stdosl.h"} %line{263} %argrw{"wrrr"}
+# shader/test_add.osl:7
+#     float n = noise(Po / 10);
+	div		$tmp1 Po $const5 	%filename{"shader/test_add.osl"} %line{7} %argrw{"wrr"}
+	noise		n $tmp1 	%argrw{"wr"}
+# shader/test_add.osl:8
+#     Ci = diffuse(N) * mix(color(1.0, 0.0, 0.0), color(0.0, 1.0, 0.0), n);
+	closure		$tmp2 $const6 N 	%line{8} %argrw{"wrr"}
+	mix		$tmp3 $const7 $const8 n 	%argrw{"wrrr"}
+	mul		Ci $tmp2 $tmp3 	%argrw{"wrr"}
+	end

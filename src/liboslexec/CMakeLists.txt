@@ -247,53 +247,58 @@ if (USE_LLVM_BITCODE)
     endif ()
 
     if (HIP_FOUND)
-    add_definitions (-DOSL_LLVM_HIP_BITCODE)
+        add_definitions (-DOSL_LLVM_HIP_BITCODE)
 
-    # The shadeops are compiled to both LLVM bitcode and PTX, and embedded
-    # in liboslexec in binary format. The bitcode is used to seed the LLVM
-    # module for each shader, and the PTX can be retrieved by the renderer
-    # through the shading system.
-    set (liboslexec_shadeops_srcs
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/llvm_ops.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/opnoise.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/opspline.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/opcolor.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/opmatrix.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/optexture.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslexec/pointcloud.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslnoise/gabornoise.cpp
-        ${CMAKE_SOURCE_DIR}/src/liboslnoise/simplexnoise.cpp
-    )
-    
-    # we don't have the ptx equivalent. Just compile to the bitcode
-    HIP_SHADEOPS_COMPILE ( "shadeops_hip"
-        shadeops_hip_bc
-        shadeops_hip_llvm
-        "${liboslexec_shadeops_srcs}"
-        ""
-    )
+        # The shadeops are compiled to both LLVM bitcode and PTX, and embedded
+        # in liboslexec in binary format. The bitcode is used to seed the LLVM
+        # module for each shader, and the PTX can be retrieved by the renderer
+        # through the shading system.
+        set (liboslexec_shadeops_srcs
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/llvm_ops.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/opnoise.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/opspline.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/opcolor.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/opmatrix.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/optexture.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslexec/pointcloud.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslnoise/gabornoise.cpp
+            ${CMAKE_SOURCE_DIR}/src/liboslnoise/simplexnoise.cpp
+        )
+        
+        # we don't have the ptx equivalent. Just compile to the bitcode
+        HIP_SHADEOPS_COMPILE ( "shadeops_hip"
+            shadeops_hip_bc
+            shadeops_hip_llvm
+            "${liboslexec_shadeops_srcs}"
+            ""
+        )
 
-    message(STATUS "shadeops_hip_bc: ${shadeops_hip_bc}")
-    message(STATUS "shadeops_hip_llvm: ${shadeops_hip_llvm}")
+        message(STATUS "shadeops_hip_bc: ${shadeops_hip_bc}")
+        message(STATUS "shadeops_hip_llvm: ${shadeops_hip_llvm}")
 
-    # Serialize the linked bitcode into a CPP file to be embedded in the current target binary
-    set (shadeops_hip_bc_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.bc.cpp")
-    MAKE_EMBEDDED_CPP( "shadeops_hip_bc_compiled_ops" ${shadeops_hip_bc_cpp} ${shadeops_hip_bc} )
-    list (APPEND lib_src ${shadeops_hip_bc_cpp})
+        # Serialize the linked bitcode into a CPP file to be embedded in the current target binary
+        set (shadeops_hip_bc_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.bc.cpp")
+        MAKE_EMBEDDED_CPP( "shadeops_hip_bc_compiled_ops" ${shadeops_hip_bc_cpp} ${shadeops_hip_bc} )
+        list (APPEND lib_src ${shadeops_hip_bc_cpp})
 
-    set (shadeops_hip_llvm_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.llvm.cpp")
-    MAKE_EMBEDDED_CPP( "shadeops_hip_llvm_compiled_ops" ${shadeops_hip_llvm_cpp} ${shadeops_hip_llvm} )
-    list (APPEND lib_src ${shadeops_hip_llvm_cpp})
-
-
+        set (shadeops_hip_llvm_cpp "${CMAKE_CURRENT_BINARY_DIR}/shadeops_hip.llvm.cpp")
+        MAKE_EMBEDDED_CPP( "shadeops_hip_llvm_compiled_ops" ${shadeops_hip_llvm_cpp} ${shadeops_hip_llvm} )
+        list (APPEND lib_src ${shadeops_hip_llvm_cpp})
 
         
-    # # Installing the shadeops BC isn't necessary since the renderer can
-    # # retrieve it through the shading system. But for testing purposes it is
-    # # handy to make the BC available offline.
-    install (FILES ${shadeops_hip_bc} ${shedops_hip_llvm}
-        DESTINATION ${OSL_PTX_INSTALL_DIR})
 
+            
+        # # Installing the shadeops BC isn't necessary since the renderer can
+        # # retrieve it through the shading system. But for testing purposes it is
+        # # handy to make the BC available offline.
+        install (FILES ${shadeops_hip_bc} ${shadeops_hip_llvm}
+            DESTINATION ${OSL_PTX_INSTALL_DIR})
+
+        foreach(l ${lib_src})
+            message(STATUS "LIB: ${l}")
+        endforeach(l ${lib_src})
+
+    
     endif()
 else ()
     # With MSVC/Mingw, we don't compile llvm_ops.cpp to LLVM bitcode, due
@@ -593,6 +598,7 @@ target_compile_definitions (${local_lib}
     PRIVATE
         OSL_EXPORTS
         CUDA_TARGET_ARCH="${CUDA_TARGET_ARCH}"
+        HIP_TARGET_ARCH="${HIP_TARGET_ARCH}"
         OSL_CUDA_VERSION="${CUDA_VERSION}"
         OSL_OPTIX_VERSION="${OPTIX_VERSION}"
     )

@@ -65,6 +65,7 @@ enum class TargetISA {
     AVX512_noFMA,
     HOST,
     NVPTX,
+    AMDGCN,
     COUNT
 };
 
@@ -272,6 +273,8 @@ public:
     /// Return a pointer to the TargetMachine for NVPTX.  Create the TargetMachine
     /// if it has not yet been created.
     llvm::TargetMachine* nvptx_target_machine();
+
+    llvm::TargetMachine* amdgcn_target_machine();
 
     enum class Linkage {
         External,  // Externally visible
@@ -1031,6 +1034,9 @@ public:
     bool ptx_compile_group(llvm::Module* lib_module, const std::string& name,
                            std::string& out);
 
+    /// Generate AMDGCN for the current Module and return it as a string
+    bool amdgcn_compile_group(llvm::Module* lib_module, const std::string& name,
+                              std::string& out);
     /// Convert all functions in module's bitcode to a string.
     std::string bitcode_string(llvm::Module* module);
 
@@ -1059,7 +1065,7 @@ private:
     void SetupLLVM();
     IRBuilder& builder();
 
-    int m_debug;
+    int m_debug; 
     bool m_dumpasm           = false;
     bool m_jit_fma           = false;
     bool m_jit_aggressive    = false;
@@ -1076,6 +1082,7 @@ private:
     llvm::ExecutionEngine* m_llvm_exec;
     TargetISA m_target_isa = TargetISA::UNKNOWN;
     llvm::TargetMachine* m_nvptx_target_machine;
+    llvm::TargetMachine* m_amdgcn_target_machine;
 
     std::vector<llvm::BasicBlock*> m_return_block;      // stack for func call
     std::vector<llvm::BasicBlock*> m_loop_after_block;  // stack for break

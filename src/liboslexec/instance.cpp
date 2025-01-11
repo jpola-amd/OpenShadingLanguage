@@ -829,7 +829,7 @@ ShaderGroup::setup_interactive_arena(cspan<uint8_t> paramblock)
         m_interactive_arena.reset(new uint8_t[m_interactive_arena_size]);
         memcpy(m_interactive_arena.get(), paramblock.data(),
                m_interactive_arena_size);
-        if (shadingsys().use_optix()) {
+        if (shadingsys().use_optix() || shadingsys().use_hip()) {
             // GPU side
             RendererServices* rs = shadingsys().renderer();
             m_device_interactive_arena.reset(reinterpret_cast<uint8_t*>(

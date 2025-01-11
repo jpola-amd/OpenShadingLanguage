@@ -415,7 +415,7 @@ LLVMGEN(llvm_gen_printf_legacy)
     }
 
 
-#if OSL_USE_OPTIX
+#if defined(OSL_USE_OPTIX)
     // In OptiX, printf currently supports 0 or 1 arguments, and the signature
     // requires 1 argument, so push a null pointer onto the call args if there
     // is no argument.
@@ -1112,7 +1112,7 @@ LLVMGEN(llvm_gen_modulus)
         if (!a || !b)
             return false;
         llvm::Value* r;
-        if (!rop.use_optix() && B.is_constant() && !rop.is_zero(B))
+        if (!(rop.use_optix() || rop.use_hip()) && B.is_constant() && !rop.is_zero(B))
             r = rop.ll.op_mod(a, b);
         else
             r = rop.ll.call_function(safe_mod, a, b);
@@ -4001,7 +4001,7 @@ LLVMGEN(llvm_gen_pointcloud_search)
                 else
                     clear_derivs_of.push_back(&Value);
             }
-        } else if (!rop.use_optix()) {
+        } else if (!(rop.use_optix() || rop.use_hip()) ) {
             //TODO: Implement custom attribute arguments for OptiX
 
             // It is a regular attribute, push it to the arg list

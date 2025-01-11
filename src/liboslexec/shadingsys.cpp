@@ -1129,7 +1129,9 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_max_local_mem_KB(2048)
     , m_compile_report(0)
     , m_use_optix(renderer->supports("OptiX"))
+    , m_use_hip ( renderer->supports("HIP"))
     , m_max_optix_groupdata_alloc(0)
+    , m_max_hip_groupdata_alloc(0)
     , m_buffer_printf(true)
     , m_no_noise(false)
     , m_no_pointcloud(false)
@@ -1144,6 +1146,12 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_optix_no_inline_rend_lib(false)
     , m_optix_no_inline_thresh(100000)
     , m_optix_force_inline_thresh(0)
+    , m_hip_no_inline(false)
+    , m_hip_no_inline_layer_funcs(false)
+    , m_hip_merge_layer_funcs(true)
+    , m_hip_no_inline_rend_lib(false)
+    , m_hip_no_inline_thresh(100000)
+    , m_hip_force_inline_thresh(0)
     , m_colorspace("Rec709")
     , m_stat_opt_locking_time(0)
     , m_stat_specialization_time(0)
@@ -1674,6 +1682,7 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     ATTR_SET("max_local_mem_KB", int, m_max_local_mem_KB);
     ATTR_SET("compile_report", int, m_compile_report);
     ATTR_SET("max_optix_groupdata_alloc", int, m_max_optix_groupdata_alloc);
+    ATTR_SET("max_hip_groupdata_alloc", int, m_max_hip_groupdata_alloc);
     ATTR_SET("buffer_printf", int, m_buffer_printf);
     ATTR_SET("no_noise", int, m_no_noise);
     ATTR_SET("no_pointcloud", int, m_no_pointcloud);
