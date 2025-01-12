@@ -3318,9 +3318,9 @@ LLVM_Util::type_struct_field_at_index(llvm::Type* type, int index)
 
 
 llvm::PointerType*
-LLVM_Util::type_ptr(llvm::Type* type)
+LLVM_Util::type_ptr(llvm::Type* type, unsigned addressSpace)
 {
-    return llvm::PointerType::get(type, 0);
+    return llvm::PointerType::get(type, addressSpace);
 }
 
 llvm::Type*
@@ -6177,7 +6177,9 @@ LLVM_Util::op_store(llvm::Value* val, llvm::Value* ptr)
     // Something bad might happen, and we think it is worth leaving checks.
     // NOTE: this is no longer as useful with opaque pointers, we can only
     // check that ptr is a pointer.
-    if (ptr->getType() != type_ptr(val->getType())) {
+    unsigned addressSpace = ptr->getType()->getPointerAddressSpace();
+
+    if (ptr->getType() != type_ptr(val->getType(), addressSpace)) {
         std::cerr << "We have a type mismatch! op_store ptr->getType()="
                   << std::flush;
         ptr->getType()->print(llvm::errs());

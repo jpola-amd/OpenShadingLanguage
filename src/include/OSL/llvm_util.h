@@ -642,7 +642,7 @@ public:
     llvm::Type* type_struct_field_at_index(llvm::Type* type, int index);
 
     /// Return the llvm::Type that is a pointer to the given llvm type.
-    llvm::PointerType* type_ptr(llvm::Type* type);
+    llvm::PointerType* type_ptr(llvm::Type* type, unsigned addressSpace = 0);
 
     /// Return the llvm::Type that is the wide version of the given llvm type
     llvm::Type* type_wide(llvm::Type* type);

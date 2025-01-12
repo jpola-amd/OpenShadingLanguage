@@ -19,6 +19,7 @@
 int
 HipRenderer::supports(OIIO::string_view feature) const
 {
+    // Change here between OptiX and HIP
     if (feature == "HIP") 
     {
         return true;
