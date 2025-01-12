@@ -6902,21 +6902,30 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
     llvm::SmallString<4096> assembly;
     llvm::raw_svector_ostream assembly_stream(assembly);
 
+    if (target_machine == nullptr) {
+        std::cerr << "AMDGCN target machine is not available" << std::endl;
+        return false;
+    }
+
     target_machine->addPassesToEmitFile(mpm, assembly_stream,
                                         nullptr,  // FIXME: Correct?
                                         llvm::CodeGenFileType::AssemblyFile);
-    mpm.run(*lib_module);
 
-// Process the assembly output if needed
-    
-    // std::istringstream raw_assembly(assembly_stream.str().str());
-    // std::stringstream gcn_stream;
-    // std::string line;
-    // while (std::getline(raw_assembly, line)) {
-    //     gcn_stream << line << std::endl;
-    // }
-    // out = gcn_stream.str();
-    std::cout << "AMDGCN Assembly: \n" << assembly_stream.str().str() << std::endl;
+    mpm.run(*module());
+
+    if (debug() > 2 )
+    {
+        //save the module to a file
+        std::string filename = name + ".gcn.s";
+        std::error_code local_error;
+        llvm::raw_fd_ostream out(filename, local_error, llvm::sys::fs::OF_None);
+        if (!out.has_error()) {
+            llvm::WriteBitcodeToFile(*module(), out);
+        }
+        std::cout << "AMDGCN Assembly: \n" << assembly_stream.str().str() << std::endl;
+        std::cout << "AMDGCN Assembly saved to: " << filename << std::endl;
+    }
+   
     out = assembly_stream.str();
     return true;
 #else

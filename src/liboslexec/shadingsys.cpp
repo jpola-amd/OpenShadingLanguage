@@ -2183,6 +2183,12 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         *(std::string*)val = exists ? group->m_llvm_ptx_compiled_version : "";
         return true;
     }
+    if (name == "hip_compiled_version" && type.basetype == TypeDesc::PTR) {
+        bool exists        = !group->m_llvm_hip_compiled_version.empty();
+        *(std::string*)val = exists ? group->m_llvm_hip_compiled_version : "";
+        return true;
+    }
+
     if (name == "interactive_params" && type.basetype == TypeDesc::PTR) {
         *(void**)val = group->m_interactive_arena.get();
         return true;

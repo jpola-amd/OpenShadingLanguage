@@ -1002,6 +1002,18 @@ LLVMGEN(llvm_gen_div)
     Symbol& A      = *rop.opargsym(op, 1);
     Symbol& B      = *rop.opargsym(op, 2);
 
+    //JPA debug op, A and B and Result
+    // std::cout << "op: " << op.opname() << std::endl;
+    // std::cout << "A: " << A.name() << std::endl;
+    // std::cout << "B: " << B.name() << std::endl;
+    // std::cout << "Result: " << Result.name() << std::endl;
+
+    // // can we know the types:
+    // std::cout << "A type: " << A.typespec().string() << std::endl;
+    // std::cout << "B type: " << B.typespec().string() << std::endl;
+    // std::cout << "Result type: " << Result.typespec().string() << std::endl;
+
+
     TypeDesc type      = Result.typespec().simpletype();
     bool is_float      = Result.typespec().is_float_based();
     int num_components = type.aggregate;
@@ -1037,6 +1049,13 @@ LLVMGEN(llvm_gen_div)
     for (int i = 0; i < num_components; i++) {
         llvm::Value* a = rop.llvm_load_value(A, 0, i, type);
         llvm::Value* b = rop.llvm_load_value(B, 0, i, type);
+        // {
+        //     //JPA: print a, b
+        //     std::cerr << "index i: " << i << std::endl;
+        //     std::cerr << "Loaded values: " << std::endl;
+        //     std::cerr << "a: " << std::flush; a->print(llvm::errs()); std::cerr << std::endl;
+        //     std::cerr << "b: " << std::flush; b->print(llvm::errs()); std::cerr << std::endl;
+        // }
         if (!a || !b)
             return false;
         llvm::Value* a_div_b;
@@ -1067,6 +1086,19 @@ LLVMGEN(llvm_gen_div)
                 = rop.ll.op_sub(ay, a_div_b_mul_by);
             ry = rop.ll.op_mul(binv, ay_minus_a_div_b_mul_by);
         }
+
+        // JPA: Print operation
+        // std::cerr << "index i: " << i << std::endl;
+        // std::cerr << " ----- operands -----" << std::endl;
+        // a->print(llvm::errs()); std::cerr << std::endl;
+        // b->print(llvm::errs()); std::cerr << std::endl;
+        // std::cerr << " ----- result -----" << std::endl;
+        // a_div_b->print(llvm::errs()); std::cerr << std::endl;
+        // if (deriv) {
+        //     std::cerr << " ----- derivs -----" << std::endl;
+        //     rx->print(llvm::errs()); std::cerr << std::endl;
+        //     ry->print(llvm::errs()); std::cerr << std::endl;
+        // }
 
         rop.llvm_store_value(a_div_b, Result, 0, i);
         if (deriv) {

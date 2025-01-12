@@ -260,6 +260,10 @@ BackendLLVM::getLLVMSymbolBase(const Symbol& sym)
             mangled_name, dealiased->unmangled());
         return 0;
     }
+    // auto val = (llvm::Value*) map_iter->second;
+    // std::cout << "*** getLLVMSymbolBase: " << mangled_name << std::endl;
+    // val->print(llvm::errs(), false);
+    // std::cout << std::endl;
     return (llvm::Value*)map_iter->second;
 }
 
@@ -301,11 +305,27 @@ BackendLLVM::getOrAllocateLLVMSymbol(const Symbol& sym)
     AllocationMap::iterator map_iter = named_values().find(mangled_name);
 
     if (map_iter == named_values().end()) {
-        llvm::Value* a = llvm_alloca(sym.typespec(), sym.has_derivs(),
-                                     llnamefmt("{}_mem", mangled_name));
+
+        const auto name_mem =  llnamefmt("{}_mem", mangled_name);
+        llvm::Value* a = llvm_alloca(sym.typespec(), sym.has_derivs(), name_mem);
         named_values()[mangled_name] = a;
+        std::cerr << "Allocating symbol: " << sym.name() << " (" << sym.mangled() <<")" << std::endl;
+        sym.print(std::cerr);
+        sym.print_vals(std::cerr);
+        a->print(llvm::errs(), false);
+        std::cerr << std::endl;
+        std::cerr << std::flush;
         return a;
     }
+
+    std::cerr << "Already found in map: " << sym.name() << " (" << sym.mangled() <<")" << std::endl;
+    auto val = (llvm::Value*) map_iter->second;
+    val->print(llvm::errs(), false);
+    val->printAsOperand(llvm::errs(), false);
+
+    std::cerr << std::flush;
+    
+    
     return map_iter->second;
 }
 
@@ -430,7 +450,9 @@ BackendLLVM::llvm_load_value(llvm::Value* ptr, const TypeSpec& type, int deriv,
     // If it's multi-component (triple or matrix), step to the right field
     if (!type.is_closure_based() && t.aggregate > 1)
         ptr = ll.GEP(element_type, ptr, 0, component);
-
+    // std::cerr << " - " << std::endl;
+    // ptr->print(llvm::errs(), false);
+    // std::cerr << std::endl;
     // Now grab the value
     llvm::Type* component_type = llvm_type(t.scalartype());
     llvm::Value* result        = ll.op_load(component_type, ptr, llname);

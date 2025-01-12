@@ -2055,6 +2055,8 @@ private:
 
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
+    // BC assembly for compiled ShaderGroup
+    std::string m_llvm_hip_compiled_version;
 
     ParamValueList m_pending_params;          // Pending Parameter() values
     std::vector<ParamHints> m_pending_hints;  // ParamHints of pending params

@@ -1240,7 +1240,18 @@ BackendLLVM::build_llvm_code(int beginop, int endop, llvm::BasicBlock* bb)
 {
     if (bb)
         ll.set_insert_point(bb);
-
+    
+    // JPA: Debugging
+    // if (bb)
+    // {
+    //     std::cout << "Basic block: " << bb->getName().str() << std::endl;
+    //     std::cout << "Contains " << bb->size() << " instructions" << std::endl;
+    //     std::cout << "From:" <<  beginop << " to " << endop << std::endl;
+    //     std::cout << "Source: \n"<< std::endl;
+    //     bb->print(llvm::errs()) ;
+    //     std::cout << std::endl;
+    // }
+    
     for (int opnum = beginop; opnum < endop; ++opnum) {
         const Opcode& op        = inst()->ops()[opnum];
         const OpDescriptor* opd = shadingsys().op_descriptor(op.opname());
@@ -1626,6 +1637,7 @@ BackendLLVM::build_llvm_fused_callable(void)
     return ll.current_function();
 }
 
+//JPA: This is where our osl shader is generated in llvm-ir form
 
 llvm::Function*
 BackendLLVM::build_llvm_instance(bool groupentry)
@@ -1635,7 +1647,8 @@ BackendLLVM::build_llvm_instance(bool groupentry)
     std::string unique_layer_name = layer_function_name(group(), *inst());
 
     bool is_entry_layer = group().is_entry_layer(layer());
-    ll.current_function(ll.make_function(
+
+    llvm::Function* function = ll.make_function(
         unique_layer_name,
         !is_entry_layer,  // fastcall for non-entry layer functions
         ll.type_void(),   // return type
@@ -1645,7 +1658,14 @@ BackendLLVM::build_llvm_instance(bool groupentry)
             ll.type_void_ptr(),  // output_base_ptr
             ll.type_int(),
             ll.type_void_ptr(),  // FIXME: interactive_params
-        }));
+        });
+
+    std::cerr << "************************" << std::endl;
+    std::cerr << "Function: " << unique_layer_name << std::endl;
+    function->print(llvm::errs()); std::cerr << std::flush;
+    std::cerr << "************************" << std::endl;
+
+    ll.current_function(function);
 
     if (ll.debug_is_enabled()) {
         const Opcode& mainbegin(inst()->op(inst()->maincodebegin()));
@@ -1653,7 +1673,7 @@ BackendLLVM::build_llvm_instance(bool groupentry)
                                mainbegin.sourceline());
     }
 
-    // Get shader globals and groupdata pointers
+    // Get shader globals and groupdata pointers, and rename the variables
     m_llvm_shaderglobals_ptr = ll.current_function_arg(0);  //arg_it++;
     m_llvm_shaderglobals_ptr->setName("shaderglobals_ptr");
     m_llvm_groupdata_ptr = ll.current_function_arg(1);  //arg_it++;
@@ -1674,6 +1694,14 @@ BackendLLVM::build_llvm_instance(bool groupentry)
 
     llvm::BasicBlock* entry_bb = ll.new_basic_block(unique_layer_name);
     m_exit_instance_block      = NULL;
+
+    std::cerr << "************************" << std::endl;
+    std::cerr << "Basic block: " << entry_bb->getName().str() << std::endl;
+    std::cerr << "Contains " << entry_bb->size() << " instructions" << std::endl;
+    std::cerr << "************************" << std::endl;
+    entry_bb->print(llvm::errs());
+    std::cerr << std::flush;
+
 
     // Set up a new IR builder
     ll.new_builder(entry_bb);
@@ -1718,6 +1746,11 @@ BackendLLVM::build_llvm_instance(bool groupentry)
     m_named_values.clear();
     m_layers_already_run.clear();
     for (auto&& s : inst()->symbols()) {
+
+        std::cerr << "Processing symbol: " << s.name() << std::endl;
+        std::cerr << "details: " << std::endl;
+        s.print(std::cerr);
+        std::cerr << std::endl;
         // Skip constants -- we always inline scalar constants, and for
         // array constants we will just use the pointers to the copy of
         // the constant that belongs to the instance.
@@ -1746,7 +1779,8 @@ BackendLLVM::build_llvm_instance(bool groupentry)
                     && shadingsys().debug_uninit())))
             llvm_assign_initial_value(s);
         // If debugnan is turned on, globals check that their values are ok
-        if (s.symtype() == SymTypeGlobal && shadingsys().debug_nan()) {
+        if (s.symtype() == SymTypeGlobal && shadingsys().debug_nan()) 
+        {
             TypeDesc t = s.typespec().simpletype();
             if (t.basetype
                 == TypeDesc::FLOAT) {  // just check float-based types
@@ -2022,6 +2056,12 @@ BackendLLVM::initialize_llvm_group()
                                              llvm_pass_type(rettype), params,
                                              varargs);
 
+        // std::cerr << "--------------------------------\n";
+        // std::cerr << "Function: " << funcname << "\n";
+        // std::cerr << "--------------------------------\n";
+        // f->print(llvm::errs()); std::cerr << std::flush;
+        // std::cerr << std::flush;
+        
         // Skipping this in the non-JIT OptiX case suppresses an LLVM warning
         if (!(use_optix() || use_hip()))
             ll.add_function_mapping(f, (void*)i->second.function);
@@ -2439,9 +2479,18 @@ BackendLLVM::run()
                 // HIP codegen
             #ifdef OSL_LLVM_CUDA_BITCODE
                 //  shadeops_hip_bc_compiled_ops_block
-                 std::cout << "shadeops_hip_bc_compiled_ops_size: " << shadeops_hip_bc_compiled_ops_size << std::endl;
-                 std::cout << "shadeops_hip_llvm_compiled_ops_size: " << shadeops_hip_llvm_compiled_ops_size << std::endl;
-
+                 std::cerr << "shadeops_hip_bc_compiled_ops_size: " << shadeops_hip_bc_compiled_ops_size << std::endl;
+                 std::cerr << "shadeops_hip_llvm_compiled_ops_size: " << shadeops_hip_llvm_compiled_ops_size << std::endl;
+                
+                    if (ll.module() == nullptr)
+                    {
+                        
+                        std::cerr << "ll.module() is nullptr" << std::endl;
+                    }
+                    else
+                    {
+                        ll.module()->print(llvm::errs(), nullptr);
+                    }
                  llvm::Module* shadeops_module = ll.module_from_bitcode(
                     (char*)shadeops_hip_bc_compiled_ops_block,
                     shadeops_hip_bc_compiled_ops_size, "llvm_ops", &err);
@@ -2568,7 +2617,7 @@ BackendLLVM::run()
         // End of mutex lock, for the OSL_LLVM_NO_BITCODE case
     }
 
-    ll.module()->print(llvm::errs(), nullptr);
+    //ll.module()->print(llvm::errs(), nullptr);
 
     m_stat_llvm_setup_time += timer.lap();
 
@@ -2596,6 +2645,20 @@ BackendLLVM::run()
     }
     shadingsys().m_stat_empty_instances += nlayers - m_num_used_layers;
 
+    {
+       // ShaderInstance* instance = group()[0]
+        for (const auto& op : group()[0]->ops()) {
+            std::cout << "op: " << op.opname() << std::endl;
+            std::cout << "\tMethod: " << op.method() << std::endl;
+            std::cout << "\tNargs: " << op.nargs() << std::endl;
+
+        }
+
+        for (const auto& sym : group()[0]->symbols()) {
+            std::cout << "sym: " << sym.name().c_str() << std::endl;
+        }
+
+    }
     initialize_llvm_group();
 
     // Generate the LLVM IR for each layer.  Skip unused layers.
@@ -2792,6 +2855,16 @@ BackendLLVM::run()
                              group().m_llvm_ptx_compiled_version);
         if (group().m_llvm_ptx_compiled_version.empty()) {
             OSL_ASSERT(0 && "Unable to generate PTX");
+        }
+    } else
+#endif
+
+#if defined(OSL_USE_HIP)
+    if (use_hip()) {
+        ll.amdgcn_compile_group(nullptr, group().name().string(),
+                             group().m_llvm_hip_compiled_version);
+        if (group().m_llvm_hip_compiled_version.empty()) {
+            OSL_ASSERT(0 && "Unable to generate HIP");
         }
     } else
 #endif
