@@ -22,8 +22,10 @@
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
 
-#if OSL_USE_OPTIX
+#if defined(OSL_USE_OPTIX) || defined(OSL_USE_HIP)
 #    include <llvm/Linker/Linker.h>
+#include <llvm/IR/DiagnosticInfo.h>
+#include <llvm/IR/DiagnosticPrinter.h>
 #endif
 
 // Create external declarations for all built-in funcs we may call from LLVM
@@ -2150,6 +2152,8 @@ BackendLLVM::prepare_module_for_amdgcn_jit()
 
         // No-inline the functions registered with the ShadingSystem
         if (is_noinline_fn(fn.getName().str())) {
+            llvm::errs() << "Deleting function body: " << fn.getName() << "\n";
+            fn.print(llvm::errs());
             fn.deleteBody();
             continue;
         }
@@ -2435,6 +2439,8 @@ BackendLLVM::run()
                     "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64");
                 shadeops_module->setTargetTriple("nvptx64-nvidia-cuda");
 
+
+
                 std::unique_ptr<llvm::Module> shadeops_ptr(shadeops_module);
                 llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
                                         llvm::Linker::Flags::None);
@@ -2503,40 +2509,124 @@ BackendLLVM::run()
                 shadeops_module->setTargetTriple("amdgcn-amd-amdhsa");
 
                 std::unique_ptr<llvm::Module> shadeops_ptr(shadeops_module);
-                llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
-                                        llvm::Linker::Flags::None);
+                 // Define the callback function
+                // Define the lambda function for InternalizeCallback
+                // auto InternalizeCallback = [](llvm::Module &M, const llvm::StringSet<> &Symbols) {
+                //     std::cerr << "Internalizing symbols in module: " << M.getName().str() << std::endl;
+                //     for (const auto &Symbol : Symbols) {
+                //         std::cerr << "Symbol: " << Symbol.getKey().str() << std::endl;
+                //     }
+                // };
+
+                // auto diagnosticHandler = [](const llvm::DiagnosticInfo *DI, void *Context) 
+                // {
+                //     llvm::raw_ostream &OS = llvm::errs();
+                //     OS << "LLVM Diagnostic: ";
+                //     switch (DI->getSeverity()) {
+                //         case llvm::DS_Error:
+                //             OS << "Error: ";
+                //             break;
+                //         case llvm::DS_Warning:
+                //             OS << "Warning: ";
+                //             break;
+                //         case llvm::DS_Remark:
+                //             OS << "Remark: ";
+                //             break;
+                //         case llvm::DS_Note:
+                //             OS << "Note: ";
+                //             break;
+                //     }
+                //     llvm::DiagnosticPrinterRawOStream DP(OS);
+                //     DI->print(DP);
+                //     OS << "\n";
+                //     OS.flush();
+                // };
+
+            //     std::string linkErrors;
+            //     bool hadLinkError = false;
+
+            //     auto linkDiagnosticHandler = [](const llvm::DiagnosticInfo *DI, void *Context) {
+            //     auto *errorCollector = static_cast<std::pair<std::string*, bool*>*>(Context);
+            //     std::string *errors = errorCollector->first;
+            //     bool *hadError = errorCollector->second;
+                
+            //     llvm::raw_string_ostream OS(*errors);
+                
+            //     if (DI->getSeverity() == llvm::DS_Error) {
+            //         *hadError = true;
+            //         OS << "Link Error: ";
+            //     } else if (DI->getSeverity() == llvm::DS_Warning) {
+            //         OS << "Link Warning: ";
+            //     }
+                
+            //     llvm::DiagnosticPrinterRawOStream DP(OS);
+            //     DI->print(DP);
+            //     OS << "\n";
+            //     OS.flush();
+            // };
+
+            // auto contextPair = std::make_pair(&linkErrors, &hadLinkError);
+            // ll.module()->getContext().setDiagnosticHandlerCallBack(linkDiagnosticHandler, &contextPair);
+            // shadeops_ptr->getContext().setDiagnosticHandlerCallBack(linkDiagnosticHandler, &contextPair);
+            // ll.context().setDiagnosticHandlerCallBack(linkDiagnosticHandler, &contextPair);
+
+            // llvm::Module* theModule = new llvm::Module("MyEmptyModule", ll.context());
+        
+            // std::unique_ptr<llvm::Module> other_ptr(ll.module());
+            
+            // bool linkStatus = llvm::Linker::linkModules(*theModule, std::move(shadeops_ptr),
+            //                         llvm::Linker::Flags::None);
+
+
+            // bool linkStatus = 
+            llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
+                                     llvm::Linker::Flags::None);
+
+            // if (!linkStatus || hadLinkError)
+            // {
+            //     if (!linkErrors.empty())
+            //     {
+            //         shadingcontext()->errorfmt("Linker errors: %s\n", linkErrors);
+            //     }
+            //     shadingcontext()->errorfmt("HIP linking shadeops did not succeeded\n");
+            //     return;
+            // }
+            // else
+            // {
+            //     shadingcontext()->errorfmt("HIP shadeops linking OK!");
+            // }
+
+            if (err.length())
+                shadingcontext()->errorfmt(
+                    "llvm::parseBitcodeFile returned '{}' for hip rend_lib\n",
+                    err);
+
+            // The renderer may provide additional shadeops bitcode for renderer-specific
+            // functionality ("rend_lib" fuctions). Like the built-in shadeops, the rend_lib
+            // functions may or may not be inlined, depending on the optimization options.
+            std::vector<char>& bitcode = shadingsys().m_lib_bitcode;
+            if (bitcode.size()) {
+                llvm::Module* rend_lib_module = ll.module_from_bitcode(
+                    static_cast<const char*>(bitcode.data()), bitcode.size(),
+                    "hip_rend_lib", &err);
 
                 if (err.length())
                     shadingcontext()->errorfmt(
-                        "llvm::parseBitcodeFile returned '{}' for hip rend_lib\n",
+                        "llvm::parseBitcodeFile returned '{}' for hip render lib llvm_ops\n",
                         err);
 
-                // The renderer may provide additional shadeops bitcode for renderer-specific
-                // functionality ("rend_lib" fuctions). Like the built-in shadeops, the rend_lib
-                // functions may or may not be inlined, depending on the optimization options.
-                std::vector<char>& bitcode = shadingsys().m_lib_bitcode;
-                if (bitcode.size()) {
-                    llvm::Module* rend_lib_module = ll.module_from_bitcode(
-                        static_cast<const char*>(bitcode.data()), bitcode.size(),
-                        "hip_rend_lib", &err);
+                rend_lib_module->setDataLayout(
+                    "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9");
+                rend_lib_module->setTargetTriple("amdgcn-amd-hsa");
 
-                    if (err.length())
-                        shadingcontext()->errorfmt(
-                            "llvm::parseBitcodeFile returned '{}' for hip render lib llvm_ops\n",
-                            err);
-
-                    rend_lib_module->setDataLayout(
-                        "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9");
-                    rend_lib_module->setTargetTriple("amdgcn-amd-hsa");
-
-                    for (llvm::Function& fn : *rend_lib_module) {
-                        fn.addFnAttr("osl-rend_lib-function", "true");
-                    }
-
-                    std::unique_ptr<llvm::Module> rend_lib_ptr(rend_lib_module);
-                    llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
-                                            llvm::Linker::Flags::OverrideFromSrc);
+                for (llvm::Function& fn : *rend_lib_module) {
+                    fn.addFnAttr("osl-rend_lib-function", "true");
                 }
+
+                std::unique_ptr<llvm::Module> rend_lib_ptr(rend_lib_module);
+                llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
+                                        llvm::Linker::Flags::OverrideFromSrc);
+            }
             #else
                 OSL_ASSERT(0 && "Must generate LLVM CUDA bitcode for HIP");
             #endif

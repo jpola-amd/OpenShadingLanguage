@@ -31,6 +31,7 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/DiagnosticPrinter.h>
 #if OSL_LLVM_VERSION >= 100
 #    include <llvm/IR/IntrinsicsX86.h>
 #endif
@@ -129,7 +130,8 @@
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/SymbolRewriter.h>
-
+#include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/raw_ostream.h>
 OSL_NAMESPACE_ENTER
 
 
@@ -415,7 +417,29 @@ struct SetCommandLineOptionsForLLVM {
     }
 };
 
-
+static void LLVMUtilDiagnostics(const llvm::DiagnosticInfo *DI, void *Context) 
+{
+    llvm::raw_ostream &OS = llvm::errs();
+    OS << "LLVM Diagnostic: ";
+    switch (DI->getSeverity()) {
+        case llvm::DS_Error:
+            OS << "Error: ";
+            break;
+        case llvm::DS_Warning:
+            OS << "Warning: ";
+            break;
+        case llvm::DS_Remark:
+            OS << "Remark: ";
+            break;
+        case llvm::DS_Note:
+            OS << "Note: ";
+            break;
+    }
+    llvm::DiagnosticPrinterRawOStream DP(OS);
+    DI->print(DP);
+    OS << "\n";
+    OS.flush();
+}
 
 LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
                      int vector_width)
@@ -452,6 +476,8 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
     {
         OIIO::spin_lock lock(llvm_global_mutex);
         if (!m_thread->llvm_context) {
+            
+            
             m_thread->llvm_context = new llvm::LLVMContext();
 #if OSL_LLVM_VERSION >= 150 && !defined(OSL_LLVM_OPAQUE_POINTERS)
             m_thread->llvm_context->setOpaquePointers(false);
@@ -459,6 +485,9 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
             // to fix this and switch to opaque pointers by llvm 16.
 #endif
             //static SetCommandLineOptionsForLLVM sSetCommandLineOptionsForLLVM;
+
+            //JPA: set diagnostics:
+            m_thread->llvm_context->setDiagnosticHandlerCallBack(LLVMUtilDiagnostics, nullptr);
         }
 
         if (!m_thread->llvm_jitmm) {
@@ -6909,14 +6938,18 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
 
     target_machine->addPassesToEmitFile(mpm, assembly_stream,
                                         nullptr,  // FIXME: Correct?
-                                        llvm::CodeGenFileType::AssemblyFile);
+                                        llvm::CodeGenFileType::ObjectFile);
 
     mpm.run(*module());
+    llvm::raw_string_ostream out_stream(out);
+    module()->print(out_stream, nullptr);
+    return true;
+    //I want to get the module() to be written tou std::string out
 
     if (debug() > 2 )
     {
         //save the module to a file
-        std::string filename = name + ".gcn.s";
+        std::string filename = name + ".gcn.o";
         std::error_code local_error;
         llvm::raw_fd_ostream out(filename, local_error, llvm::sys::fs::OF_None);
         if (!out.has_error()) {
@@ -6926,7 +6959,7 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
         std::cout << "AMDGCN Assembly saved to: " << filename << std::endl;
     }
    
-    out = assembly_stream.str();
+    //out = assembly_stream.str();
     return true;
 #else
     return false;

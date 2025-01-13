@@ -1,6 +1,9 @@
 
 #include <iostream>
 #include <sstream>
+#include <fstream>
+#include <cstdint>
+#include <vector>
 #include <hip/hip_runtime.h>
 
 #include <OSL/genclosure.h>
@@ -75,6 +78,18 @@ int main(int argc, char *argv[])
         std::cerr << "Usage: " << argv[0] << " <oso shader>\n";
         return 1;
     }
+
+    constexpr int deviceId = 0;
+
+    HIP_CHECK(hipInit(0));
+    HIP_CHECK(hipSetDevice(deviceId));
+    hipStream_t stream;
+    HIP_CHECK(hipStreamCreate(&stream));
+
+    hipDeviceProp_t properties{};
+    HIP_CHECK(hipGetDeviceProperties(&properties, deviceId));
+
+    std::cout << "Using device id: " << deviceId << " " << properties.name << std::endl;
 
     HipRenderer renderer;
     auto textureSystem = OIIO::TextureSystem::create();
@@ -169,9 +184,92 @@ int main(int argc, char *argv[])
 
     std::string trampoline_bc = build_trampoline(*shaderGroup, init_name, entry_name);
 
-    // compile the device side code for the renderer
+    //link everything together
+    std::vector<uint8_t> hip_fatbin; 
+    // there is a problem with many functions. The hip_gcn_shader should be linked internally with hip_llvm_ops. 
+    // but due to problem with executin llvm::Linker::linkModules() llvm_instance.cpp:L2582
+    // i have to link it here manually.
+    // There are also some missing definitions. The critical are the printf and variations of this function. 
+    // It must be working in order to parse strings and capture string params. 
+    hiprtcLinkState linkState;
+    HIPRTC_CHECK(hiprtcLinkCreate(0, nullptr, nullptr, &linkState));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, hip_llvm_ops, hip_llvm_ops_size, "hip_llvm_ops", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddFile(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, "HipRenderer.bc", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddFile(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, "RenderLib.bc", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, trampoline_bc.data(), trampoline_bc.size(), "trampoline.bc", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, hip_gcn_shader.data(), hip_gcn_shader.size(), "shader.bc", 0, nullptr, nullptr));
+
+    {
+        void* code { nullptr };
+        size_t size { 0 };
+
+        HIPRTC_CHECK(hiprtcLinkComplete(linkState, &code, &size));
+
+        //JPA: This is stupid and not intuitive. the owner of the code_ptr and size is the linker. 
+        // Copy the data before destroying the linker
+        if (size == 0)
+        {
+            std::cerr << "HIPRTC Error: the HIP fatbin size is 0" << std::endl;
+            HIPRTC_CHECK(hiprtcLinkDestroy(linkState)); 
+            return EXIT_FAILURE;
+        }
+
+        hip_fatbin.resize(size);
+        memcpy(hip_fatbin.data(), code, size);
+
+        //save the code for further analysis
+        std::ofstream outFile("hip_fatbin.bin", std::ios::out | std::ios::binary);
+        if (outFile.is_open())
+        {
+            outFile.write(reinterpret_cast<const char*>(hip_fatbin.data()), hip_fatbin.size());
+            outFile.close();
+        }
+        else{
+            std::cerr << "Proble with opening hip_fatbin.bin file for writing compiled code" << std::endl;
+        }
+
+        HIPRTC_CHECK(hiprtcLinkDestroy(linkState)); 
+    }
+
+    
+    hipModule_t module {nullptr};
+    HIP_CHECK(hipModuleLoadData(&module, hip_fatbin.data()));
+    
+    hipFunction_t kernel_render_entry{nullptr};
+    HIP_CHECK(hipModuleGetFunction(&kernel_render_entry, module, "shade"));
+
+    // now we can render
+    size_t stack_size {0};
+    HIP_CHECK(hipDeviceGetLimit(&stack_size, hipLimitStackSize));
+    HIP_CHECK(hipDeviceSetLimit(hipLimitStackSize, 4096));
+
+    int w = 512;
+    int h = 512;
+    hipDeviceptr_t d_outputBuffer {nullptr};
+    
+    HIP_CHECK(hipMalloc(&d_outputBuffer, w*h*3*sizeof(float)));
+    HIP_SYNC_CHECK();
+    unsigned int  block_size {8};
+    unsigned int num_blocks_x = static_cast<unsigned int>(w) / block_size;
+    unsigned int num_blocks_y = static_cast<unsigned int>(h) / block_size;
+
+    dim3 gridSize(num_blocks_x, num_blocks_y, 1u);
+    dim3 blockSize(block_size, block_size, 1u);
+
+    void* params [] = {
+        &d_outputBuffer,
+        &w,
+        &h
+    };
+
+    HIP_CHECK(hipLaunchKernel(kernel_render_entry, gridSize, blockSize, params, 0, stream));
+        
+    HIP_SYNC_CHECK();
+
 
     std::cout << "\n\n-----------End of the program---------\n\n" << std::endl << std::flush;
+    HIP_CHECK(hipFree(d_outputBuffer));                 
+    
 
     return 0;
 }

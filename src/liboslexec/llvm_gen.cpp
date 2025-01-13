@@ -415,11 +415,11 @@ LLVMGEN(llvm_gen_printf_legacy)
     }
 
 
-#if defined(OSL_USE_OPTIX)
+#if defined(OSL_USE_OPTIX) || defined(OSL_USE_HIP)
     // In OptiX, printf currently supports 0 or 1 arguments, and the signature
     // requires 1 argument, so push a null pointer onto the call args if there
     // is no argument.
-    if (rop.use_optix() && arg == format_arg + 1) {
+    if ((rop.use_optix() || rop.use_hip()) && arg == format_arg + 1) {
         call_args.push_back(rop.ll.void_ptr_null());
         // we push the size of the arguments on the stack
         optix_size += sizeof(uint64_t);
@@ -433,8 +433,8 @@ LLVMGEN(llvm_gen_printf_legacy)
     }
 
     // Now go back and put the new format string in its place
-#if OSL_USE_OPTIX
-    if (rop.use_optix()) {
+#if (OSL_USE_OPTIX) || defined(OSL_USE_HIP)
+    if (rop.use_optix() || rop.use_hip()) {
         // In OptiX7+ case, we do this:
         // void* args = { args_size, arg0, arg1, arg2 };
         // (where args_size is the size of arg0 + arg1 + arg2...)
@@ -800,7 +800,7 @@ LLVMGEN(llvm_gen_print_fmt)
 
 LLVMGEN(llvm_gen_printf)
 {
-    if (rop.use_optix())
+    if (rop.use_optix() || rop.use_hip())
         return llvm_gen_printf_legacy(rop, opnum);
     else
         return llvm_gen_print_fmt(rop, opnum);

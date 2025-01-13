@@ -42,16 +42,16 @@ typedef unsigned long long devicePtr;
 typedef unsigned int devicePtr;
 #endif 
 
-namespace pvt {
-extern __device__ hipDeviceptr_t s_color_system;
-extern __device__ devicePtr osl_printf_buffer_start;
-extern __device__ devicePtr osl_printf_buffer_end;
-extern __device__ uint64_t test_str_1;
-extern __device__ uint64_t test_str_2;
-extern __device__ uint64_t num_named_xforms;
-extern __device__ hipDeviceptr_t xform_name_buffer;
-extern __device__ hipDeviceptr_t xform_buffer;
-}  // namespace pvt
+// namespace pvt {
+// __device__ hipDeviceptr_t s_color_system;
+// __device__ devicePtr osl_printf_buffer_start;
+// __device__ devicePtr osl_printf_buffer_end;
+// __device__ uint64_t test_str_1;
+// __device__ uint64_t test_str_2;
+// __device__ uint64_t num_named_xforms;
+// __device__ hipDeviceptr_t xform_name_buffer;
+// __device__ hipDeviceptr_t xform_buffer;
+// }  // namespace pvt
 
 OSL_NAMESPACE_EXIT
 

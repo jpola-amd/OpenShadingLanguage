@@ -14,19 +14,19 @@
 
 OSL_NAMESPACE_ENTER
 namespace pvt {
-extern __device__ hipDeviceptr_t s_color_system;
-extern __device__ devicePtr osl_printf_buffer_start;
-extern __device__ devicePtr osl_printf_buffer_end;
-extern __device__ uint64_t test_str_1;
-extern __device__ uint64_t test_str_2;
-extern __device__ uint64_t num_named_xforms;
-extern __device__ hipDeviceptr_t xform_name_buffer;
-extern __device__ hipDeviceptr_t xform_buffer;
+__device__ hipDeviceptr_t s_color_system {0};
+__device__ devicePtr osl_printf_buffer_start {0};
+__device__ devicePtr osl_printf_buffer_end {0};
+__device__ uint64_t test_str_1 {0};
+__device__ uint64_t test_str_2 {0};
+__device__ uint64_t num_named_xforms {0};
+__device__ hipDeviceptr_t xform_name_buffer {0};
+__device__ hipDeviceptr_t xform_buffer {0};
 }  // namespace pvt
 OSL_NAMESPACE_EXIT
 
 
-// Taken from the SimplePool class
+// // Taken from the SimplePool class
 __device__ static inline size_t
 alignment_offset_calc(void* ptr, size_t alignment)
 {
@@ -369,19 +369,19 @@ osl_get_texture_options(void* sg_)
     return 0;
 }
 
-__device__ void
-osl_texture_set_interp_code(void* opt, int mode)
-{
-    // ((TextureOpt *)opt)->interpmode = (TextureOpt::InterpMode)mode;
-}
+// __device__ void
+// osl_texture_set_interp_code(void* opt, int mode)
+// {
+//     // ((TextureOpt *)opt)->interpmode = (TextureOpt::InterpMode)mode;
+// }
 
 
-__device__ void
-osl_texture_set_stwrap_code(void* opt, int mode)
-{
-    //((TextureOpt *)opt)->swrap = (TextureOpt::Wrap)mode;
-    //((TextureOpt *)opt)->twrap = (TextureOpt::Wrap)mode;
-}
+// __device__ void
+// osl_texture_set_stwrap_code(void* opt, int mode)
+// {
+//     //((TextureOpt *)opt)->swrap = (TextureOpt::Wrap)mode;
+//     //((TextureOpt *)opt)->twrap = (TextureOpt::Wrap)mode;
+// }
 
 
 __forceinline__ __device__ float3
@@ -401,22 +401,22 @@ make_float3(const float4& a)
 extern __device__ float4
 osl_tex2DLookup(void* handle, float s, float t);
 
-__device__ int
-osl_texture(void* sg_, const char* name, void* handle, void* opt_, float s,
-            float t, float dsdx, float dtdx, float dsdy, float dtdy, int chans,
-            void* result, void* dresultdx, void* dresultdy, void* alpha,
-            void* dalphadx, void* dalphady, void* ustring_errormessage)
-{
-    if (!handle)
-        return 0;
-    // cudaTextureObject_t texID = cudaTextureObject_t(handle);
-    float4 fromTexture = osl_tex2DLookup(handle, s, t);
-    // see note above
-    // float4 fromTexture = tex2D<float4>(texID, s, t);
-    *((float3*)result) = make_float3(fromTexture.x, fromTexture.y,
-                                     fromTexture.z);
-    return 1;
-}
+// __device__ int
+// osl_texture(void* sg_, const char* name, void* handle, void* opt_, float s,
+//             float t, float dsdx, float dtdx, float dsdy, float dtdy, int chans,
+//             void* result, void* dresultdx, void* dresultdy, void* alpha,
+//             void* dalphadx, void* dalphady, void* ustring_errormessage)
+// {
+//     if (!handle)
+//         return 0;
+//     // cudaTextureObject_t texID = cudaTextureObject_t(handle);
+//     float4 fromTexture = osl_tex2DLookup(handle, s, t);
+//     // see note above
+//     // float4 fromTexture = tex2D<float4>(texID, s, t);
+//     *((float3*)result) = make_float3(fromTexture.x, fromTexture.y,
+//                                      fromTexture.z);
+//     return 1;
+// }
 
 
 

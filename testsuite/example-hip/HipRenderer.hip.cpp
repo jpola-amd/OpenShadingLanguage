@@ -2,6 +2,11 @@
 #include "RenderLib.hpp"
 #include <OSL/oslclosure.h>
 
+#include <OSL/rendererservices.h>
+#include <OSL/rs_free_function.h>
+
+
+
 // these trampolines will be linked in by the renderer
 extern "C" __device__ void
 __osl__init(ShaderGlobals*, void*);
@@ -143,3 +148,18 @@ osl_tex2DLookup(void* handle, float s, float t)
     hipTextureObject_t texID = hipTextureObject_t(handle);
     return tex2D<float4>(texID, s, t);
 }
+
+
+// __device__ void
+// osl_printf(void* sg_, char* fmt_str, void* args)
+// {
+//     if (threadIdx.x == 0 && threadIdx.y == 0)
+//         printf(fmt_str, (const char*)args);
+// }
+
+extern "C" 
+__device__
+ void osl_gen_printfmt(void* arg1, int64_t arg2, int32_t arg3, void* arg4, int32_t arg5, void* arg6)
+ {
+
+ }
