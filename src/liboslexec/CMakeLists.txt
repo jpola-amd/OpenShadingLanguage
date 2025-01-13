@@ -599,6 +599,7 @@ target_compile_definitions (${local_lib}
         OSL_EXPORTS
         CUDA_TARGET_ARCH="${CUDA_TARGET_ARCH}"
         HIP_TARGET_ARCH="${HIP_TARGET_ARCH}"
+        OSL_HIP_VERSION="${HIP_VERSION}"
         OSL_CUDA_VERSION="${CUDA_VERSION}"
         OSL_OPTIX_VERSION="${OPTIX_VERSION}"
     )

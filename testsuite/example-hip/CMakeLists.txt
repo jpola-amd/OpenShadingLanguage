@@ -92,6 +92,7 @@ include(hip_macros)
 set(bitcode_sources 
     "${CMAKE_CURRENT_SOURCE_DIR}/op.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RenderLib.hip.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/HipRenderer.hip.cpp"
 )
 
 foreach(bitcode_src ${bitcode_sources})
@@ -111,6 +112,7 @@ set(sources
     HipRenderer.hpp
     RenderLib.hpp
     StringHash.hpp
+    Assert.hpp
 )
 
 add_executable(example ${sources})

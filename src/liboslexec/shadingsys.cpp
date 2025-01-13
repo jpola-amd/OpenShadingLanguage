@@ -55,6 +55,11 @@ extern int shadeops_cuda_ptx_compiled_ops_size;
 extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 #endif
 
+#ifdef OSL_LLVM_HIP_BITCODE
+extern int shadeops_hip_llvm_compiled_ops_size;
+extern unsigned char shadeops_hip_llvm_compiled_ops_block[];
+#endif
+
 
 OSL_NAMESPACE_ENTER
 
@@ -2040,6 +2045,10 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
             deps += ",OptiX-NONE";
         else
             deps += ",OptiX-" OSL_OPTIX_VERSION;
+        if (!strcmp(OSL_HIP_VERSION, ""))
+            deps += ",HIP-NONE";
+        else
+            deps += ",HIP-" OSL_HIP_VERSION;
         *(const char**)val = ustring(deps).c_str();
         return true;
     }
@@ -2051,6 +2060,18 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
     }
     if (name == "shadeops_cuda_ptx_size" && type.basetype == TypeDesc::INT) {
         *(int*)val = shadeops_cuda_ptx_compiled_ops_size;
+        return true;
+    }
+#endif
+
+#if defined(OSL_LLVM_HIP_BITCODE)
+    if (name == "shadeops_hip_llvm" && type.basetype == TypeDesc::PTR) {
+        *(const char**)val = reinterpret_cast<const char*>(
+            shadeops_hip_llvm_compiled_ops_block);
+        return true;
+    }
+    if (name == "shadeops_hip_llvm_size" && type.basetype == TypeDesc::INT) {
+        *(int*)val = shadeops_hip_llvm_compiled_ops_size;
         return true;
     }
 #endif

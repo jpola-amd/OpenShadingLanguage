@@ -125,14 +125,11 @@ extern unsigned char osl_llvm_compiled_rs_dependent_ops_block[];
 #ifdef OSL_LLVM_CUDA_BITCODE
 extern int shadeops_cuda_llvm_compiled_ops_size;
 extern unsigned char shadeops_cuda_llvm_compiled_ops_block[];
+#endif
 
-extern int shadeops_hip_llvm_compiled_ops_size;
-extern unsigned char shadeops_hip_llvm_compiled_ops_block[];
-
+#ifdef OSL_LLVM_HIP_BITCODE
 extern int shadeops_hip_bc_compiled_ops_size;
 extern unsigned char shadeops_hip_bc_compiled_ops_block[];
-
-
 #endif
 
 using namespace OSL::pvt;
@@ -2477,23 +2474,22 @@ BackendLLVM::run()
             else if (use_hip())
             {
                 // HIP codegen
-            #ifdef OSL_LLVM_CUDA_BITCODE
+            #ifdef OSL_LLVM_HIP_BITCODE
                 //  shadeops_hip_bc_compiled_ops_block
-                 std::cerr << "shadeops_hip_bc_compiled_ops_size: " << shadeops_hip_bc_compiled_ops_size << std::endl;
-                 std::cerr << "shadeops_hip_llvm_compiled_ops_size: " << shadeops_hip_llvm_compiled_ops_size << std::endl;
-                
-                    if (ll.module() == nullptr)
-                    {
-                        
-                        std::cerr << "ll.module() is nullptr" << std::endl;
-                    }
-                    else
-                    {
-                        ll.module()->print(llvm::errs(), nullptr);
-                    }
-                 llvm::Module* shadeops_module = ll.module_from_bitcode(
+                std::cerr << "shadeops_hip_bc_compiled_ops_size: " << shadeops_hip_bc_compiled_ops_size << std::endl;
+                if (ll.module() == nullptr)
+                {
+                    
+                    std::cerr << "ll.module() is nullptr" << std::endl;
+                }
+                else
+                {
+                    ll.module()->print(llvm::errs(), nullptr);
+                }
+                llvm::Module* shadeops_module = ll.module_from_bitcode(
                     (char*)shadeops_hip_bc_compiled_ops_block,
-                    shadeops_hip_bc_compiled_ops_size, "llvm_ops", &err);
+                    shadeops_hip_bc_compiled_ops_size, "llvm_ops", &err
+                );
 
                 if (err.length())
                 {

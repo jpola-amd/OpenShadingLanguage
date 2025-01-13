@@ -1,5 +1,6 @@
 
 #include <iostream>
+#include <sstream>
 #include <hip/hip_runtime.h>
 
 #include <OSL/genclosure.h>
@@ -16,6 +17,7 @@
 #include "HipRenderer.hpp"
 #include "ClosureIDs.hpp"
 
+#include "Assert.hpp"
 
 using namespace OIIO;
 
@@ -64,7 +66,7 @@ struct DebugParams {
 
 bool RegisterClosures(OSL::ShadingSystem &shadingSystem);
 
-
+std::string build_trampoline(OSL::ShaderGroup& group, std::string init_name, std::string entry_name);
 
 int main(int argc, char *argv[])
 {
@@ -93,12 +95,14 @@ int main(int argc, char *argv[])
     shadingSystem.attribute("llvm_output_bitcode", 3);
     
 
-    OIIO::string_view shader_name = argv[1];
-    OIIO::string_view layer_name = shader_name;
-
+    OIIO::string_view shader_path = argv[1];
+    // name of the shader can't have any special chars like / or \ or .
+    OIIO::string_view layer_name = OIIO::Filesystem::filename(shader_path);
+    //remove the extension
+    layer_name = OIIO::Filesystem::replace_extension(layer_name, "");
 
     OSL::ShaderGroupRef shaderGroup = shadingSystem.ShaderGroupBegin("");
-    shadingSystem.Shader(*shaderGroup, "surface", shader_name, layer_name);
+    shadingSystem.Shader(*shaderGroup, "surface", shader_path, layer_name);
     shadingSystem.ShaderGroupEnd(*shaderGroup);
 
     OSL::PerThreadInfo* thread_info = shadingSystem.create_thread_info();
@@ -108,13 +112,129 @@ int main(int argc, char *argv[])
     memset((char*)&sg, 0, sizeof(OSL::ShaderGlobals));
     shadingSystem.optimize_group(shaderGroup.get(), nullptr, true);
 
-    // now we should have it JITted
+    
+    constexpr bool run = false;
+    if (!shadingSystem.execute(*ctx, *shaderGroup, sg, run))
+    {
+        std::cerr << "Could not execute shader\n";
+        return 1;
+    }
+
+
 
     shadingSystem.release_context(ctx);  // don't need this anymore for now
     shadingSystem.destroy_thread_info(thread_info);
 
+    
+    std::string hip_gcn_shader;
+    if (!shadingSystem.getattribute(shaderGroup.get(), "hip_compiled_version",
+                         TypeDesc::PTR, &hip_gcn_shader)) {
+        std::cerr << "Error getting shader group bc" << std::endl;
+        return 1;
+    }
+    // JPA: We can query the shader group
+
+    // Get the entry points from the ShadingSystem. The names are
+    // auto-generated and mangled, so will be different for every shader group.
+    std::string init_name, entry_name;
+    if (!shadingSystem.getattribute(shaderGroup.get(), "group_init_name", init_name)) {
+        std::cerr << "Error getting shader group init name" << std::endl;
+        return 1;
+    }
+
+    if (!shadingSystem.getattribute(shaderGroup.get(), "group_entry_name", entry_name)) {
+        std::cerr << "Error getting shader group entry name" << std::endl;
+        return 1;
+    }
+
+    std::cout << "init_name: " << init_name << std::endl;
+    std::cout << "entry_name: " << entry_name << std::endl;
+
+    // JPA: Here is how we can query the shading system itself.
+    int hip_llvm_ops_size {0};
+    if (!shadingSystem.getattribute("shadeops_hip_llvm_size", TypeDesc::INT, (void*)&hip_llvm_ops_size))
+    {
+        std::cerr << "Error getting hip llvm ops size" << std::endl;
+        return 1;
+
+    };
+
+    char* hip_llvm_ops {nullptr};
+    if (!shadingSystem.getattribute("shadeops_hip_llvm", TypeDesc::PTR, &hip_llvm_ops))
+    {
+        std::cerr << "Error getting hip llvm ops" << std::endl;
+        return 1;
+    };
+
+
+    std::string trampoline_bc = build_trampoline(*shaderGroup, init_name, entry_name);
+
+    // compile the device side code for the renderer
+
+    std::cout << "\n\n-----------End of the program---------\n\n" << std::endl << std::flush;
 
     return 0;
+}
+
+const char* hip_compile_options[] = { 
+    "--offload-arch=gfx1030",
+    "-ffast-math", "-fgpu-rdc", "-emit-llvm", "-c", 
+    "-D__HIP_PLATFORM_AMD",
+    "--std=c++17" 
+};
+
+
+
+std::string
+build_trampoline(OSL::ShaderGroup& group, std::string init_name,
+                     std::string entry_name)
+{
+
+    std::stringstream ss;
+    ss << "class ShaderGlobals;\n";
+    ss << "extern \"C\" __device__ void " << init_name
+       << "(ShaderGlobals*,void*);\n";
+    ss << "extern \"C\" __device__ void " << entry_name
+       << "(ShaderGlobals*,void*);\n";
+    ss << "extern \"C\" __device__ void __osl__init(ShaderGlobals* sg, void* "
+          "params) { "
+       << init_name << "(sg, params); }\n";
+    ss << "extern \"C\" __device__ void __osl__entry(ShaderGlobals* sg, void* "
+          "params) { "
+       << entry_name << "(sg, params); }\n";
+
+    auto code = ss.str();
+
+    hiprtcProgram trampolineProgram;
+
+    constexpr int num_compile_flags = int(sizeof(hip_compile_options) / sizeof(hip_compile_options[0]));
+    size_t hip_log_size;
+    HIPRTC_CHECK(hiprtcCreateProgram(&trampolineProgram, code.c_str(),
+                                   "trampoline", 0, nullptr, nullptr));
+    auto compileResult = hiprtcCompileProgram(trampolineProgram, num_compile_flags,
+                                             hip_compile_options);
+
+    if (compileResult != HIPRTC_SUCCESS) {
+        HIPRTC_CHECK(hiprtcGetProgramLogSize(trampolineProgram, &hip_log_size));
+        std::vector<char> hip_log(hip_log_size + 1);
+        HIPRTC_CHECK(hiprtcGetProgramLog(trampolineProgram, hip_log.data()));
+        hip_log.back() = 0;
+        std::stringstream ss;
+        ss << "hiprtcCompileProgram failure for: " << code
+           << "====================================\n"
+           << hip_log.data();
+        throw std::runtime_error(ss.str());
+    }
+
+
+    size_t bitcode_size;
+    HIPRTC_CHECK(hiprtcGetBitcodeSize(trampolineProgram, &bitcode_size));
+    std::vector<char> bitcode(bitcode_size);
+    HIPRTC_CHECK(hiprtcGetBitcode(trampolineProgram, bitcode.data()));
+    HIPRTC_CHECK(hiprtcDestroyProgram(&trampolineProgram));
+
+    std::string trampoline_bc(bitcode.begin(), bitcode.end());
+    return trampoline_bc;
 }
 
 bool RegisterClosures(OSL::ShadingSystem &shadingSystem)
