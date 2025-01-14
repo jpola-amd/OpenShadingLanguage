@@ -120,9 +120,15 @@ shade(float3* Cout, int w, int h)
     *(int*)&closure_pool[0] = 0;
     sg.renderstate          = &closure_pool[0];
 
+    if (thread_id == 0)
+        printf("about to run _osl_init\n");
     // Run the shader
     __osl__init(&sg, params);
     __osl__entry(&sg, params);
+
+    if (thread_id == 0)
+        printf("After shading to run _osl_init\n");
+    
 
     // the test shader creates a single diffuse closure, weighted by a colour
     // noise pattern. Extract the weight from the mul closure and write it to

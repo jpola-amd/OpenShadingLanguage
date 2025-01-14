@@ -71,6 +71,18 @@ bool RegisterClosures(OSL::ShadingSystem &shadingSystem);
 
 std::string build_trampoline(OSL::ShaderGroup& group, std::string init_name, std::string entry_name);
 
+
+void SaveBitcode(const char* fileName, const char* dataPtr, size_t size)
+{
+    std::ofstream out(fileName, std::ios::out | std::ios::binary);
+    if (out.is_open()) {
+        out.write(dataPtr, size);
+        out.close();
+    } else {
+        std::cerr << "Error opening file: " << fileName << std::endl;
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -181,7 +193,7 @@ int main(int argc, char *argv[])
         return 1;
     };
 
-
+    // ----------------------- RUNTIME COMPILATION ------------------------------------
     std::string trampoline_bc = build_trampoline(*shaderGroup, init_name, entry_name);
 
     //link everything together
@@ -191,6 +203,12 @@ int main(int argc, char *argv[])
     // i have to link it here manually.
     // There are also some missing definitions. The critical are the printf and variations of this function. 
     // It must be working in order to parse strings and capture string params. 
+
+    //Save all the components before linking;
+    SaveBitcode("hip_llvm_ops.bc", hip_llvm_ops, hip_llvm_ops_size);
+    SaveBitcode("trampoline.bc", trampoline_bc.data(), trampoline_bc.size());
+    SaveBitcode("hip_gcn_shader.bc", hip_gcn_shader.data(), hip_gcn_shader.size());
+
     hiprtcLinkState linkState;
     HIPRTC_CHECK(hiprtcLinkCreate(0, nullptr, nullptr, &linkState));
     HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, hip_llvm_ops, hip_llvm_ops_size, "hip_llvm_ops", 0, nullptr, nullptr));
@@ -238,7 +256,8 @@ int main(int argc, char *argv[])
     hipFunction_t kernel_render_entry{nullptr};
     HIP_CHECK(hipModuleGetFunction(&kernel_render_entry, module, "shade"));
 
-    // now we can render
+
+    //now we can render
     size_t stack_size {0};
     HIP_CHECK(hipDeviceGetLimit(&stack_size, hipLimitStackSize));
     HIP_CHECK(hipDeviceSetLimit(hipLimitStackSize, 4096));
@@ -262,13 +281,25 @@ int main(int argc, char *argv[])
         &h
     };
 
-    HIP_CHECK(hipLaunchKernel(kernel_render_entry, gridSize, blockSize, params, 0, stream));
-        
+    HIP_CHECK(hipModuleLaunchKernel(kernel_render_entry, 
+        gridSize.x, gridSize.y, gridSize.z, 
+        blockSize.x, blockSize.y, blockSize.z, 
+        0, stream, params, nullptr));
     HIP_SYNC_CHECK();
 
 
     std::cout << "\n\n-----------End of the program---------\n\n" << std::endl << std::flush;
     HIP_CHECK(hipFree(d_outputBuffer));                 
+    
+
+    // ------------------------------ CMDLINE GENERATED TEST ----------------------
+
+    // //lets try with cmd line generated module
+    // hipModule_t module {nullptr};
+    // HIP_CHECK(hipModuleLoad(&module, "x.o"));
+
+    // hipFunction_t kernel_render_entry{nullptr};
+    // HIP_CHECK(hipModuleGetFunction(&kernel_render_entry, module, "shade"));
     
 
     return 0;
