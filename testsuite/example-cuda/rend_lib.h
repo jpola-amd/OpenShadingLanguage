@@ -4,28 +4,135 @@
 
 #pragma once
 
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <OSL/oslconfig.h>
+
+#if defined(__has_include) && __has_include(<Imath/half.h>)
+#    include <Imath/half.h>
+#elif OSL_USING_IMATH >= 3
+#    include <Imath/half.h>
+#else
+#    include <OpenEXR/half.h>
+#endif
+
+#include <OpenImageIO/detail/farmhash.h>
+#include <OpenImageIO/oiioversion.h>
+
+namespace pvt {
+
+constexpr inline size_t
+pvtstrlen(const char* s)
+{
+    if (s == nullptr)
+        return 0;
+    size_t len = 0;
+    while (s[len] != 0)
+        len++;
+    return len;
+}
+
+}  // namespace pvt
+
+namespace UStringHash {
+constexpr inline size_t
+Hash(const char* s)
+{
+    size_t len = pvt::pvtstrlen(s);
+
+    return len ? OIIO::farmhash::inlined::Hash(s, len) : 0;
+}
+
+// Template to ensure the hash is evaluated at compile time.
+template<size_t V> static constexpr size_t HashConstEval = V;
+}  // namespace UStringHash
+
+
+#include <OSL/oslexec.h>
+
 #include <OSL/device_string.h>
+
 
 OSL_NAMESPACE_ENTER
 // Create an OptiX variable for each of the 'standard' strings declared in
 // <OSL/strdecls.h>.
 namespace DeviceStrings {
-#define STRDECL(str, var_name) \
-    extern __device__ OSL_NAMESPACE::DeviceString var_name;
+#define STRING_PARAMS(x) \
+    UStringHash::HashConstEval<UStringHash::Hash(__OSL_STRINGIFY(x))>
+// Don't declare anything
+#define STRDECL(str, var_name)
 
 #include <OSL/strdecls.h>
 #undef STRDECL
 }  // namespace DeviceStrings
+
+#if defined(_WIN64) || defined(_LP64__)
+typedef unsigned long long devicePtr;
+#else
+typedef unsigned int devicePtr;
+#endif 
+
+// namespace pvt {
+// __device__ hipDeviceptr_t s_color_system;
+// __device__ devicePtr osl_printf_buffer_start;
+// __device__ devicePtr osl_printf_buffer_end;
+// __device__ uint64_t test_str_1;
+// __device__ uint64_t test_str_2;
+// __device__ uint64_t num_named_xforms;
+// __device__ hipDeviceptr_t xform_name_buffer;
+// __device__ hipDeviceptr_t xform_buffer;
+// }  // namespace pvt
+
 OSL_NAMESPACE_EXIT
 
-#include "closures.h"
-
 namespace {  // anonymous namespace
+
+// These are CUDA variants of various OSL options structs. Their layouts and
+// default values are identical to the host versions, but they might differ in
+// how they are constructed. They are duplicated here as a convenience and to
+// avoid including additional host headers.
+
+struct NoiseOptCUDA {
+    int anisotropic;
+    int do_filter;
+    float3 direction;
+    float bandwidth;
+    float impulses;
+
+    __device__ NoiseOptCUDA()
+        : anisotropic(0)
+        , do_filter(true)
+        , direction(make_float3(1.0f, 0.0f, 0.0f))
+        , bandwidth(1.0f)
+        , impulses(16.0f)
+    {
+    }
+};
+
+
+struct TextureOptCUDA {
+    // TO BE IMPLEMENTED
+};
+
+
+struct TraceOptCUDA {
+    // TO BE IMPLEMENTED
+};
+
 
 // This isn't really a CUDA version of the host-side ShadingContext class;
 // instead, it is used as a container for a handful of pointers accessed during
 // shader executions that are accessed via the ShadingContext.
-struct ShadingContextCUDA {};
+struct ShadingContextCUDA {
+    NoiseOptCUDA* m_noiseopt;
+    TextureOptCUDA* m_textureopt;
+    TraceOptCUDA* m_traceopt;
+
+    __device__ void* noise_options_ptr() { return m_noiseopt; }
+    __device__ void* texture_options_ptr() { return m_textureopt; }
+    __device__ void* trace_options_ptr() { return m_traceopt; }
+};
+
 
 struct ShaderGlobals {
     float3 P, dPdx, dPdy;
@@ -44,6 +151,9 @@ struct ShaderGlobals {
     void* tracedata;
     void* objdata;
     void* context;
+    void* shadingStateUniform;
+    int thread_index;
+    int shade_index;
     void* renderer;
     void* object2common;
     void* shader2common;
@@ -55,6 +165,7 @@ struct ShaderGlobals {
     int shaderID;
 };
 
+
 enum RayType {
     CAMERA       = 1,
     SHADOW       = 2,
@@ -65,6 +176,9 @@ enum RayType {
     SUBSURFACE   = 64,
     DISPLACEMENT = 128
 };
+
+
+
 
 // ========================================
 //

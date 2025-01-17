@@ -5,10 +5,16 @@
 #pragma once
 
 #include <cuda.h>
-
+#include <cuda_runtime.h>
 #include <OSL/oslexec.h>
 #include <OSL/rendererservices.h>
+#include <OSL/device_string.h>
 
+
+using namespace OSL;
+using OIIO::TextureSystem;
+using OSL::ustring;
+using OSL::ustringhash;
 
 using TextureSamplerMap = std::unordered_map<OSL::ustringhash, cudaTextureObject_t>;
 
@@ -28,6 +34,9 @@ class CudaGridRenderer final : public OSL::RendererServices {
     float _shutter[2];
     float _screen_window[4];
     int _xres, _yres;
+
+    OIIO::ErrorHandler m_errorHandler {OIIO::ErrorHandler::default_handler()};
+    OIIO::ErrorHandler& errhandler() { return m_errorHandler; }
 
 public:
     CudaGridRenderer() {}
@@ -49,9 +58,9 @@ public:
 
     /// Given the name of a texture, return an opaque handle that can be
     /// used with texture calls to avoid the name lookups.
-    virtual TextureHandle* get_texture_handle(ustring filename,
-                                              ShadingContext* shading_context,
-                                              const TextureOpt* options);
+     virtual TextureHandle*
+    get_texture_handle(ustring filename, ShadingContext* context,
+                       const TextureOpt* options = nullptr);
 
     virtual bool get_matrix(ShaderGlobals* sg, Matrix44& result,
                             TransformationPtr xform, float time);

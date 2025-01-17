@@ -56,13 +56,13 @@ main(int argc, char** argv)
     // Create renderer services and shading system
     CudaGridRenderer rs;
     auto ts = TextureSystem::create();
-    ShadingSystem ss(&rs, ts);
+    ShadingSystem ss(&rs, ts.get());
     register_closures(ss);
 
     ss.attribute("lockgeom", 1);
 
     auto shader_name = argv[1];
-    auto layer_name  = shader_name;
+    auto layer_name  = "test_add";
 
     // Create our ShaderGroup consisting of just the shader we specified on the
     // command line
@@ -133,36 +133,36 @@ main(int argc, char** argv)
     }
 
     // Uncomment these to inspect the generated PTX
-    // OIIO::Filesystem::write_text_file("se_renderer.ptx", cuda_renderer_ptx);
-    // OIIO::Filesystem::write_text_file("se_trampoline.ptx", ptx_trampoline);
-    // OIIO::Filesystem::write_text_file("se_shader.ptx", ptx_shader);
-    // OIIO::Filesystem::write_text_file("se_strlib.ptx", ptx_strlib);
+    OIIO::Filesystem::write_text_file("se_renderer.ptx", cuda_renderer_ptx);
+    OIIO::Filesystem::write_text_file("se_trampoline.ptx", ptx_trampoline);
+    OIIO::Filesystem::write_text_file("se_shader.ptx", ptx_shader);
+    OIIO::Filesystem::write_text_file("se_strlib.ptx", ptx_strlib);
 
-    // link everything together
-    CUlinkState link_state;
-    CU_CHECK(cuLinkCreate(0, nullptr, nullptr, &link_state));
-    CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
-                           (void*)cuda_renderer_ptx.c_str(),
-                           cuda_renderer_ptx.size(), "cuda_grid_renderer.ptx",
-                           0, nullptr, nullptr));
-    CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
-                           (void*)rend_lib_ptx.c_str(), rend_lib_ptx.size(),
-                           "rend_lib.ptx", 0, nullptr, nullptr));
-    CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
-                           (void*)ptx_trampoline.c_str(), ptx_trampoline.size(),
-                           "trampoline.ptx", 0, nullptr, nullptr));
-    CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
-                           (void*)ptx_shader.c_str(), ptx_shader.size(),
-                           "shader.ptx", 0, nullptr, nullptr));
-    CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
-                           (void*)ptx_strlib.c_str(), ptx_strlib.size(),
-                           "strlib.ptx", 0, nullptr, nullptr));
-    void* cubin;
-    size_t cubin_size;
-    CU_CHECK(cuLinkComplete(link_state, &cubin, &cubin_size));
+    // // link everything together
+    // CUlinkState link_state;
+    // CU_CHECK(cuLinkCreate(0, nullptr, nullptr, &link_state));
+    // CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
+    //                        (void*)cuda_renderer_ptx.c_str(),
+    //                        cuda_renderer_ptx.size(), "cuda_grid_renderer.ptx",
+    //                        0, nullptr, nullptr));
+    // CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
+    //                        (void*)rend_lib_ptx.c_str(), rend_lib_ptx.size(),
+    //                        "rend_lib.ptx", 0, nullptr, nullptr));
+    // CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
+    //                        (void*)ptx_trampoline.c_str(), ptx_trampoline.size(),
+    //                        "trampoline.ptx", 0, nullptr, nullptr));
+    // CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
+    //                        (void*)ptx_shader.c_str(), ptx_shader.size(),
+    //                        "shader.ptx", 0, nullptr, nullptr));
+    // CU_CHECK(cuLinkAddData(link_state, CU_JIT_INPUT_PTX,
+    //                        (void*)ptx_strlib.c_str(), ptx_strlib.size(),
+    //                        "strlib.ptx", 0, nullptr, nullptr));
+    // void* cubin;
+    // size_t cubin_size;
+    // CU_CHECK(cuLinkComplete(link_state, &cubin, &cubin_size));
 
     CUmodule mod_renderer;
-    CU_CHECK(cuModuleLoadData(&mod_renderer, cubin));
+    CU_CHECK(cuModuleLoad(&mod_renderer, "fatbin.o"));
 
     CUfunction fun_renderer_entry;
     CU_CHECK(cuModuleGetFunction(&fun_renderer_entry, mod_renderer, "shade"));
@@ -335,9 +335,9 @@ register_closures(ShadingSystem& ss)
     }
 }
 
-const char* cuda_compile_options[] = { "--gpu-architecture=compute_35",
+const char* cuda_compile_options[] = { "--gpu-architecture=compute_86",
                                        "--use_fast_math", "-dc",
-                                       "--std=c++" #OSL_CPLUSPLUS_VERSION };
+                                       "--std=c++17"};
 
 std::string
 build_trampoline_ptx(OSL::ShaderGroup& group, std::string init_name,
@@ -345,6 +345,37 @@ build_trampoline_ptx(OSL::ShaderGroup& group, std::string init_name,
 {
     std::stringstream ss;
     ss << "class ShaderGlobals;\n";
+    // ss << "__device__ struct ShaderGlobals {" << "\n";
+    // ss << "float3 P, dPdx, dPdy;" << "\n";
+    // ss << "float3 dPdz;" << "\n";
+    // ss << "float3 I, dIdx, dIdy;" << "\n";
+    // ss << "float3 N;" << "\n";
+    // ss << "float3 Ng;" << "\n";
+    // ss << "float u, dudx, dudy;" << "\n";
+    // ss << "float v, dvdx, dvdy;" << "\n";
+    // ss << "float3 dPdu, dPdv;" << "\n";
+    // ss << "float time;" << "\n";
+    // ss << "float dtime;" << "\n";
+    // ss << "float3 dPdtime;" << "\n";
+    // ss << "float3 Ps, dPsdx, dPsdy;" << "\n";
+    // ss << "void* renderstate;" << "\n";
+    // ss << "void* tracedata;" << "\n";
+    // ss << "void* objdata;" << "\n";
+    // ss << "void* context;" << "\n";
+    // ss << "void* shadingStateUniform;" << "\n";
+    // ss << "int thread_index;" << "\n";
+    // ss << "int shade_index;" << "\n";
+    // ss << "void* renderer;" << "\n";
+    // ss << "void* object2common;" << "\n";
+    // ss << "void* shader2common;" << "\n";
+    // ss << "void* Ci;" << "\n";
+    // ss << "float surfacearea;" << "\n";
+    // ss << "int raytype;" << "\n";
+    // ss << "int flipHandedness;" << "\n";
+    // ss << "int backfacing;" << "\n";
+    // ss << "int shaderID;" << "\n";
+    // ss << "};" << "\n";
+
     ss << "extern \"C\" __device__ void " << init_name
        << "(ShaderGlobals*,void*);\n";
     ss << "extern \"C\" __device__ void " << entry_name
@@ -357,6 +388,14 @@ build_trampoline_ptx(OSL::ShaderGroup& group, std::string init_name,
        << entry_name << "(sg, params); }\n";
 
     auto cu_trampoline = ss.str();
+
+    // save the program source to file 
+    {
+        std::ofstream out("trampoline.cu");
+        out << cu_trampoline;
+        out.close();
+    }
+
     nvrtcProgram prg_trampoline;
     int num_compile_flags = int(sizeof(cuda_compile_options)
                                 / sizeof(cuda_compile_options[0]));
@@ -411,6 +450,8 @@ build_string_table_ptx(const CudaGridRenderer& rs)
     std::stringstream strlib_ss;
 
     strlib_ss << "\n";
+    
+
     strlib_ss << "extern \"C\" __global__ void "
                  "__direct_callable__strlib_dummy(int *j)\n";
     strlib_ss << "{\n";
