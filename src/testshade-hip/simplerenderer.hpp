@@ -88,9 +88,9 @@ public:
                  uint8_t* argValues) override;
 
     // Set and get renderer attributes/options
-    void attribute(OIIO::string_view name, OIIO::TypeDesc type,
-                   const void* value);
-    void attribute(OIIO::string_view name, int value)
+    void attribute(OIIO::string_view name, OIIO::TypeDesc type, const void* value);
+
+    void attribute(OIIO::string_view name, const int value)
     {
         attribute(name, OIIO::TypeDesc::INT, &value);
     }
@@ -104,6 +104,7 @@ public:
         const char* s = valstr.c_str();
         attribute(name, OIIO::TypeDesc::STRING, &s);
     }
+    
     OIIO::ParamValue*
     find_attribute(OIIO::string_view name,
                    OIIO::TypeDesc searchtype = OIIO::TypeUnknown,
@@ -165,6 +166,10 @@ public:
     OIIO::ParamValueList options;
     OIIO::ParamValueList userdata;
 
+protected: 
+    // Named transforms
+    typedef std::map<OIIO::ustringhash, std::shared_ptr<Transformation>> TransformMap;
+    TransformMap m_named_xforms;
 
 private:
     OSL::Matrix44 m_world_to_camera;
@@ -185,11 +190,6 @@ private:
     std::vector<std::shared_ptr<OIIO::ImageBuf>> m_outputbufs;
     std::unique_ptr<OIIO::ErrorHandler> m_errhandler { new OIIO::ErrorHandler };
     bool m_use_rs_bitcode = false;
-
-    // Named transforms
-    typedef std::map<OSL::ustringhash, std::shared_ptr<Transformation>>
-        TransformMap;
-    TransformMap m_named_xforms;
 
     // Attribute and userdata retrieval -- for fast dispatch, use a hash
     // table to map attribute names to functions that retrieve them. We

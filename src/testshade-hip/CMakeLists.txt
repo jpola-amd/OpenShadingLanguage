@@ -1,6 +1,7 @@
 
 
 set (testshade-hip_srcs
+    assert_hip.hpp
     argparse.hpp
     argparse.cpp     
     utils.hpp

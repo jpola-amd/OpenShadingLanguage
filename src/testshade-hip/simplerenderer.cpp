@@ -1029,3 +1029,39 @@ bool SimpleRenderer::get_camera_screen_window(ShaderGlobals* /*sg*/, bool derivs
     }
     return false;
 }
+
+OIIO::ParamValue*
+SimpleRenderer::find_attribute(string_view name, TypeDesc searchtype,
+                               bool casesensitive)
+{
+    auto iter = options.find(name, searchtype, casesensitive);
+    if (iter != options.end())
+        return &(*iter);
+    return nullptr;
+}
+
+
+
+const OIIO::ParamValue*
+SimpleRenderer::find_attribute(string_view name, TypeDesc searchtype,
+                               bool casesensitive) const
+{
+    auto iter = options.find(name, searchtype, casesensitive);
+    if (iter != options.end())
+        return &(*iter);
+    return nullptr;
+}
+
+
+void SimpleRenderer::attribute(OIIO::string_view name, OIIO::TypeDesc type, const void* value)
+{
+    if (name.empty())  // Guard against bogus empty names
+        return;
+    // Don't allow duplicates
+    auto f = find_attribute(name);
+    if (!f) {
+        options.resize(options.size() + 1);
+        f = &options.back();
+    }
+    f->init(name, type, 1, value);
+}
