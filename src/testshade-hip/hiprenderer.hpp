@@ -7,7 +7,18 @@
 #include <memory>
 #include <OpenImageIO/errorhandler.h>
 
-
+//TODO: Add finalize_pixel_buffer
+/*
+std::string buffer_name = "output_buffer";
+    std::vector<float> tmp_buff(m_xres * m_yres * 3);
+    CUDA_CHECK(cudaMemcpy(tmp_buff.data(),
+                          reinterpret_cast<void*>(d_output_buffer),
+                          m_xres * m_yres * 3 * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    OIIO::ImageBuf* buf = outputbuf(0);
+    if (buf)
+        buf->set_pixels(OIIO::ROI::All(), OIIO::TypeFloat, tmp_buff.data());
+*/
 class HIPRenderer : public SimpleRenderer
 {
 public:
@@ -26,7 +37,7 @@ public:
     // instead of launching the kernel twice we get the globals by name and copy to symbol
     void prepare_render() override final;
 
-    void render(int xres , int yres) override final;
+    void render(int xres , int yres, RenderState& renderState) override final;
 
     void set_transforms(const OSL::Matrix44& object2common, const OSL::Matrix44& shader2common);
     

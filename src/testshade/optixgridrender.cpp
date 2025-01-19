@@ -924,7 +924,7 @@ OptixGridRenderer::warmup()
 //extern "C" void setTestshadeGlobals(float h_invw, float h_invh, CUdeviceptr d_output_buffer, bool h_flipv);
 
 void
-OptixGridRenderer::render(int xres OSL_MAYBE_UNUSED, int yres OSL_MAYBE_UNUSED)
+OptixGridRenderer::render(int xres OSL_MAYBE_UNUSED, int yres OSL_MAYBE_UNUSED, RenderState& renderStae)
 {
     d_output_buffer = DEVICE_ALLOC(xres * yres * 4 * sizeof(float));
     d_launch_params = DEVICE_ALLOC(sizeof(RenderParams));

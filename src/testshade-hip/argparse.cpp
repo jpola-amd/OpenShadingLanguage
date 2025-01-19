@@ -76,6 +76,10 @@ std::optional<ProgramArguments> parse_arguments(int argc, const char* argv[])
         .defaultval("Cout")
         .help("Set the output filename and value");
 
+    argParser.arg("--iterations %d:ITERATIONS", &programArguments.iterations)
+        .help("Set the number of iterations (default = 1)")
+        .defaultval(1);
+
     if (argParser.parse_args(argc, argv) == -1)
     {
         return std::nullopt;

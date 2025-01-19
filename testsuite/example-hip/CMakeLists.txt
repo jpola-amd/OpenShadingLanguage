@@ -32,11 +32,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH ${ARTIFACTS_HOME}/artifacts/lib/cmake)
 
 find_package(LLVM 19.1 REQUIRED CONFIG HINTS ${LLVM_HOME})
-# find_package(HIP REQUIRED HINTS $ENV{HIP_PATH}) # this is fucked up. It alters the add_executable and adds the --offload-arch to the invocation
-set(HIP_INCLUDE_DIRS "/opt/rocm/include")
-set(HIP_LIBRARIES "/opt/rocm/lib/libamdhip64.so")
-
-
+find_package(HIP REQUIRED HINTS $ENV{HIP_PATH})
 
 find_package(Imath REQUIRED HINTS ${ARTIFACTS_HOME})
 find_package(OpenImageIO REQUIRED HINTS ${ARTIFACTS_HOME})
@@ -133,7 +129,7 @@ target_include_directories(example PRIVATE
     ${OpenColorIO_INCLUDES}
 )
 
-target_link_libraries(example PRIVATE ${HIP_LIBRARIES})
+target_link_libraries(example PRIVATE hip::host)
 target_link_libraries(example PRIVATE OSL::oslcomp OSL::oslexec OSL::osl.imageio)
 target_link_libraries(example PRIVATE ${OpenImageIO_LIBRARIES})
 target_link_libraries(example PRIVATE ${OpenColorIO_LIBRARIES})

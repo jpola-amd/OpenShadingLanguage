@@ -31,6 +31,9 @@ struct ProgramArguments
     int xres {512};
     int yres {512};
 
+    // render iterations
+    int iterations {1};
+
     OutputDescriptor output;
 
     bool valid() const;

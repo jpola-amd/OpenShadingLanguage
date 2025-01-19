@@ -2,14 +2,24 @@
 #include <memory>
 
 #include <OpenImageIO/filesystem.h>
+#include <OpenImageIO/strutil.h>
+#include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/imagecache.h>
+#include <OpenImageIO/imageio.h>
+#include <OpenImageIO/timer.h> // to be used later
+
 #include <OSL/oslquery.h>
+#include <OSL/journal.h>
 
 #include "utils.hpp"
 #include "argparse.hpp"
 #include "oslcompiler.hpp"
 #include "simplerenderer.hpp"
 #include "hiprenderer.hpp"
+#include "renderstate.hpp"
 
+// let's make it simple for now
+static RenderState g_renderstate;
 
 struct ShaderDesc
 {
@@ -42,12 +52,14 @@ void setup_output_images(SimpleRenderer* renderer, OSL::ShadingSystem* shadingSy
     OIIO::string_view layer = "test_0";
 
     for (int lay = num_layers - 1; lay >= 0 && !found; --lay) {
-            // std::cout << "   layer " << lay << " " << layernames[lay] << "\n";
+            std::cout << "   layer " << lay << " " << layernames[lay] << "\n";
             if (layer == layernames[lay] || layer.empty()) {
                 OSL::OSLQuery oslquery = shadingSystem->oslquery(*shaderGroup, lay);
                 for (const auto& param : oslquery) {
+                     std::cout << "    param " << param.type << " " << param.name
+                              << " isoutput=" << param.isoutput << "\n";
                     if (param.isoutput) {
-                        //std::cerr << "    found param " << param.name << "\n";
+                        std::cerr << "    found param " << param.name << "\n";
                         vartype = param.type;
                         found   = true;
                         break;
@@ -65,7 +77,7 @@ void setup_output_images(SimpleRenderer* renderer, OSL::ShadingSystem* shadingSy
         OIIO::TypeDesc basetype((OIIO::TypeDesc::BASETYPE)vartype.basetype);
         int number_of_channels = vartype.basevalues();
 
-        if (renderer->add_output(programArgs.output.value, programArgs.output.value, basetype, number_of_channels))
+        if (renderer->add_output(programArgs.output.value, programArgs.output.filename, basetype, number_of_channels))
         {
             std::cout << "Added output " << programArgs.output.value 
                       << " to " << programArgs.output.filename 
@@ -75,6 +87,33 @@ void setup_output_images(SimpleRenderer* renderer, OSL::ShadingSystem* shadingSy
     else 
     {
         std::cerr << "Could not find output variable" << std::endl;
+    }
+
+    std::cout << "Render outputs: " << renderer->noutputs() << std::endl;
+
+    if (renderer->noutputs() > 0)
+    {
+        std::vector<OSL::SymLocationDesc> symlocs;
+        for (size_t i = 0; i < renderer->noutputs(); ++i)
+        {
+            OIIO::ImageBuf* ib = renderer->outputbuf(i);
+            char* outptr = static_cast<char*>(ib->pixeladdr(0, 0));
+            if (i == 0)
+            {
+                // The output arena is the start of the first output jbuffer
+                g_renderstate.output_base_ptr = outptr;
+            }
+
+
+            ptrdiff_t offset = outptr - g_renderstate.output_base_ptr;
+            OIIO::TypeDesc t = vartype;
+            auto outputname = renderer->outputname(i);
+            symlocs.emplace_back(outputname, t, false, OSL::SymArena::Outputs, offset, t.size());
+            std::cout.flush();
+            OIIO::Strutil::print("Output buffer - symloc {} {} off={} size={}\n",
+                                  outputname, t, offset, t.size());
+        }
+        shadingSystem->add_symlocs(shaderGroup.get(), symlocs);
     }
 }
 
@@ -227,6 +266,38 @@ int main(int argc, const char *argv[])
     // this is crap
     setup_output_images(renderer.get(), shadingSystem.get(), shaderGroup, programArgs);
 
+    // set the noumber of threads to 1 for now
+    const int num_threads = 1; // we can do OIIO::Sysutil::hardware_concurrency();
+
+    // init the journal to record the render
+    constexpr int journal_size = 1 * 1024 * 1024;
+    std::unique_ptr<uint8_t[]> journal_buffer = std::make_unique<uint8_t[]>(journal_size);
+    if (!OSL::journal::initialize_buffer (journal_buffer.get(), journal_size, 1024, num_threads))
+    {
+        std::cerr << "Error initializing journal buffer" << std::endl;
+        return 1;
+    }
+
+
+    {
+        renderer->export_state(g_renderstate);
+        // bleah
+        g_renderstate.shaderGroup = shaderGroup.get();
+        g_renderstate.shadingSystem = shadingSystem.get();
+        g_renderstate.num_threads = num_threads;
+        g_renderstate.iteration = 0;
+        g_renderstate.max_iterations = programArgs.iterations;
+        g_renderstate.journal_buffer = journal_buffer.get();
+
+        g_renderstate.shader2common = OSL::TransformationPtr(&Mshad);
+        g_renderstate.object2common = OSL::TransformationPtr(&Mobj);
+    }
+
+
+    // does nothing on a cpu
+    // on gpu compiles the shaders and sets the global variables
+
+
     // prepare render <--- compile components, setup globals and other stuff on the device
     /*
      // we must use function pointers to get the names of the functions for shader group
@@ -248,18 +319,83 @@ int main(int argc, const char *argv[])
 
     */
 
+    renderer->prepare_render();
 
-    // warmup and run the render 
+    for(int i = 0; i < programArgs.iterations; i++)
+    {
+        if (programArgs.hip)
+        {
+            std::cerr << "HIP renderer not implemented" << std::endl;
+        }
+        else
+        {
+                        
+            renderer->render(programArgs.xres, programArgs.yres, g_renderstate);
+        }
+    }
+
+
+
+    
+
 
     // get back the data from the device (finalize_pixel_buffer)
+    renderer->finalize_pixel_buffer(); // does nothing on CPU
+
+    {
+        for (size_t i = 0; i < renderer->noutputs(); ++i) 
+        {
+            if (OIIO::ImageBuf* outputimg = renderer->outputbuf(i)) 
+            {
+                std::string filename = outputimg->name();
+                OIIO::TypeDesc datatype = outputimg->spec().format;
+                
+                // JPEG, GIF, and PNG images should be automatically saved
+                // as sRGB because they are almost certainly supposed to
+                // be displayed on web pages.
+                std::vector<std::string> valid_extensions = {".jpg", ".jpeg", ".gif", ".png"};
+                if (std::any_of(valid_extensions.begin(), valid_extensions.end(), 
+                    [&filename](const std::string& ext) { return OIIO::Strutil::iends_with(filename, ext); })) 
+                {
+                    OIIO::ImageBuf ccbuf = OIIO::ImageBufAlgo::colorconvert(*outputimg, "linear", "sRGB");
+                    ccbuf.write(filename, datatype);
+                }
+                else
+                {
+                    outputimg->write(filename, datatype);
+                }    
+            }
+        }
+    }
+
+    // Print some debugging info
+    // Timings for setup, warmup, run, write
 
     // clear the renderer reset release 
 
+    renderer.reset();
+    shaderGroup.reset();
+    shadingSystem.reset();
+
+     int retcode = EXIT_SUCCESS;
+    // Double check that there were no uncaught errors in the texture
+    // system and image cache.
+    std::string err = textureSystem->geterror();
+    if (!err.empty()) {
+        std::cout << "ERRORS left in TextureSystem:\n" << err << "\n";
+        retcode = EXIT_FAILURE;
+    }
+    auto ic = textureSystem->imagecache();
+    err     = ic ? ic->geterror() : std::string();
+    if (!err.empty()) {
+        std::cout << "ERRORS left in ImageCache:\n" << err << "\n";
+        retcode = EXIT_FAILURE;
+    }
 
 
 
 
     
     std::cerr << "Program ended successfully" << std::endl;
-    return EXIT_SUCCESS;
+    return retcode;
 }

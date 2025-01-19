@@ -1,5 +1,7 @@
 #include "simplerenderer.hpp"
 
+#include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/imagebufalgo_util.h>
 #include <OSL/genclosure.h>
 #include <OSL/encodedtypes.h>
 #include <OSL/hashes.h>
@@ -243,6 +245,235 @@ int SimpleRenderer::supports(string_view feature) const
     return false;
 }
 
+static void
+setup_shaderglobals(ShaderGlobals& sg, ShadingSystem* shadingsys, int x, int y, RenderState& renderState)
+{
+    // Just zero the whole thing out to start
+    memset((char*)&sg, 0, sizeof(ShaderGlobals));
+
+    // Any state data needed by SimpleRenderer or its free function equivalent
+    // will need to be passed here the ShaderGlobals.
+    sg.renderstate = &renderState;
+
+    // Set "shader" space to be Mshad.  In a real renderer, this may be
+    // different for each shader group.
+    sg.shader2common = renderState.shader2common;
+
+    // Set "object" space to be Mobj.  In a real renderer, this may be
+    // different for each object.
+    sg.object2common = renderState.object2common;
+
+    // Just make it look like all shades are the result of 'raytype' rays.
+    sg.raytype = renderState.raytype_bit;
+
+    // Set up u,v to vary across the "patch", and also their derivatives.
+    // Note that since u & x, and v & y are aligned, we only need to set
+    // values for dudx and dvdy, we can use the memset above to have set
+    // dvdx and dudy to 0.
+    auto uscale = renderState.uscale;
+    auto vscale = renderState.vscale;
+    auto pixelcenters = renderState.pixel_centers;
+    auto xres = renderState.xres;
+    auto yres = renderState.yres;
+    auto uoffset = renderState.uoffset;
+    auto voffset = renderState.voffset;
+    auto vary_udxdy = renderState.vary_udxdy;
+    auto vary_vdxdy = renderState.vary_vdxdy;
+    auto vary_Pdxdy = renderState.vary_Pdxdy;
+    
+    if (pixelcenters) {
+        // Our patch is like an "image" with shading samples at the
+        // centers of each pixel.
+        sg.u = uscale * (float)(x + 0.5f) / xres + uoffset;
+        sg.v = vscale * (float)(y + 0.5f) / yres + voffset;
+        if (vary_udxdy) {
+            sg.dudx = 1.0f - sg.u;
+            sg.dudy = sg.u;
+        } else {
+            sg.dudx = uscale / xres;
+        }
+        if (vary_vdxdy) {
+            sg.dvdx = 1.0f - sg.v;
+            sg.dvdy = sg.v;
+        } else {
+            sg.dvdy = vscale / yres;
+        }
+    } else {
+        // Our patch is like a Reyes grid of points, with the border
+        // samples being exactly on u,v == 0 or 1.
+        sg.u = uscale * ((xres == 1) ? 0.5f : (float)x / (xres - 1)) + uoffset;
+        sg.v = vscale * ((yres == 1) ? 0.5f : (float)y / (yres - 1)) + voffset;
+        if (vary_udxdy) {
+            sg.dudx = 1.0f - sg.u;
+            sg.dudy = sg.u;
+        } else {
+            sg.dudx = uscale / std::max(1, xres - 1);
+        }
+        if (vary_vdxdy) {
+            sg.dvdx = 1.0f - sg.v;
+            sg.dvdy = sg.v;
+        } else {
+            sg.dvdy = vscale / std::max(1, yres - 1);
+        }
+    }
+
+    // Assume that position P is simply (u,v,1), that makes the patch lie
+    // on [0,1] at z=1.
+    sg.P = Vec3(sg.u, sg.v, 1.0f);
+    // Derivatives with respect to x,y
+    if (vary_Pdxdy) {
+        sg.dPdx = Vec3(1.0f - sg.u, 1.0f - sg.v, sg.u * 0.5);
+        sg.dPdy = Vec3(1.0f - sg.v, 1.0f - sg.u, sg.v * 0.5);
+    } else {
+        sg.dPdx = Vec3(uscale / std::max(1, xres - 1), 0.0f, 0.0f);
+        sg.dPdy = Vec3(0.0f, vscale / std::max(1, yres - 1), 0.0f);
+    }
+    sg.dPdz = Vec3(0.0f, 0.0f, 0.0f);  // just use 0 for volume tangent
+    // Tangents of P with respect to surface u,v
+    sg.dPdu = Vec3(1.0f, 0.0f, 0.0f);
+    sg.dPdv = Vec3(0.0f, 1.0f, 0.0f);
+    // That also implies that our normal points to (0,0,1)
+    sg.N  = Vec3(0, 0, 1);
+    sg.Ng = Vec3(0, 0, 1);
+
+    // Set the surface area of the patch to 1 (which it is).  This is
+    // only used for light shaders that call the surfacearea() function.
+    sg.surfacearea = 1;
+}
+
+// Testshade thread tracking and assignment.
+// Not recommended for production renderer but fine for testshade
+std::atomic<uint32_t> next_thread_index { 0 };
+constexpr uint32_t uninitialized_thread_index = -1;
+thread_local uint32_t this_threads_index = uninitialized_thread_index;
+
+static void
+save_outputs(SimpleRenderer* rend, ShadingSystem* shadingsys,
+             ShadingContext* ctx, int x, int y)
+{
+
+    // For each output requested on the command line...
+    for (size_t i = 0, e = rend->noutputs(); i < e; ++i) {
+        OIIO::ImageBuf* output_bffer_ptr = rend->outputbuf(i);
+        if (!output_bffer_ptr)
+            continue;
+
+        // Ask for a pointer to the symbol's data, as computed by this shader.
+        TypeDesc t;
+        auto outputName = rend->outputname(i);
+        const void* data = shadingsys->get_symbol(*ctx, outputName, t);
+        if (!data)
+            continue;
+
+        int nchans = output_bffer_ptr->nchannels();
+        if (t.basetype == TypeDesc::FLOAT) {
+            output_bffer_ptr->setpixel(x, y, (const float*)data);
+            // if (print_outputs) {
+            //     print("  {} :", outputvarnames[i]);
+            //     for (int c = 0; c < nchans; ++c)
+            //         print(" {:g}", ((const float*)data)[c]);
+            //     print("\n");
+        
+        } 
+        else if (t.basetype == TypeDesc::INT) 
+        {
+            // We are outputting an integer variable, so we need to
+            float* pixel = OSL_ALLOCA(float, nchans);
+            OIIO::convert_pixel_values(TypeDesc::BASETYPE(t.basetype), data,
+                                       TypeDesc::FLOAT, pixel, nchans);
+            output_bffer_ptr->setpixel(x, y, &pixel[0]);
+        }
+        // N.B. Drop any outputs that aren't float- or int-based
+    }
+}
+
+static void shade_region(SimpleRenderer* renderer, RenderState& renderstate, OIIO::ROI roi)
+{
+    // Request an OSL::PerThreadInfo for this thread.
+    auto shadingsys = renderstate.shadingSystem;
+    auto shadergroup = renderstate.shaderGroup;
+
+    OSL::PerThreadInfo* thread_info = shadingsys->create_thread_info();
+
+    // Request a shading context so that we can execute the shader.
+    // We could get_context/release_context for each shading point,
+    // but to save overhead, it's more efficient to reuse a context
+    // within a thread.
+    ShadingContext* ctx = shadingsys->get_context(thread_info);
+
+    // Set up shader globals and a little test grid of points to shade.
+    ShaderGlobals shaderglobals;
+
+    renderstate.raytype_bit = shadingsys->raytype_bit(ustring("camera"));
+
+    for (int y = roi.ybegin; y < roi.yend; ++y)
+    {
+        int shadeindex = y * renderstate.xres + roi.xbegin;
+        for (int x = roi.xbegin; x < roi.xend; ++x, ++shadeindex) 
+        {
+            // Set up shader globals
+            setup_shaderglobals(shaderglobals, shadingsys, x, y, renderstate);
+
+            if (this_threads_index == uninitialized_thread_index) 
+            {
+                this_threads_index = next_thread_index.fetch_add(1u); 
+            }
+            
+            int thread_index = this_threads_index;
+
+            shadingsys->execute(*ctx, *shadergroup, thread_index,
+                                shadeindex, shaderglobals,
+                                renderstate.userdata_base_ptr, renderstate.output_base_ptr);
+
+            // Actually run the shader for this point
+            /*if (entrylayer_index.empty()) {
+                Sole entry point for whole group, default behavior
+                shadingsys->execute(*ctx, *shadergroup, thread_index,
+                                    shadeindex, shaderglobals,
+                                    renderstate.userdata_base_ptr, renderstate.output_base_ptr);
+            } else {
+                // Explicit list of entries to call in order
+                shadingsys->execute_init(*ctx, *shadergroup, thread_index,
+                                         shadeindex, shaderglobals,
+                                         userdata_base_ptr, output_base_ptr);
+                if (entrylayer_symbols.size()) {
+                    for (size_t i = 0, e = entrylayer_symbols.size(); i < e;
+                         ++i)
+                        shadingsys->execute_layer(*ctx, thread_index,
+                                                  shadeindex, shaderglobals,
+                                                  userdata_base_ptr,
+                                                  output_base_ptr,
+                                                  entrylayer_symbols[i]);
+                } else {
+                    for (size_t i = 0, e = entrylayer_index.size(); i < e; ++i)
+                        shadingsys->execute_layer(*ctx, thread_index,
+                                                  shadeindex, shaderglobals,
+                                                  userdata_base_ptr,
+                                                  output_base_ptr,
+                                                  entrylayer_index[i]);
+                }
+                shadingsys->execute_cleanup(*ctx);
+            }*/
+            
+            if (renderstate.iteration == renderstate.max_iterations - 1)
+            {
+                save_outputs(renderer, shadingsys, ctx, x, y);
+            }
+        }
+    }
+
+    shadingsys->release_context(ctx);
+    shadingsys->destroy_thread_info(thread_info);
+}
+
+
+
+void SimpleRenderer::render(int xres, int yres, RenderState& renderState)
+{
+     OIIO::ROI roi(0, xres, 0, yres);
+     OIIO::ImageBufAlgo::parallel_image(roi, renderState.num_threads,
+            [this, &renderState](OIIO::ROI sub_roi) -> void { shade_region(this, renderState, sub_roi);} );  
+}
 
 void SimpleRenderer::camera_params(const Matrix44& world_to_camera,
                               ustringhash projection, 

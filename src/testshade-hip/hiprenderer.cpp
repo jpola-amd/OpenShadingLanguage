@@ -107,10 +107,10 @@ HIPRenderer::prepare_render()
 }
 
 void
-HIPRenderer::render(int xres, int yres)
+HIPRenderer::render(int xres, int yres, RenderState& renderState)
 {
-
-
+    // Launch the kernel
+    //hipLaunchKernelGGL(m_function, dim3(1), dim3(1), 0, m_stream);
 }
 
 

@@ -21,6 +21,27 @@ struct RenderState {
     float hither;
     float yon;
     void* journal_buffer;
+    int max_iterations;
+    int iteration;
+    int num_threads;
+    OSL::ShaderGroup* shaderGroup;
+    OSL::ShadingSystem* shadingSystem;
+    int raytype_bit {0};
+    bool pixel_centers {false};
+    OSL::TransformationPtr object2common;
+    OSL::TransformationPtr shader2common;
+
+    float uscale {1.0f};
+    float uoffset {0.0f};
+    float vscale {1.0f};
+    float voffset {0.0f};
+
+    bool vary_Pdxdy {false };
+    bool vary_udxdy {false };
+    bool vary_vdxdy {false };
+
+    char* output_base_ptr {nullptr};
+    char* userdata_base_ptr {nullptr};
 };
 
 

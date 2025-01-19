@@ -2336,7 +2336,8 @@ BackendLLVM::run()
     if (group().does_nothing()) {
         group().llvm_compiled_init((RunLLVMGroupFunc)empty_group_func);
         group().llvm_compiled_version((RunLLVMGroupFunc)empty_group_func);
-        std::cout << "Shader: \n" <<group().serialize() << std::endl;
+        // deadlock when used on CPU
+        //std::cout << "Shader: \n" <<group().serialize() << std::endl;
         
         return;
     }

@@ -11,3 +11,4 @@ build
 .vscode
 .envrc
 .DS_Store
+build_1030/*
