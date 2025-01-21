@@ -116,7 +116,7 @@ public:
 
     // Super simple camera and display parameters.  Many options not
     // available, no motion blur, etc.
-    void camera_params(const OSL::Matrix44& world_to_camera,
+    virtual void camera_params(const OSL::Matrix44& world_to_camera,
                        OSL::ustringhash projection, float hfov, float hither,
                        float yon, int xres, int yres);
 
@@ -143,8 +143,9 @@ public:
     size_t noutputs() const { return m_outputbufs.size(); }
 
     virtual void init_shadingsys(OSL::ShadingSystem* ss) { shadingsys = ss; }
+    virtual bool init_renderer_options() { return true; }
     virtual void export_state(RenderState&) const;
-    virtual void prepare_render() {}
+    virtual void prepare_render(RenderState&) {}
     virtual void warmup() {}
     virtual void render(int /*xres*/, int /*yres*/, RenderState& renderState);
     virtual void clear() { m_shaders.clear(); }
@@ -157,6 +158,11 @@ public:
 
     static void register_JIT_Global_Variables();
 
+    virtual void register_named_transforms() {}
+    virtual void set_transforms(const OSL::Matrix44& object2common,
+                                const OSL::Matrix44& shader2common) {};
+
+                
     // ShaderGroupRef storage
     std::vector<OSL::ShaderGroupRef>& shaders() { return m_shaders; }
 

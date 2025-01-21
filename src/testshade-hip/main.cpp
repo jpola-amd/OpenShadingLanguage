@@ -115,6 +115,32 @@ void setup_output_images(SimpleRenderer* renderer, OSL::ShadingSystem* shadingSy
         }
         shadingSystem->add_symlocs(shaderGroup.get(), symlocs);
     }
+
+    
+    {
+        // Old fashined way -- tell the shading system which outputs we want
+        std::vector<std::string> outputvars {programArgs.output.value};
+
+        std::vector<const char*> aovnames(outputvars.size());
+        for (size_t i = 0; i < outputvars.size(); ++i) {
+            OSL::ustring varname(outputvars[i]);
+            aovnames[i] = varname.c_str();
+            size_t dot  = varname.find('.');
+            if (dot != OSL::ustring::npos) {
+                // If the name contains a dot, it's intended to be layer.symbol
+                varname = OSL::ustring(varname, dot + 1);
+            }
+        }
+        // shadingsys->attribute(use_group_outputs ? shadergroup.get() : NULL,
+        //                       "renderer_outputs",
+        //                       TypeDesc(TypeDesc::STRING, (int)aovnames.size()),
+        //                       &aovnames[0]);
+        shadingSystem->attribute(shaderGroup.get(), "renderer_outputs",
+                                  OIIO::TypeDesc(OIIO::TypeDesc::STRING, (int)aovnames.size()),
+                                  &aovnames[0]);
+    }
+
+
 }
 
 int main(int argc, const char *argv[])
@@ -204,13 +230,15 @@ int main(int argc, const char *argv[])
 
     OSL_DEV_ONLY(llvm_debug = true);
     shadingSystem->attribute("llvm_debug", (programArgs.llvm_debug ? 2 : 0));
+    shadingSystem->attribute("debug", programArgs.debug);
     shadingSystem->attribute("compile_report", programArgs.llvm_debug);
+
 
     const int optimization_level {2};
     shadingSystem->attribute("optimize", optimization_level);
 
     // Instead of playing with multiple args and options we simply load the shader here:
-    OSL::ShaderGroupRef shaderGroup = shadingSystem->ShaderGroupBegin("jpa_group");
+    OSL::ShaderGroupRef shaderGroup = shadingSystem->ShaderGroupBegin("");
     for (const ShaderDesc& shader : shaders)
     {
         // compile shader
@@ -250,8 +278,9 @@ int main(int argc, const char *argv[])
 
     if (programArgs.hip)
     {
-        reinterpret_cast<HIPRenderer*>(renderer.get())->set_transforms(Mobj, Mshad);
-        reinterpret_cast<HIPRenderer*>(renderer.get())->register_named_transforms();
+        renderer->set_transforms(Mobj, Mshad);
+        renderer->register_named_transforms();
+        
         // from this point the named transforms are visible and can be queried by the get_matrix methods 
         // {
         //     OSL::Matrix44 matrix;
@@ -319,19 +348,11 @@ int main(int argc, const char *argv[])
 
     */
 
-    renderer->prepare_render();
+    renderer->prepare_render(g_renderstate);
 
     for(int i = 0; i < programArgs.iterations; i++)
     {
-        if (programArgs.hip)
-        {
-            std::cerr << "HIP renderer not implemented" << std::endl;
-        }
-        else
-        {
-                        
-            renderer->render(programArgs.xres, programArgs.yres, g_renderstate);
-        }
+        renderer->render(programArgs.xres, programArgs.yres, g_renderstate);
     }
 
 

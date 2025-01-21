@@ -5,7 +5,7 @@
 #include <OSL/hashes.h>
 #include <OSL/oslexec.h>
 
-
+#define HDSTR(cstr) (*((OSL::ustringhash*)&cstr))
 // device side definition of the ShaderGlobals struct
 
 struct ShadingContextHIP {};

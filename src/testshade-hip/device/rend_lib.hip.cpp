@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 
+#include <OSL/oslconfig.h>
 #include <OSL/oslclosure.h>
 
 #include "rend_lib.hip.hpp"
@@ -10,64 +11,14 @@
 
 // Many functions in osl are defined to get the actual implementation from the render services
 // or provide appropriate definition of as a free function
-// It is user responsibility to provide the implementation of these functions
-// I could not find the list of required functions to be implemented by the user
-
-// can be precompiled
-
-// as an example the get matrix and inverse matrix functions 
-/*
-
-OSL_SHADEOP int
-osl_get_inverse_matrix(OpaqueExecContextPtr oec, void* r, ustringhash_pod to_)
-{
-    ustringhash to = ustringhash_from(to_);
-    if (to == Hashes::common || to == get_commonspace_synonym(oec)) {
-        MAT(r).makeIdentity();
-        return true;
-    }
-    if (to == Hashes::shader) {
-        rs_get_inverse_matrix_xform_time(oec, MAT(r), get_shader2common(oec), <------ here 
-                                         get_time(oec));
-        return true;
-    }
-    if (to == Hashes::object) {
-        rs_get_inverse_matrix_xform_time(oec, MAT(r), get_object2common(oec),
-                                         get_time(oec));
-        return true;
-    }
-    int ok = rs_get_inverse_matrix_space_time(oec, MAT(r), to, get_time(oec));
-    if (!ok) {
-        MAT(r).makeIdentity();
-        if (get_unknown_coordsys_error(oec)) {
-            OSL::errorfmt(oec, "Unknown transformation \"{}\"", to);
-        }
-    }
-    return ok;
-}
-*/
-
-// the rs_get_inverse_matrix_xform_time is a function that should be implemented by the user
-// OSL_RSOP OSL_HOSTDEVICE bool
-// rs_get_inverse_matrix_xform_time(OSL::OpaqueExecContextPtr exec_ctx,
-//                                  OSL::Matrix44& result,
-//                                  OSL::TransformationPtr xform, float time)
-// {
-// #if !(defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
-//     auto sg = get_sg(exec_ctx);
-//     return sg->renderer->get_inverse_matrix(sg, result, xform, time); // <--- user implementation
-// #else
-//     return false;
-// #endif
-// }
-
+// we need to keep some of the functions platform and device agnostic. Must be compiled at runtime
 
 // Definition is in the hip_grid_renderer.hip.cpp
 OSL_NAMESPACE_ENTER
 namespace pvt {
     extern __device__ hipDeviceptr_t s_color_system;
-    extern __device__ hipDeviceptr_t osl_printf_buffer_start;
-    extern __device__ hipDeviceptr_t osl_printf_buffer_end;
+    extern __device__ uint64_t osl_printf_buffer_start;
+    extern __device__ uint64_t osl_printf_buffer_end;
     extern __device__ uint64_t test_str_1;
     extern __device__ uint64_t test_str_2;
     extern __device__ uint64_t num_named_xforms;
@@ -383,13 +334,10 @@ osl_printf(void* sg_, OSL::ustringhash_pod fmt_str_hash, void* args)
     // This can be used to limit printing to one Cuda thread for debugging
     // if (launch_index.x == 0 && launch_index.y == 0)
 
-    CUdeviceptr copy_start = atomicAdd(&OSL::pvt::osl_printf_buffer_start,
-                                       args_size + sizeof(args_size)
-                                           + sizeof(fmt_str_hash));
+    unsigned long long copy_start = atomicAdd(&OSL::pvt::osl_printf_buffer_start, args_size + sizeof(args_size) + sizeof(fmt_str_hash));
 
     // Only perform copy if there's enough space
-    if (copy_start + args_size + sizeof(args_size) + sizeof(fmt_str_hash)
-        < OSL::pvt::osl_printf_buffer_end) {
+    if (copy_start + args_size + sizeof(args_size) + sizeof(fmt_str_hash)  < OSL::pvt::osl_printf_buffer_end) {
         memcpy(reinterpret_cast<void*>(copy_start), &fmt_str_hash,
                sizeof(fmt_str_hash));
         memcpy(reinterpret_cast<void*>(copy_start + sizeof(fmt_str_hash)),

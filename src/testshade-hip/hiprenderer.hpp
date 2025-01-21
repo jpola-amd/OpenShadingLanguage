@@ -27,26 +27,33 @@ public:
 
     int supports(OIIO::string_view feature) const override;
 
-    std::vector<uint8_t> load_bitcode_file(OIIO::string_view filename);
+    std::vector<uint8_t> load_file(OIIO::string_view filename) const;
 
-
-    void init_shadingsys(OSL::ShadingSystem* shadingsys) final;
+    // actually not required because the base class has it.
+    void init_shadingsys(OSL::ShadingSystem* shadingsys) override final;
     // using options from the base renderer
-    bool init_renderer_options();
+    bool init_renderer_options() override final;
 
     // instead of launching the kernel twice we get the globals by name and copy to symbol
-    void prepare_render() override final;
+    void prepare_render(RenderState& renderState) override final;
 
     void render(int xres , int yres, RenderState& renderState) override final;
 
-    void set_transforms(const OSL::Matrix44& object2common, const OSL::Matrix44& shader2common);
+    void set_transforms(const OSL::Matrix44& object2common, const OSL::Matrix44& shader2common) override final;
     
-    void register_named_transforms();
+    void register_named_transforms() override final;
+
+    void finalize_pixel_buffer() override final;
+
+
+    void camera_params(const OSL::Matrix44& world_to_camera,
+                       OSL::ustringhash projection, float hfov, float hither,
+                       float yon, int xres, int yres);
 
 
     // required by the shaders to be execute on the device 
     virtual hipDeviceptr_t device_alloc(size_t size) override;
-    virtual void device_free(void* ptr) override;
+    virtual void device_free(hipDeviceptr_t ptr) override;
     virtual hipDeviceptr_t copy_to_device(hipDeviceptr_t dst_device, const void* src_host, size_t size) override;
 
 private:
@@ -55,7 +62,15 @@ private:
     hipModule_t m_module;
     hipFunction_t m_function;
 
-    //device data
+    // render parameters
+    int m_xres { 0 };
+    int m_yres { 0 };
+
+    // device memory
+    hipDeviceptr_t d_output_buffer { nullptr };
+    hipDeviceptr_t d_osl_printf_buffer { nullptr };
+
+
 
 
     // named transformations
@@ -80,6 +95,11 @@ private:
     // device memory management, garbage collection
     std::vector<hipDeviceptr_t> m_ptrs_to_free;
     std::vector<hipArray_t> m_arrays_to_free;
+
+
+    // some utils
+
+     std::vector<std::string> m_search_paths;
 
 
 
