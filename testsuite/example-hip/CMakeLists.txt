@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 project(example-hip CXX)
 
 if (NOT GPU_TARGET_ARCH)
-    set(GPU_TARGET_ARCH "gfx1030")
+    set(GPU_TARGET_ARCH "gfx1036")
 endif()
 
 message(STATUS "GPU_TARGET_ARCH: ${GPU_TARGET_ARCH}")

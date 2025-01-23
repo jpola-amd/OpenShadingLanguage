@@ -1,5 +1,30 @@
 
 
+function(LLVM_COMPILE_LLC source output march mcpu filetype)
+    get_filename_component(source_we ${source} NAME_WE)
+
+    if (filetype STREQUAL "obj")
+        set(extension "o")
+    elseif (filetype STREQUAL "asm")
+        set(extension "s")
+    else()
+        message(FATAL_ERROR "Unknown filetype ${filetype}")
+    endif()
+
+    set(output_file "${CMAKE_CURRENT_BINARY_DIR}/llc_${source_we}.${filetype}")
+    set(${output} ${output_file} PARENT_SCOPE)
+    message(STATUS "Compiling ${source} to ${output} with llc")
+
+    add_custom_command(
+        OUTPUT ${output_file}
+        COMMAND ${LLVM_LLC}
+        ARGS ${source} -o ${output_file} -march=${march} -mcpu=${mcpu} -filetype=${filetype}
+        DEPENDS ${source}
+        COMMENT "Compiling ${source} to ${output} with llc"
+        VERBATIM
+    )
+endfunction()
+
 function(HIP_COMPILE_TO_BC sources headers out_bitcode out_llvm extra_options)
     get_filename_component ( source_we ${sources} NAME_WE )
     get_filename_component ( source_dir ${sources} DIRECTORY )

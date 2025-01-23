@@ -1,0 +1,48 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "linux",
+            "hidden": true,
+            "cacheVariables": {
+                "ARTIFACTS_HOME": "/home/jpola/projects/hip-osl/3rdParty/artifacts/",
+                "CMAKE_EXPORT_COMPILE_COMMANDS" : "ON"
+               
+            }
+        },
+        {
+            "name": "debug-config",
+            "hidden": false,
+            "inherits": "linux",
+            "binaryDir": "${sourceDir}/build/debug",
+            "cacheVariables": {
+                "LLVM_HOME": "/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release-19/",
+                "OSL_HOME": "/home/jpola/projects/hip-osl/osl-artifacts/debug/",
+                "CMAKE_BUILD_TYPE": "Debug"
+            }   
+        },
+        {
+            "name": "release-config",
+            "hidden": false,
+            "inherits": "linux",
+            "binaryDir": "${sourceDir}/build/release",
+            "cacheVariables": {
+                "LLVM_HOME": "/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release-19/",
+                "OSL_HOME": "/home/jpola/projects/hip-osl/osl-artifacts/debug/",
+                "CMAKE_BUILD_TYPE": "Release"
+            }   
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "Debug-build",
+            "description": "Debug build",
+            "configurePreset": "debug-config"
+        },
+        {
+            "name": "Release-build",
+            "description": "Release build",
+            "configurePreset": "release-config"
+        }
+    ]
+}
