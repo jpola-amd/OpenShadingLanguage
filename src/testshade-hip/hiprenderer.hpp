@@ -27,7 +27,7 @@ public:
 
     int supports(OIIO::string_view feature) const override;
 
-    std::vector<uint8_t> load_file(OIIO::string_view filename) const;
+    std::vector<char> load_file(OIIO::string_view filename) const;
 
     // actually not required because the base class has it.
     void init_shadingsys(OSL::ShadingSystem* shadingsys) override final;
@@ -56,19 +56,34 @@ public:
     virtual void device_free(hipDeviceptr_t ptr) override;
     virtual hipDeviceptr_t copy_to_device(hipDeviceptr_t dst_device, const void* src_host, size_t size) override;
 
+    bool initialize_render_parameters() override;
+
 private:
     hipDeviceProp_t m_deviceProperties;
-    hipStream_t m_stream;
-    hipModule_t m_module;
-    hipFunction_t m_function;
+    hipStream_t m_stream { nullptr };
+    hipModule_t m_module { nullptr };
+
+    hipFunction_t m_function_osl_init { nullptr };
+    hipFunction_t m_function_osl_entry { nullptr };
+    hipFunction_t m_function_shade { nullptr };
 
     // render parameters
     int m_xres { 0 };
     int m_yres { 0 };
 
+    uint64_t test_str_1;
+    uint64_t test_str_2;
+
+    const size_t OSL_PRINTF_BUFFER_SIZE {8 * 1024 * 1024};
+
+
     // device memory
     hipDeviceptr_t d_output_buffer { nullptr };
+    hipDeviceptr_t d_launch_params { nullptr };    
     hipDeviceptr_t d_osl_printf_buffer { nullptr };
+    hipDeviceptr_t d_color_system { nullptr };
+
+
 
 
 
@@ -81,9 +96,9 @@ private:
 
     // transformations and the device counterparts
     OSL::Matrix44 m_shader2common;  // "shader" space to "common" space matrix
-    hipDeviceptr_t m_device_shader2common;
+    hipDeviceptr_t d_shader2common;
     OSL::Matrix44 m_object2common;  // "object" space to "common" space matrix
-    hipDeviceptr_t m_device_object2common;
+    hipDeviceptr_t d_object2common;
 
     // TODO: maybe implement switching between devices
     int m_deviceId { 0 };

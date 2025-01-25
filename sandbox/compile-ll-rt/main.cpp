@@ -26,6 +26,14 @@
 #include <llvm/PassRegistry.h>
 #include <llvm/InitializePasses.h>
 
+//lld
+#include <lld/Common/Driver.h>
+#include <lld/Common/Filesystem.h>
+#include <llvm/Support/CommandLine.h>
+#include <llvm/Support/InitLLVM.h>
+#include <llvm/Support/TargetSelect.h>
+
+
 bool validateGfxArch(llvm::StringRef gfxArch)
 {
     if (gfxArch.size() != 6 && gfxArch.size() != 7) {
@@ -51,6 +59,8 @@ bool validateGfxArch(llvm::StringRef gfxArch)
     return true;
 }
 
+
+LLD_HAS_DRIVER(elf)
 
 
 int main(int argc, char* argv[])
@@ -269,8 +279,27 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
+
     // Declare success.
     outputFileDescriptor->keep();
+    //lld part
+    {
+         std::vector<const char *> Args = {
+            "ld.lld",
+            "-shared",
+            "-o", "output.hsaco",
+            outputFileDescriptor->outputFilename().c_str()
+        };
+
+        lld::Result res = lld::lldMain(Args, llvm::outs(), llvm::errs(), {lld::DriverDef{lld::Gnu, &lld::elf::link}});
+        if (res.retCode != 0 && res.canRunAgain)
+        {
+            llvm::errs() << "Error: failed to link\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    llvm::raw_fd_ostream ofs("output.hsaco", EC, llvm::sys::fs::OF_None);
 
     llvm::outs() << "Program finished successfully\n";
     return EXIT_SUCCESS;;

@@ -7,8 +7,8 @@ struct RenderParams {
     hipDeviceptr_t output_buffer;
     bool flipv;
     int fused_callable;
-    hipDeviceptr_t osl_printf_buffer_start;
-    hipDeviceptr_t osl_printf_buffer_end;
+    uint64_t osl_printf_buffer_start;
+    uint64_t osl_printf_buffer_end;
     hipDeviceptr_t color_system;
 
     // for transforms

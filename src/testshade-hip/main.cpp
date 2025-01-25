@@ -280,6 +280,7 @@ int main(int argc, const char *argv[])
     {
         renderer->set_transforms(Mobj, Mshad);
         renderer->register_named_transforms();
+        renderer->initialize_render_parameters();
         
         // from this point the named transforms are visible and can be queried by the get_matrix methods 
         // {

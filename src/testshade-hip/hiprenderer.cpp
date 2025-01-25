@@ -1,5 +1,5 @@
 #include "hiprenderer.hpp"
-
+#include "render_params.hpp"
 #include "assert_hip.hpp"
 
 #include <OpenImageIO/filesystem.h>
@@ -59,7 +59,7 @@ int HIPRenderer::supports(OIIO::string_view feature) const
 }
 
 // this can be a free function
-std::vector<uint8_t>
+std::vector<char>
 HIPRenderer::load_file(OIIO::string_view filename) const 
 {
     std::string filepath = OIIO::Filesystem::searchpath_find(filename, m_search_paths, false);
@@ -68,7 +68,7 @@ HIPRenderer::load_file(OIIO::string_view filename) const
     if (OIIO::Filesystem::exists(filepath)) 
     {
         const auto size = OIIO::Filesystem::file_size(filepath);
-        std::vector<uint8_t> bitcode_data(size);
+        std::vector<char> bitcode_data(size);
         if (OIIO::Filesystem::read_bytes(filepath, bitcode_data.data(), size))
         {
             return bitcode_data;
@@ -224,6 +224,7 @@ HIPRenderer::prepare_render(RenderState& renderState)
     test_group_attributes(groupref, m_shadingSystem);
     
 
+    m_shadingSystem->optimize_group(groupref, nullptr, true);
 
     // // Load the llvm from the shading system and create the module for further processing
     std::string group_name, init_name, entry_name, fused_name;
@@ -232,6 +233,7 @@ HIPRenderer::prepare_render(RenderState& renderState)
     m_shadingSystem->getattribute(groupref, "group_init_name", init_name);
     m_shadingSystem->getattribute(groupref, "group_entry_name", entry_name);
     m_shadingSystem->getattribute(groupref, "group_fused_name", fused_name);
+
 
     std::cout << "Group name: " << group_name << std::endl;
     std::cout << "Init name: " << init_name << std::endl;
@@ -246,38 +248,233 @@ HIPRenderer::prepare_render(RenderState& renderState)
     //     out << hip_llvm_gcn;
     // }
 
-    m_shadingSystem->optimize_group(groupref, nullptr, true);
-
+    
     // Retrieve the compiled ShaderGroup PTX
     std::string hip_llvm_gcn;
-    m_shadingSystem->getattribute(groupref, "hip_compiled_version",
-                                OSL::TypeDesc::PTR, &hip_llvm_gcn);
-
-    if (hip_llvm_gcn.empty()) {
+    if (!m_shadingSystem->getattribute(groupref, "hip_compiled_version", OSL::TypeDesc::PTR, &hip_llvm_gcn))
+    {
         errhandler().errorfmt("Failed to generate hip_llvm_gcn for ShaderGroup {}",
+                                group_name);
+        return;
+
+    }
+    // save the llvm module for further analysis
+    {
+        //save the code for further analysis
+        std::ofstream outFile("hip_shader_gcn.ll", std::ios::out);
+        if (outFile.is_open())
+        {
+            outFile.write(reinterpret_cast<const char*>(hip_llvm_gcn.data()), hip_llvm_gcn.size());
+            outFile.close();
+        }
+    }
+    // compile the hip_llvm_gcon to bitcode and register the entry names for the kernel
+    // use hiprtcAddNameExpression
+    // the names to add are: init_name, entry_name, fused_name
+    /*
+    The identical name expression string must be provided on a subsequent call to hiprtcGetLoweredName to extract the lowered name.
+
+    The correct sequence of calls is : hiprtcAddNameExpression, hiprtcCompileProgram, hiprtcGetLoweredName, hiprtcDestroyProgram.
+
+    The lowered names must be fetched using hiprtcGetLoweredName only after the HIPRTC program has been compiled, and before it has been destroyed.
+
+    */
+    size_t trampoiline_bitcode_size;
+    std::vector<char> trampoline_bitcode;
+    {
+        std::string init_name_addr = "&" + init_name;
+        std::string entry_name_addr = "&" + entry_name;
+        std::string fused_name_addr = "&" + fused_name;
+
+        std::stringstream ss;
+    ss << "class ShaderGlobals;\n";
+    // init 
+    ss << "extern \"C\" __device__ void " << init_name
+       << "(ShaderGlobals*,void*);\n";
+    
+    // entry
+    ss << "extern \"C\" __device__ void " << entry_name
+       << "(ShaderGlobals*,void*);\n";
+    
+    // fused
+    ss << "extern \"C\" __device__ void " << fused_name
+       << "(ShaderGlobals*,void*);\n";
+
+    ss << "extern \"C\" __device__ void __osl__init(ShaderGlobals* sg, void* "
+          "params) { "
+       << init_name << "(sg, params); }\n";
+    ss << "extern \"C\" __device__ void __osl__entry(ShaderGlobals* sg, void* "
+          "params) { "
+       << entry_name << "(sg, params); }\n";
+    ss << "extern \"C\" __device__ void __osl__fused(ShaderGlobals* sg, void* "
+          "params) { "
+       << fused_name << "(sg, params); }\n";
+
+    // dummy kernel
+    //ss << "extern \"C\" __global__ void dummy_trampoline() { ShaderGlobals sg; __osl__init(sg, nullptr); __osl_entry(sg, nullptr); __osl_fused(sg); }\n"; 
+    
+
+
+        auto code = ss.str();
+
+        hiprtcProgram program;
+        HIPRTC_CHECK(hiprtcCreateProgram(&program, code.data(), "dummy_code", 0, nullptr, nullptr));
+        // if (!init_name.empty())
+        //     HIPRTC_CHECK(hiprtcAddNameExpression(program, init_name.c_str()));
+        // if (!entry_name.empty())    
+        //     HIPRTC_CHECK(hiprtcAddNameExpression(program, entry_name.c_str()));
+        // if (!fused_name.empty())
+        //     HIPRTC_CHECK(hiprtcAddNameExpression(program, fused_name.c_str()));
+        // HIPRTC_CHECK(hiprtcAddNameExpression(program, init_name_addr.c_str()));
+        // HIPRTC_CHECK(hiprtcAddNameExpression(program, entry_name_addr.c_str()));
+        // HIPRTC_CHECK(hiprtcAddNameExpression(program, fused_name_addr.c_str()));
+
+        const char* hip_compile_options[] = { 
+                "--offload-arch=gfx1036",
+                "-ffast-math", "-fgpu-rdc", "-emit-llvm", "-c",
+                "-D__HIP_PLATFORM_AMD",
+                "--std=c++17"
+        };
+
+        const int num_compile_flags = int(sizeof(hip_compile_options) / sizeof(hip_compile_options[0]));
+        hiprtcResult compileResult = hiprtcCompileProgram(program, num_compile_flags, hip_compile_options);
+        if (compileResult != HIPRTC_SUCCESS)
+        {
+            size_t hip_log_size;
+            HIPRTC_CHECK(hiprtcGetProgramLogSize(program, &hip_log_size));
+            std::vector<char> hip_log(hip_log_size + 1);
+            HIPRTC_CHECK(hiprtcGetProgramLog(program, hip_log.data()));
+            hip_log.back() = 0;
+            std::stringstream ss;
+            ss << "hiprtcCompileProgram failure for: " << "hip_shader_gcn"
+                << "====================================\n"
+                << hip_log.data();
+            errhandler().errorfmt("Failed to compile the llvm code\n {} ", ss.str());        
+
+            HIPRTC_CHECK(hiprtcDestroyProgram(&program));
+            return;
+
+        }
+
+       
+        HIPRTC_CHECK(hiprtcGetBitcodeSize(program, &trampoiline_bitcode_size));
+        trampoline_bitcode.resize(trampoiline_bitcode_size);
+        HIPRTC_CHECK(hiprtcGetBitcode(program, trampoline_bitcode.data()));
+        HIPRTC_CHECK(hiprtcDestroyProgram(&program));        
+
+    }
+    
+    // Workaround because this should be linked to the hip_llvm_gcn during the optimization / jit stage of the group ref.
+    char* hip_llvm_shaderops {nullptr};
+    int   hip_llvm_shaderops_size {0};
+    if (!m_shadingSystem->getattribute("shadeops_hip_llvm", OSL::TypeDesc::PTR, &hip_llvm_shaderops))
+    {
+        errhandler().errorfmt("Failed to generate hip_llvm_shaderps for ShaderGroup {}",
                                 group_name);
         return;
     }
 
+     if (!m_shadingSystem->getattribute("shadeops_hip_llvm_size", OSL::TypeDesc::INT, &hip_llvm_shaderops_size))
+    {
+        errhandler().errorfmt("Error getting hip llvm ops size");
+        return;
+
+    };
+
     const auto& grid_renderer_bc = load_file("hip_grid_renderer.bc");
     const auto& rend_lib_bc = load_file("rend_lib.bc");
 
+    // can we linki it here?
+    hiprtcLinkState linkState;
+    HIPRTC_CHECK(hiprtcLinkCreate(0, nullptr, nullptr, &linkState));
 
-    // std::map<std::string, Bitcode> bitcode_map;
+    // HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE,  hip_llvm_shaderops, hip_llvm_shaderops_size, "hip_llvm_ops", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)grid_renderer_bc.data(), grid_renderer_bc.size(), "grid_renderer", 0, nullptr, nullptr));
+    // HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)rend_lib_bc.data(), rend_lib_bc.size(), "my_render_lib", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, trampoline_bitcode.data(), trampoline_bitcode.size(), "trampoline", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)hip_llvm_gcn.data(), hip_llvm_gcn.size(), "osl_shader", 0, nullptr, nullptr));
+    //HIPRTC_CHECK(hiprtcLinkAddFile(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, "hip_shader_gcn_used.ll", 0, nullptr, nullptr));
 
-    // {
+    //link everything together
+    std::vector<uint8_t> hip_fatbin; 
 
-    // }
+    {
+        void* code { nullptr };
+        size_t size { 0 };
+
+        HIPRTC_CHECK(hiprtcLinkComplete(linkState, &code, &size));
+
+        //JPA: This is stupid and not intuitive. the owner of the code_ptr and size is the linker. 
+        // Copy the data before destroying the linker
+        if (size == 0)
+        {
+            errhandler().errorfmt("HIPRTC Error: the HIP fatbin size is 0");
+            HIPRTC_CHECK(hiprtcLinkDestroy(linkState)); 
+            return;
+        }
+
+        std::cout << "Program compiled successfully size: " << size << " B" << std::endl;
+
+        hip_fatbin.resize(size);
+        memcpy(hip_fatbin.data(), code, size);
+
+        //save the code for further analysis
+        std::ofstream outFile("hip_fatbin.bin", std::ios::out | std::ios::binary);
+        if (outFile.is_open())
+        {
+            outFile.write(reinterpret_cast<const char*>(hip_fatbin.data()), hip_fatbin.size());
+            outFile.close();
+        }
+        else{
+            errhandler().errorfmt("Proble with opening hip_fatbin.bin file for writing compiled code");
+        }
+
+        HIPRTC_CHECK(hiprtcLinkDestroy(linkState)); 
+    }
 
 
-    
-    // use the hiprtcAddNameExpression mechanism to get the global variables
-    //hipModuleGetGlobal(&m_function, &m_module, "test", 0);
+    HIP_CHECK(hipModuleLoadData(&m_module, hip_fatbin.data()));
+
+
+
+    HIP_CHECK(hipModuleGetFunction(&m_function_shade, m_module, "shade"));
+    HIP_CHECK(hipModuleGetFunction(&m_function_osl_entry, m_module, entry_name.c_str()));
+    HIP_CHECK(hipModuleGetFunction(&m_function_osl_init, m_module, init_name.c_str()));
+
+
+
 }
 
 void
 HIPRenderer::render(int xres, int yres, RenderState& renderState)
 {
+    d_output_buffer = device_alloc(xres * yres * 4 * sizeof(float));
+    d_launch_params = device_alloc(sizeof(testshadeHIP::RenderParams));
+
+    m_xres = xres;
+    m_yres = yres;
+
+    testshadeHIP::RenderParams params;
+    params.invw  = 1.0f / std::max(1, m_xres - 1);
+    params.invh  = 1.0f / std::max(1, m_yres - 1);
+    params.flipv = false; /* I don't see flipv being initialized anywhere */
+    params.output_buffer           = d_output_buffer;
+    params.osl_printf_buffer_start = reinterpret_cast<uint64_t>(d_osl_printf_buffer);
+    // maybe send buffer size to CUDA instead of the buffer 'end'
+    params.osl_printf_buffer_end = reinterpret_cast<uint64_t>(d_osl_printf_buffer) + OSL_PRINTF_BUFFER_SIZE;
+    params.color_system          = d_color_system;
+    params.test_str_1            = test_str_1;
+    params.test_str_2            = test_str_2;
+    params.object2common         = d_object2common;
+    params.shader2common         = d_shader2common;
+    params.num_named_xforms      = m_num_named_xforms;
+    params.xform_name_buffer     = d_xform_name_buffer;
+    params.xform_buffer          = d_xform_buffer;
+    //params.fused_callable        = m_fused_callable;
+
+    copy_to_device(d_launch_params, &params, sizeof(testshadeHIP::RenderParams));
+
+
     // Launch the kernel
     //hipLaunchKernelGGL(m_function, dim3(1), dim3(1), 0, m_stream);
 }
@@ -306,11 +503,11 @@ void HIPRenderer::register_named_transforms()
     }
 
     // Push the names and transforms to the device
-    size_t sz           = sizeof(uint64_t) * xform_name_buffer.size();
+    size_t sz = sizeof(uint64_t) * xform_name_buffer.size();
     d_xform_name_buffer = device_alloc(sz);
     copy_to_device(d_xform_name_buffer, xform_name_buffer.data(), sz);
     
-    sz             = sizeof(OSL::Matrix44) * xform_buffer.size();
+    sz = sizeof(OSL::Matrix44) * xform_buffer.size();
     d_xform_buffer = device_alloc(sz);
     copy_to_device(d_xform_buffer, xform_buffer.data(), sz);
 
@@ -322,7 +519,7 @@ HIPRenderer::finalize_pixel_buffer()
 {
     std::vector<float> tmp_buff(m_xres * m_yres * 3);
     HIP_CHECK(hipMemcpy(tmp_buff.data(),
-                        reinterpret_cast<void*>(d_output_buffer),
+                        d_output_buffer,
                         m_xres * m_yres * 3 * sizeof(float),
                         hipMemcpyDeviceToHost));
 
@@ -385,4 +582,69 @@ HIPRenderer::copy_to_device(hipDeviceptr_t dst_device, const void* src_host, siz
         errhandler().errorfmt("hipMemcpy host->device of size {} failed with error: {}\n", size, hipGetErrorString(result));
     }
     return dst_device;
+}
+
+bool
+HIPRenderer::initialize_render_parameters()
+{
+    // FIXME -- this is for testing only
+    // Make some device strings to test userdata parameters
+    OSL::ustring userdata_str1("ud_str_1");
+    OSL::ustring userdata_str2("userdata string");
+
+    // Store the user-data
+    test_str_1 = userdata_str1.hash();
+    test_str_2 = userdata_str2.hash();
+
+    {
+        char* colorSys            = nullptr;
+        long long cpuDataSizes[2] = { 0, 0 };
+        // TODO: utilize opaque shading state uniform data structure
+        // which has a device friendly representation this data
+        // and is already accessed directly by opcolor and opmatrix for
+        // the cpu (just remove optix special casing)
+        if (!m_shadingSystem->getattribute("colorsystem", OSL::TypeDesc::PTR,
+                                      (void*)&colorSys)
+            || !m_shadingSystem->getattribute("colorsystem:sizes",
+                                         OSL::TypeDesc(OSL::TypeDesc::LONGLONG, 2),
+                                         (void*)&cpuDataSizes)
+            || !colorSys || !cpuDataSizes[0]) {
+            errhandler().errorfmt("No colorsystem available.");
+            return false;
+        }
+
+        auto cpuDataSize = cpuDataSizes[0];
+        auto numStrings  = cpuDataSizes[1];
+        
+        // Get the size data-size, minus the ustring size
+        const size_t podDataSize = cpuDataSize
+                                   - sizeof(OSL::ustringhash) * numStrings;
+
+        d_color_system = device_alloc(podDataSize + sizeof(uint64_t) * numStrings);
+        copy_to_device(d_color_system, colorSys, podDataSize);
+
+        d_osl_printf_buffer = device_alloc(OSL_PRINTF_BUFFER_SIZE);
+        copy_to_device(d_osl_printf_buffer, nullptr, OSL_PRINTF_BUFFER_SIZE);
+        
+        // Transforms
+        d_object2common = device_alloc(sizeof(OSL::Matrix44));
+        copy_to_device(d_object2common, &m_object2common, sizeof(OSL::Matrix44));
+        
+        d_shader2common = device_alloc(sizeof(OSL::Matrix44));
+        copy_to_device(d_shader2common, &m_shader2common, sizeof(OSL::Matrix44));
+        
+        // then copy the device string to the end, first strings starting at dataPtr - (numStrings)
+        // FIXME -- Should probably handle alignment better.
+        const OSL::ustringhash* cpuStringHash
+            = (const OSL::ustringhash*)(colorSys + (cpuDataSize - sizeof(OSL::ustringhash) * numStrings));
+
+        hipDeviceptr_t gpuStrings = static_cast<hipDeviceptr_t>(static_cast<char*>(d_color_system) + podDataSize);
+
+        for (const OSL::ustringhash* end = cpuStringHash + numStrings; cpuStringHash < end; ++cpuStringHash) {
+                OSL::ustringhash_pod devStr = cpuStringHash->hash();
+                copy_to_device(gpuStrings, &devStr, sizeof(devStr));
+                gpuStrings = static_cast<hipDeviceptr_t>(static_cast<char*>(gpuStrings) + sizeof(devStr));
+        }
+    }
+    return true;
 }

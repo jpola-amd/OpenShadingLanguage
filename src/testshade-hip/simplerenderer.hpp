@@ -172,6 +172,10 @@ public:
     OIIO::ParamValueList options;
     OIIO::ParamValueList userdata;
 
+    // this is for the GPU renderer where it will allocate required memory
+    // and setup the individual parameters.
+    virtual bool initialize_render_parameters() { return false; }
+
 protected: 
     // Named transforms
     typedef std::map<OIIO::ustringhash, std::shared_ptr<Transformation>> TransformMap;

@@ -117,7 +117,7 @@ closure_add_allot(void* pool, OSL::ClosureColor* a, OSL::ClosureColor* b)
 __device__ void*
 osl_allocate_closure_component(void* sg_, int id, int size)
 {
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     OSL::Color3 w = OSL::Color3(1, 1, 1);
     // Fix up the alignment
@@ -138,7 +138,7 @@ __device__ void*
 osl_allocate_weighted_closure_component(void* sg_, int id, int size,
                                         const void* w)
 {
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     const OSL::Color3* wc
         = (const OSL::Color3*)__builtin_assume_aligned(w, alignof(float));
@@ -163,7 +163,7 @@ osl_allocate_weighted_closure_component(void* sg_, int id, int size,
 __device__ void*
 osl_mul_closure_color(void* sg_, void* a, const void* w)
 {
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
     const OSL::Color3* wc
         = (const OSL::Color3*)__builtin_assume_aligned(w, alignof(float));
 
@@ -195,7 +195,7 @@ osl_mul_closure_float(void* sg_, void* a, float w)
 {
     a = __builtin_assume_aligned(a, alignof(float));
 
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     if (a == NULL || w == 0.0f) {
         return NULL;
@@ -223,7 +223,7 @@ osl_add_closure_closure(void* sg_, void* a, void* b)
     a = __builtin_assume_aligned(a, alignof(float));
     b = __builtin_assume_aligned(b, alignof(float));
 
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     if (a == NULL) {
         return b;
@@ -379,7 +379,7 @@ osl_get_matrix(void* sg_, void* r, OSL::ustringhash_pod from_)
 {
     r                           = __builtin_assume_aligned(r, alignof(float));
     OSL::ustringhash from       = OSL::ustringhash_from(from_);
-    OSL_HIP::ShaderGlobals* sg = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg = (ShaderGlobals*)sg_;
     if (from == OSL::Hashes::common) {
         MAT(r).makeIdentity();
         return true;
@@ -424,7 +424,7 @@ osl_get_inverse_matrix(void* sg_, void* r, OSL::ustringhash_pod to_)
 {
     r                           = __builtin_assume_aligned(r, alignof(float));
     OSL::ustringhash to         = OSL::ustringhash_from(to_);
-    OSL_HIP::ShaderGlobals* sg = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg = (ShaderGlobals*)sg_;
     if (to == OSL::Hashes::common) {
         MAT(r).makeIdentity();
         return true;

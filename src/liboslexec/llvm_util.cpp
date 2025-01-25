@@ -1031,11 +1031,25 @@ LLVM_Util::module_from_bitcode(const char* bitcode, size_t size,
     // is part of the symbol name.
     ErrorOrModule ModuleOrErr = llvm::parseBitcodeFile(buf, context());
 #else
+    ErrorOrModule ModuleOrErrParsed = llvm::parseBitcodeFile(buf, context());
+    if (err){
+        error_string(ModuleOrErrParsed.takeError(), err);
+        if (!err->empty())
+        {
+            llvm::outs() << "Error parsing bitcode file: \n" << *err << "\n";
+            llvm::outs().flush();
+        }
+    }
+
     ErrorOrModule ModuleOrErr = llvm::getLazyBitcodeModule(buf, context());
 #endif
 
     if (err) {
         error_string(ModuleOrErr.takeError(), err);
+        if (!err->empty()) {
+            llvm::outs() << "Error getting lazy bitcode module: \n" << *err << "\n";
+            llvm::outs().flush();
+        }
     }
     llvm::Module* m = ModuleOrErr ? ModuleOrErr->release() : nullptr;
 #if 0
@@ -1876,6 +1890,12 @@ LLVM_Util::nvptx_target_machine()
     return m_nvptx_target_machine;
 }
 
+llvm::StringRef
+LLVM_Util::GetTargetAMDGPU() 
+{
+    return amdgcn_target_machine()->getTargetCPU();
+}
+
 llvm::TargetMachine*
 LLVM_Util::amdgcn_target_machine()
 {
@@ -1908,7 +1928,7 @@ LLVM_Util::amdgcn_target_machine()
             HIP_TARGET_ARCH,
             "", //features
             options,
-            llvm::Reloc::Static,
+            llvm::Reloc::PIC_,
             llvm::CodeModel::Small,
 #if OSL_LLVM_VERSION >= 180
             llvm::CodeGenOptLevel::Default
@@ -6928,38 +6948,52 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
 #if defined(OSL_USE_HIP)
     llvm::TargetMachine* target_machine = amdgcn_target_machine();
     llvm::legacy::PassManager mpm;
-    llvm::SmallString<4096> assembly;
-    llvm::raw_svector_ostream assembly_stream(assembly);
+    llvm::SmallString<4096> object;
+    llvm::raw_svector_ostream out_stream(object);
 
     if (target_machine == nullptr) {
         std::cerr << "AMDGCN target machine is not available" << std::endl;
         return false;
     }
 
-    target_machine->addPassesToEmitFile(mpm, assembly_stream,
+    target_machine->addPassesToEmitFile(mpm, out_stream,
                                         nullptr,  // FIXME: Correct?
-                                        llvm::CodeGenFileType::ObjectFile);
+                                        llvm::CodeGenFileType::AssemblyFile);
 
-    mpm.run(*module());
-    llvm::raw_string_ostream out_stream(out);
-    module()->print(out_stream, nullptr);
-    return true;
-    //I want to get the module() to be written tou std::string out
-
-    if (debug() > 2 )
+    bool compilation_result = mpm.run(*module());
+    if (compilation_result == false)
     {
-        //save the module to a file
-        std::string filename = name + ".gcn.o";
-        std::error_code local_error;
-        llvm::raw_fd_ostream out(filename, local_error, llvm::sys::fs::OF_None);
-        if (!out.has_error()) {
-            llvm::WriteBitcodeToFile(*module(), out);
-        }
-        std::cout << "AMDGCN Assembly: \n" << assembly_stream.str().str() << std::endl;
-        std::cout << "AMDGCN Assembly saved to: " << filename << std::endl;
+        std::cerr << "Failed to compile AMDGCN module" << std::endl;
+        return false;
     }
-   
-    //out = assembly_stream.str();
+
+    // output the object stream to out;
+    {
+        llvm::raw_string_ostream object_stream(out);
+        llvm::WriteBitcodeToFile(*module(), object_stream);
+    }
+
+    llvm::errs() << *module();
+    //out = out_stream.str(); //<--- not this entity
+
+    if (debug() > 1)
+    {
+        llvm::StringRef moduleFilename = "amdgcn_module.ll";
+        std::error_code error_code;
+        llvm::raw_fd_ostream fd(moduleFilename, error_code);
+        if (!error_code)
+        {
+            module()->print(fd, nullptr);
+        }
+
+        llvm::StringRef compiledModule = "amdgcn_compiled_module.s";
+        llvm::raw_fd_ostream f(compiledModule, error_code);
+        if (!error_code)
+        {
+            f << out_stream.str();
+        }
+    }
+
     return true;
 #else
     return false;

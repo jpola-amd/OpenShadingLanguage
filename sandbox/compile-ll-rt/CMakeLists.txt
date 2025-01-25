@@ -31,17 +31,23 @@ else()
 endif()
 
 find_package(LLVM 19.1 REQUIRED CONFIG HINTS ${LLVM_HOME})
+find_package(LLD 19.1 REQUIRED CONFIG HINTS ${LLVM_HOME} )
+
 find_package(HIP REQUIRED HINTS $ENV{HIP_PATH})
 
 # how to use the llvm package
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+message(STATUS "Found LLD ${LLD_VERSION}")
+message(STATUS "Found HIP ${HIP_VERSION}")
+
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "LLVM_DEFINITIONS: ${LLVM_DEFINITIONS}")
 message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
 message(STATUS "LLVM_LIBRARY_DIRS: ${LLVM_LIBRARY_DIRS}")
 message(STATUS "LLVM_TOOLS_BINARY_DIR: ${LLVM_TOOLS_BINARY_DIR}")
 
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Found HIP ${HIP_VERSION}")
+message(STATUS "LLD_LIBRARIES ${LLD_EXPORTED_TARGETS}")
+message(STATUS "LLD_INCLUDE_DIRS ${LLD_INCLUDE_DIRS}")
 
 function(find_llvm_program OUT_VARIABLE program_name description)
     if (NOT ${OUT_VARIABLE})
@@ -123,8 +129,8 @@ llvm_map_components_to_libnames(llvm_libs
 )
 
 add_executable(example ${sources})
-target_include_directories(example PRIVATE ${LLVM_INCLUDE_DIRS})
-target_link_libraries(example PRIVATE ${llvm_libs})
+target_include_directories(example PRIVATE ${LLVM_INCLUDE_DIRS} ${LLD_INCLUDE_DIRS})
+target_link_libraries(example PRIVATE ${llvm_libs} ${LLD_EXPORTED_TARGETS})
 add_dependencies(example amdgcn_outputs)
 
 

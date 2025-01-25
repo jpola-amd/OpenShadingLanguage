@@ -276,6 +276,9 @@ public:
 
     llvm::TargetMachine* amdgcn_target_machine();
 
+    llvm::StringRef GetTargetAMDGPU();
+    
+    /// Return a pointer to the TargetMachine for the host.  Create the TargetMachine
     enum class Linkage {
         External,  // Externally visible
         LinkOnceODR,  // One Definition Rule:  Inline version, but allow replacement by equivalent.

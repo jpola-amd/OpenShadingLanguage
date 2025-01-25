@@ -507,7 +507,7 @@ bool SimpleRenderer::get_matrix(ShaderGlobals* /*sg*/, Matrix44& result,
 {
     // SimpleRenderer doesn't understand motion blur and transformations
     // are just simple 4x4 matrices.
-    result = *reinterpret_cast<const Matrix44*>(xform);
+    result = *static_cast<const Matrix44*>(xform);
     return true;
 }
 
@@ -710,7 +710,7 @@ SimpleRenderer::get_userdata(bool derivatives, ustringhash name, TypeDesc type,
         size_t size = p->type().size();
 
         if (p->type() == TypeDesc::STRING) {
-            const ustringhash* uh_data = reinterpret_cast<const ustringhash*>(p->data());
+            const ustringhash* uh_data = static_cast<const ustringhash*>(p->data());
             memcpy(val, uh_data, size);
         } else {
             memcpy(val, p->data(), size);
@@ -1040,7 +1040,7 @@ void SimpleRenderer::errorfmt(OSL::ShaderGlobals* sg,
                          const EncodedType* arg_types, uint32_t arg_values_size,
                          uint8_t* argValues)
 {
-    RenderState* rs = reinterpret_cast<RenderState*>(sg->renderstate);
+    RenderState* rs = static_cast<RenderState*>(sg->renderstate);
     OSL::journal::Writer jw { rs->journal_buffer };
     jw.record_errorfmt(OSL::get_thread_index(sg), OSL::get_shade_index(sg),
                        fmt_specification, arg_count, arg_types, arg_values_size,
@@ -1052,7 +1052,7 @@ void SimpleRenderer::warningfmt(OSL::ShaderGlobals* sg,
                            int32_t arg_count, const EncodedType* arg_types,
                            uint32_t arg_values_size, uint8_t* argValues)
 {
-    RenderState* rs = reinterpret_cast<RenderState*>(sg->renderstate);
+    RenderState* rs = static_cast<RenderState*>(sg->renderstate);
     OSL::journal::Writer jw { rs->journal_buffer };
     jw.record_warningfmt(OSL::get_max_warnings_per_thread(sg),
                          OSL::get_thread_index(sg), OSL::get_shade_index(sg),
@@ -1066,7 +1066,7 @@ void SimpleRenderer::printfmt(OSL::ShaderGlobals* sg,
                          const EncodedType* arg_types, uint32_t arg_values_size,
                          uint8_t* argValues)
 {
-    RenderState* rs = reinterpret_cast<RenderState*>(sg->renderstate);
+    RenderState* rs = static_cast<RenderState*>(sg->renderstate);
     OSL::journal::Writer jw { rs->journal_buffer };
     jw.record_printfmt(OSL::get_thread_index(sg), OSL::get_shade_index(sg),
                        fmt_specification, arg_count, arg_types, arg_values_size,
@@ -1078,7 +1078,7 @@ void SimpleRenderer::filefmt(OSL::ShaderGlobals* sg, OSL::ustringhash filename_h
                         const EncodedType* arg_types, uint32_t arg_values_size,
                         uint8_t* argValues)
 {
-    RenderState* rs = reinterpret_cast<RenderState*>(sg->renderstate);
+    RenderState* rs = static_cast<RenderState*>(sg->renderstate);
     OSL::journal::Writer jw { rs->journal_buffer };
     jw.record_filefmt(OSL::get_thread_index(sg), OSL::get_shade_index(sg),
                       filename_hash, fmt_specification, arg_count, arg_types,
