@@ -383,14 +383,15 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     const auto& grid_renderer_bc = load_file("hip_grid_renderer.bc");
     const auto& rend_lib_bc = load_file("rend_lib.bc");
+    const auto& a = load_file("amdgcn_module2.o");
 
     // can we linki it here?
     hiprtcLinkState linkState;
     HIPRTC_CHECK(hiprtcLinkCreate(0, nullptr, nullptr, &linkState));
 
-    // HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE,  hip_llvm_shaderops, hip_llvm_shaderops_size, "hip_llvm_ops", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE,  hip_llvm_shaderops, hip_llvm_shaderops_size, "hip_llvm_ops", 0, nullptr, nullptr));
     HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)grid_renderer_bc.data(), grid_renderer_bc.size(), "grid_renderer", 0, nullptr, nullptr));
-    // HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)rend_lib_bc.data(), rend_lib_bc.size(), "my_render_lib", 0, nullptr, nullptr));
+    HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)rend_lib_bc.data(), rend_lib_bc.size(), "my_render_lib", 0, nullptr, nullptr));
     HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, trampoline_bitcode.data(), trampoline_bitcode.size(), "trampoline", 0, nullptr, nullptr));
     HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)hip_llvm_gcn.data(), hip_llvm_gcn.size(), "osl_shader", 0, nullptr, nullptr));
     //HIPRTC_CHECK(hiprtcLinkAddFile(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, "hip_shader_gcn_used.ll", 0, nullptr, nullptr));
@@ -438,11 +439,6 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
 
     HIP_CHECK(hipModuleGetFunction(&m_function_shade, m_module, "shade"));
-    HIP_CHECK(hipModuleGetFunction(&m_function_osl_entry, m_module, entry_name.c_str()));
-    HIP_CHECK(hipModuleGetFunction(&m_function_osl_init, m_module, init_name.c_str()));
-
-
-
 }
 
 void
@@ -474,6 +470,19 @@ HIPRenderer::render(int xres, int yres, RenderState& renderState)
 
     copy_to_device(d_launch_params, &params, sizeof(testshadeHIP::RenderParams));
 
+    hipDeviceptr_t d_render_globals;
+    size_t bytes {0};
+    HIP_CHECK(hipModuleGetGlobal(&d_render_globals, &bytes, m_module, "gc_render_params"));
+
+    HIP_CHECK(hipMemcpy(d_render_globals, &d_launch_params, sizeof(hipDeviceptr_t), hipMemcpyHostToDevice));
+
+    void* args[] = { &d_output_buffer, &m_xres, &m_yres, &d_launch_params};
+
+    hipModuleLaunchKernel(m_function_shade, 
+        1, 1, 1, 
+        1, 1, 1, 
+        0, 
+        m_stream, args, nullptr);
 
     // Launch the kernel
     //hipLaunchKernelGGL(m_function, dim3(1), dim3(1), 0, m_stream);

@@ -6946,35 +6946,44 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
                               std::string& out)
  {
 #if defined(OSL_USE_HIP)
-    llvm::TargetMachine* target_machine = amdgcn_target_machine();
+    //llvm::TargetMachine* target_machine = amdgcn_target_machine();
     llvm::legacy::PassManager mpm;
     llvm::SmallString<4096> object;
     llvm::raw_svector_ostream out_stream(object);
 
-    if (target_machine == nullptr) {
-        std::cerr << "AMDGCN target machine is not available" << std::endl;
-        return false;
-    }
+    // llvm::raw_string_ostream _stream(out);
+    // _stream << *module();
+    
 
-    target_machine->addPassesToEmitFile(mpm, out_stream,
-                                        nullptr,  // FIXME: Correct?
-                                        llvm::CodeGenFileType::AssemblyFile);
+    // llvm::errs() << "(BEFORE)\n";
+    // llvm::errs() << *module();
+    // if (target_machine == nullptr) {
+    //     std::cerr << "AMDGCN target machine is not available" << std::endl;
+    //     return false;
+    // }
 
-    bool compilation_result = mpm.run(*module());
-    if (compilation_result == false)
-    {
-        std::cerr << "Failed to compile AMDGCN module" << std::endl;
-        return false;
-    }
+    // target_machine->addPassesToEmitFile(mpm, out_stream,
+    //                                     nullptr,  // FIXME: Correct?
+    //                                     llvm::CodeGenFileType::ObjectFile);
 
+
+    // bool compilation_result = mpm.run(*module());
+    // if (compilation_result == false)
+    // {
+    //     std::cerr << "Failed to compile AMDGCN module" << std::endl;
+    //     return false;
+    // }
+
+    // llvm::errs() << "(AFTER)\n";
+    // llvm::errs() << *module();
     // output the object stream to out;
     {
         llvm::raw_string_ostream object_stream(out);
         llvm::WriteBitcodeToFile(*module(), object_stream);
     }
 
-    llvm::errs() << *module();
-    //out = out_stream.str(); //<--- not this entity
+    // llvm::errs() << *module();
+    // //out = out_stream.str(); //<--- not this entity
 
     if (debug() > 1)
     {
@@ -6986,7 +6995,7 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
             module()->print(fd, nullptr);
         }
 
-        llvm::StringRef compiledModule = "amdgcn_compiled_module.s";
+        llvm::StringRef compiledModule = "amdgcn_compiled_module.o";
         llvm::raw_fd_ostream f(compiledModule, error_code);
         if (!error_code)
         {

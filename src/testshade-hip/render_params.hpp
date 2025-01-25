@@ -2,25 +2,25 @@
 namespace testshadeHIP 
 {
 struct RenderParams {
-    float invw;
-    float invh;
-    hipDeviceptr_t output_buffer;
-    bool flipv;
-    int fused_callable;
-    uint64_t osl_printf_buffer_start;
-    uint64_t osl_printf_buffer_end;
-    hipDeviceptr_t color_system;
+    float invw{0.f};
+    float invh{0.f};
+    hipDeviceptr_t output_buffer{nullptr};
+    bool flipv {false};
+    int fused_callable {0};
+    uint64_t osl_printf_buffer_start {0};
+    uint64_t osl_printf_buffer_end {0};
+    hipDeviceptr_t color_system {nullptr};
 
     // for transforms
-    hipDeviceptr_t object2common;
-    hipDeviceptr_t shader2common;
-    uint64_t num_named_xforms;
-    hipDeviceptr_t xform_name_buffer;
-    hipDeviceptr_t xform_buffer;
+    hipDeviceptr_t object2common {nullptr};
+    hipDeviceptr_t shader2common {nullptr};
+    uint64_t num_named_xforms {0};
+    hipDeviceptr_t xform_name_buffer {nullptr};
+    hipDeviceptr_t xform_buffer {nullptr};
 
     // for used-data tests
-    uint64_t test_str_1;
-    uint64_t test_str_2;
+    uint64_t test_str_1 {0};
+    uint64_t test_str_2 {0};
 };
 
 }  // namespace testshadeHIP

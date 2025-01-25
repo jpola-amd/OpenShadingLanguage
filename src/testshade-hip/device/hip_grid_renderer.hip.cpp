@@ -31,11 +31,11 @@ extern "C" __device__ void
 __osl__entry(ShaderGlobals*, void*);
 
 extern "C" {
-__device__ __constant__ testshadeHIP::RenderParams render_params;
+__device__ __constant__ testshadeHIP::RenderParams gc_render_params;
 }
 
 
-extern "C" __device__  void __prepare_globals()
+extern "C" __device__  void __prepare_globals(testshadeHIP::RenderParams& render_params)
 {
     // Set global variables
     OSL::pvt::osl_printf_buffer_start = render_params.osl_printf_buffer_start;
@@ -48,9 +48,11 @@ extern "C" __device__  void __prepare_globals()
     OSL::pvt::xform_buffer            = render_params.xform_buffer;
 }
 
-extern "C" __global__ void shade(float3* Cout, int w, int h)
+extern "C" __global__ void shade(float3* Cout, int w, int h, testshadeHIP::RenderParams* ptr_render_params)
 {
-    __prepare_globals();
+    
+
+    testshadeHIP::RenderParams& render_params = *ptr_render_params;
 
    // Get thread indices (equivalent to launch index in OptiX)
     const uint3 thread_idx = make_uint3(
@@ -58,6 +60,15 @@ extern "C" __global__ void shade(float3* Cout, int w, int h)
         blockIdx.y * blockDim.y + threadIdx.y,
         blockIdx.z * blockDim.z + threadIdx.z
     );
+
+    if (thread_idx.x < 1)
+    {
+        __prepare_globals(render_params);
+        printf("Thread idx: %d, w %d, h %d c: %p\n", thread_idx.x, w, h, render_params.color_system);
+    }
+    //return;
+
+
 
     // Get dimensions (equivalent to launch dims in OptiX)
     const uint3 dims = make_uint3(
