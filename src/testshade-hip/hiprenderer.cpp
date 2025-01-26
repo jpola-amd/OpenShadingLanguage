@@ -382,6 +382,8 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     };
 
+    
+
     const auto& grid_renderer_bc = load_file("hip_grid_renderer.bc");
     const auto& rend_lib_bc = load_file("rend_lib.bc");
 
