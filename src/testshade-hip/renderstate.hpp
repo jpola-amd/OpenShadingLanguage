@@ -42,6 +42,8 @@ struct RenderState {
 
     char* output_base_ptr {nullptr};
     char* userdata_base_ptr {nullptr};
+
+    std::vector<const char*> cout = {"Cout"};
 };
 
 

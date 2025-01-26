@@ -91,30 +91,30 @@ void setup_output_images(SimpleRenderer* renderer, OSL::ShadingSystem* shadingSy
 
     std::cout << "Render outputs: " << renderer->noutputs() << std::endl;
 
-    if (renderer->noutputs() > 0)
-    {
-        std::vector<OSL::SymLocationDesc> symlocs;
-        for (size_t i = 0; i < renderer->noutputs(); ++i)
-        {
-            OIIO::ImageBuf* ib = renderer->outputbuf(i);
-            char* outptr = static_cast<char*>(ib->pixeladdr(0, 0));
-            if (i == 0)
-            {
-                // The output arena is the start of the first output jbuffer
-                g_renderstate.output_base_ptr = outptr;
-            }
+    // if (renderer->noutputs() > 0)
+    // {
+    //     std::vector<OSL::SymLocationDesc> symlocs;
+    //     for (size_t i = 0; i < renderer->noutputs(); ++i)
+    //     {
+    //         OIIO::ImageBuf* ib = renderer->outputbuf(i);
+    //         char* outptr = static_cast<char*>(ib->pixeladdr(0, 0));
+    //         if (i == 0)
+    //         {
+    //             // The output arena is the start of the first output jbuffer
+    //             g_renderstate.output_base_ptr = outptr;
+    //         }
 
 
-            ptrdiff_t offset = outptr - g_renderstate.output_base_ptr;
-            OIIO::TypeDesc t = vartype;
-            auto outputname = renderer->outputname(i);
-            symlocs.emplace_back(outputname, t, false, OSL::SymArena::Outputs, offset, t.size());
-            std::cout.flush();
-            OIIO::Strutil::print("Output buffer - symloc {} {} off={} size={}\n",
-                                  outputname, t, offset, t.size());
-        }
-        shadingSystem->add_symlocs(shaderGroup.get(), symlocs);
-    }
+    //         ptrdiff_t offset = outptr - g_renderstate.output_base_ptr;
+    //         OIIO::TypeDesc t = vartype;
+    //         auto outputname = renderer->outputname(i);
+    //         symlocs.emplace_back(outputname, t, false, OSL::SymArena::Outputs, offset, t.size());
+    //         std::cout.flush();
+    //         OIIO::Strutil::print("Output buffer - symloc {} {} off={} size={}\n",
+    //                               outputname, t, offset, t.size());
+    //     }
+    //     shadingSystem->add_symlocs(shaderGroup.get(), symlocs);
+    // }
 
     
     {
@@ -135,7 +135,8 @@ void setup_output_images(SimpleRenderer* renderer, OSL::ShadingSystem* shadingSy
         //                       "renderer_outputs",
         //                       TypeDesc(TypeDesc::STRING, (int)aovnames.size()),
         //                       &aovnames[0]);
-        shadingSystem->attribute(shaderGroup.get(), "renderer_outputs",
+        // Group outputs generates the memcpy in the kernel code. Let's avoid that for a moment;
+        shadingSystem->attribute(NULL, "renderer_outputs",
                                   OIIO::TypeDesc(OIIO::TypeDesc::STRING, (int)aovnames.size()),
                                   &aovnames[0]);
     }
@@ -293,6 +294,7 @@ int main(int argc, const char *argv[])
         // }
     }
 
+    
     // this is crap
     setup_output_images(renderer.get(), shadingSystem.get(), shaderGroup, programArgs);
 

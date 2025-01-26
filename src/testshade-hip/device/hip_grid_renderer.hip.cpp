@@ -28,7 +28,7 @@ OSL_NAMESPACE_EXIT
 extern "C" __device__ void
 __osl__init(ShaderGlobals*, void*);
 extern "C" __device__ void
-__osl__entry(ShaderGlobals*, void*);
+__osl__entry(ShaderGlobals*, void*, void*, void*, int, void*);
 
 extern "C" {
 __device__ __constant__ testshadeHIP::RenderParams gc_render_params;
@@ -139,7 +139,7 @@ extern "C" __global__ void shade(float3* Cout, int w, int h, testshadeHIP::Rende
 
      // call the osl_init
     __osl__init(&sg, params);
-    __osl__entry(&sg, params);
+    __osl__entry(&sg, params, nullptr, nullptr, 0, nullptr);
 
     // call the osl_entry
 

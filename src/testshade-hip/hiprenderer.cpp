@@ -209,6 +209,7 @@ test_group_attributes(OSL::ShaderGroup* group, OSL::ShadingSystem* shadingsys)
 }
 
 
+static std::vector<const char*> outputs { "Cout" };
 void
 HIPRenderer::prepare_render(RenderState& renderState)
 {
@@ -216,13 +217,19 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     export_state(renderState);
 
-    auto groupref = renderState.shaderGroup;
+    OSL::ShaderGroup* groupref = renderState.shaderGroup;
     if (!groupref) {
         errhandler().error("No shader group");
         return;
     }
+    m_shadingSystem->optimize_group(groupref, nullptr, false);
     test_group_attributes(groupref, m_shadingSystem);
     
+    {
+        m_shadingSystem->attribute(groupref, "renderer_outputs",
+                              OSL::TypeDesc(OSL::TypeDesc::STRING, outputs.size()),
+                              outputs.data());
+    }
 
     m_shadingSystem->optimize_group(groupref, nullptr, true);
 
@@ -287,29 +294,35 @@ HIPRenderer::prepare_render(RenderState& renderState)
         std::string fused_name_addr = "&" + fused_name;
 
         std::stringstream ss;
-    ss << "class ShaderGlobals;\n";
+     ss << "class ShaderGlobals;\n";
     // init 
     ss << "extern \"C\" __device__ void " << init_name
        << "(ShaderGlobals*,void*);\n";
     
-    // entry
+    // // entry
     ss << "extern \"C\" __device__ void " << entry_name
-       << "(ShaderGlobals*,void*);\n";
+       << "(ShaderGlobals*,void*, void*, void*, int, void*);\n";
     
-    // fused
-    ss << "extern \"C\" __device__ void " << fused_name
-       << "(ShaderGlobals*,void*);\n";
+    // // fused
+    // ss << "extern \"C\" __device__ void " << fused_name
+    //    << "(ShaderGlobals*,void*);\n";
 
-    ss << "extern \"C\" __device__ void __osl__init(ShaderGlobals* sg, void* "
-          "params) { "
-       << init_name << "(sg, params); }\n";
-    ss << "extern \"C\" __device__ void __osl__entry(ShaderGlobals* sg, void* "
-          "params) { "
-       << entry_name << "(sg, params); }\n";
-    ss << "extern \"C\" __device__ void __osl__fused(ShaderGlobals* sg, void* "
-          "params) { "
-       << fused_name << "(sg, params); }\n";
+    ss << "extern \"C\" __device__ void __osl__init(ShaderGlobals* sg, void* params)\n"
+    << "{\n"
+        << "printf(\"executing init\\n\");\n"
+        << init_name << "(sg, params);\n"
+        << "printf(\"done wiht init\\n\");\n";
+    ss << "}\n";
 
+    ss << "extern \"C\" __device__ void __osl__entry(ShaderGlobals* sg, void* params, void* userdata, void* outdata, int idx, void* interactive)\n"
+    << "{\n"
+        << "printf(\"executing layer\\n\");\n"
+        << entry_name << "(sg, params, userdata, outdata, idx, interactive);\n"
+        << "printf(\"done wiht layer\\n\");\n"
+    << "}\n";
+
+    std::cout << "Generated code: " << std::endl;
+    std::cout << ss.str() << std::endl;
     // dummy kernel
     //ss << "extern \"C\" __global__ void dummy_trampoline() { ShaderGlobals sg; __osl__init(sg, nullptr); __osl_entry(sg, nullptr); __osl_fused(sg); }\n"; 
     
@@ -334,6 +347,7 @@ HIPRenderer::prepare_render(RenderState& renderState)
                 "-ffast-math", "-fgpu-rdc", "-emit-llvm", "-c",
                 "-D__HIP_PLATFORM_AMD",
                 "--std=c++17"
+                //,"-O0", "-ggdb",
         };
 
         const int num_compile_flags = int(sizeof(hip_compile_options) / sizeof(hip_compile_options[0]));
@@ -346,8 +360,7 @@ HIPRenderer::prepare_render(RenderState& renderState)
             HIPRTC_CHECK(hiprtcGetProgramLog(program, hip_log.data()));
             hip_log.back() = 0;
             std::stringstream ss;
-            ss << "hiprtcCompileProgram failure for: " << "hip_shader_gcn"
-                << "====================================\n"
+            ss << "hiprtcCompileProgram failure for: \n"
                 << hip_log.data();
             errhandler().errorfmt("Failed to compile the llvm code\n {} ", ss.str());        
 
