@@ -54,19 +54,10 @@ extern "C" __global__ void shade(float3* Cout, int w, int h, testshadeHIP::Rende
 
     testshadeHIP::RenderParams& render_params = *ptr_render_params;
 
-   // Get thread indices (equivalent to launch index in OptiX)
-    const uint3 thread_idx = make_uint3(
-        blockIdx.x * blockDim.x + threadIdx.x,
-        blockIdx.y * blockDim.y + threadIdx.y,
-        blockIdx.z * blockDim.z + threadIdx.z
-    );
+  	const uint32_t x	 = blockIdx.x * blockDim.x + threadIdx.x;
+	const uint32_t y	 = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (thread_idx.x < 1)
-    {
-        __prepare_globals(render_params);
-        printf("Thread idx: %d, w %d, h %d c: %p\n", thread_idx.x, w, h, render_params.color_system);
-    }
-    //return;
+	const uint32_t index = x + y * w;
 
 
 
@@ -87,8 +78,8 @@ extern "C" __global__ void shade(float3* Cout, int w, int h, testshadeHIP::Rende
 
     // Compute pixel coordinates (same logic as original)
     float2 d = make_float2(
-        (dims.x == 1) ? 0.5f : invw * thread_idx.x,
-        (dims.y == 1) ? 0.5f : invh * thread_idx.y
+        (dims.x == 1) ? 0.5f : invw * x,
+        (dims.y == 1) ? 0.5f : invh * y
     );
 
      // TODO: Fixed-sized allocations can easily be exceeded by arbitrary shader
@@ -145,7 +136,7 @@ extern "C" __global__ void shade(float3* Cout, int w, int h, testshadeHIP::Rende
 
 
     float* f_output      = (float*)params;
-    int pixel            = thread_idx.y * thread_idx.x + thread_idx.x;
+    int pixel            = y * w + x;
     output_buffer[pixel] = { f_output[1], f_output[2], f_output[3] };
    
 

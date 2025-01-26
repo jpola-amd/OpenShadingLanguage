@@ -309,16 +309,16 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     ss << "extern \"C\" __device__ void __osl__init(ShaderGlobals* sg, void* params)\n"
     << "{\n"
-        << "printf(\"executing init\\n\");\n"
+      //  << "printf(\"executing init\\n\");\n"
         << init_name << "(sg, params);\n"
-        << "printf(\"done wiht init\\n\");\n";
-    ss << "}\n";
+      //  << "printf(\"done wiht init\\n\");\n";
+    << "}\n";
 
     ss << "extern \"C\" __device__ void __osl__entry(ShaderGlobals* sg, void* params, void* userdata, void* outdata, int idx, void* interactive)\n"
     << "{\n"
-        << "printf(\"executing layer\\n\");\n"
+       // << "printf(\"executing layer\\n\");\n"
         << entry_name << "(sg, params, userdata, outdata, idx, interactive);\n"
-        << "printf(\"done wiht layer\\n\");\n"
+    //    << "printf(\"done wiht layer\\n\");\n"
     << "}\n";
 
     std::cout << "Generated code: " << std::endl;
@@ -491,9 +491,20 @@ HIPRenderer::render(int xres, int yres, RenderState& renderState)
 
     void* args[] = { &d_output_buffer, &m_xres, &m_yres, &d_launch_params};
 
+    uint3 blockSize {8, 8, 1};
+
+    uint3 gridSize = { (m_xres + blockSize.x - 1) / blockSize.x,
+                       (m_yres + blockSize.y - 1) / blockSize.y,
+                       1};
+
+    std::cout << "Xres: " << m_xres << " Yres: " << m_yres << std::endl;
+    std::cout << "Block size: " << blockSize.x << " " << blockSize.y << " " << blockSize.z << std::endl;
+    std::cout << "Grid size: " << gridSize.x << " " << gridSize.y << " " << gridSize.z << std::endl;
+
+
     hipModuleLaunchKernel(m_function_shade, 
-        1, 1, 1, 
-        1, 1, 1, 
+        gridSize.x, gridSize.y, gridSize.z, 
+        blockSize.x, blockSize.y, blockSize.z, 
         0, 
         m_stream, args, nullptr);
 
