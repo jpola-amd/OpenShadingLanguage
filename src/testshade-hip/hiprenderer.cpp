@@ -247,16 +247,6 @@ HIPRenderer::prepare_render(RenderState& renderState)
     std::cout << "Entry name: " << entry_name << std::endl;
     std::cout << "Fused name: " << fused_name << std::endl;
 
-    // if (options.get_int("saveptx")) {
-    //     std::string filename
-    //         = OIIO::Strutil::fmt::format("{}_{}.ptx", group_name, mtl_id++);
-    //     OIIO::ofstream out;
-    //     OIIO::Filesystem::open(out, filename);
-    //     out << hip_llvm_gcn;
-    // }
-
-    
-    // Retrieve the compiled ShaderGroup PTX
     std::string hip_llvm_gcn;
     if (!m_shadingSystem->getattribute(groupref, "hip_compiled_version", OSL::TypeDesc::PTR, &hip_llvm_gcn))
     {
@@ -265,6 +255,7 @@ HIPRenderer::prepare_render(RenderState& renderState)
         return;
 
     }
+
     // save the llvm module for further analysis
     {
         //save the code for further analysis
@@ -275,17 +266,8 @@ HIPRenderer::prepare_render(RenderState& renderState)
             outFile.close();
         }
     }
-    // compile the hip_llvm_gcon to bitcode and register the entry names for the kernel
-    // use hiprtcAddNameExpression
-    // the names to add are: init_name, entry_name, fused_name
-    /*
-    The identical name expression string must be provided on a subsequent call to hiprtcGetLoweredName to extract the lowered name.
 
-    The correct sequence of calls is : hiprtcAddNameExpression, hiprtcCompileProgram, hiprtcGetLoweredName, hiprtcDestroyProgram.
 
-    The lowered names must be fetched using hiprtcGetLoweredName only after the HIPRTC program has been compiled, and before it has been destroyed.
-
-    */
     size_t trampoiline_bitcode_size;
     std::vector<char> trampoline_bitcode;
     {
@@ -323,6 +305,8 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     std::cout << "Generated code: " << std::endl;
     std::cout << ss.str() << std::endl;
+
+    
     // dummy kernel
     //ss << "extern \"C\" __global__ void dummy_trampoline() { ShaderGlobals sg; __osl__init(sg, nullptr); __osl_entry(sg, nullptr); __osl_fused(sg); }\n"; 
     
@@ -340,6 +324,10 @@ HIPRenderer::prepare_render(RenderState& renderState)
         //     HIPRTC_CHECK(hiprtcAddNameExpression(program, fused_name.c_str()));
         // HIPRTC_CHECK(hiprtcAddNameExpression(program, init_name_addr.c_str()));
         // HIPRTC_CHECK(hiprtcAddNameExpression(program, entry_name_addr.c_str()));
+         // Add the name expressions to the HIPRTC program
+    hiprtcAddNameExpression(program, init_name_addr.c_str());
+    hiprtcAddNameExpression(program, entry_name_addr.c_str());
+    //hiprtcAddNameExpression(program, fused_name_addr.c_str());
         // HIPRTC_CHECK(hiprtcAddNameExpression(program, fused_name_addr.c_str()));
 
         const char* hip_compile_options[] = { 
@@ -396,7 +384,6 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     const auto& grid_renderer_bc = load_file("hip_grid_renderer.bc");
     const auto& rend_lib_bc = load_file("rend_lib.bc");
-    const auto& a = load_file("amdgcn_module2.o");
 
     // can we linki it here?
     hiprtcLinkState linkState;
@@ -448,8 +435,6 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
 
     HIP_CHECK(hipModuleLoadData(&m_module, hip_fatbin.data()));
-
-
 
     HIP_CHECK(hipModuleGetFunction(&m_function_shade, m_module, "shade"));
 }

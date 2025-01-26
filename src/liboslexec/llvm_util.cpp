@@ -132,6 +132,8 @@
 #include <llvm/Transforms/Utils/SymbolRewriter.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+
+
 OSL_NAMESPACE_ENTER
 
 
@@ -6945,65 +6947,32 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
  LLVM_Util::amdgcn_compile_group(llvm::Module* lib_module, const std::string& name,
                               std::string& out)
  {
-#if defined(OSL_USE_HIP)
-    //llvm::TargetMachine* target_machine = amdgcn_target_machine();
-    llvm::legacy::PassManager mpm;
-    llvm::SmallString<4096> object;
-    llvm::raw_svector_ostream out_stream(object);
+#if defined(OSL_USE_HIP) 
 
-    // llvm::raw_string_ostream _stream(out);
-    // _stream << *module();
-    
-
-    // llvm::errs() << "(BEFORE)\n";
-    // llvm::errs() << *module();
-    // if (target_machine == nullptr) {
-    //     std::cerr << "AMDGCN target machine is not available" << std::endl;
-    //     return false;
-    // }
-
-    // target_machine->addPassesToEmitFile(mpm, out_stream,
-    //                                     nullptr,  // FIXME: Correct?
-    //                                     llvm::CodeGenFileType::ObjectFile);
-
-
-    // bool compilation_result = mpm.run(*module());
-    // if (compilation_result == false)
-    // {
-    //     std::cerr << "Failed to compile AMDGCN module" << std::endl;
-    //     return false;
-    // }
-
-    // llvm::errs() << "(AFTER)\n";
-    // llvm::errs() << *module();
-    // output the object stream to out;
     {
         llvm::raw_string_ostream object_stream(out);
         llvm::WriteBitcodeToFile(*module(), object_stream);
     }
 
-    // llvm::errs() << *module();
-    // //out = out_stream.str(); //<--- not this entity
-
-    if (debug() > 1)
-    {
-        llvm::StringRef moduleFilename = "amdgcn_module.ll";
-        std::error_code error_code;
-        llvm::raw_fd_ostream fd(moduleFilename, error_code);
-        if (!error_code)
-        {
-            module()->print(fd, nullptr);
-        }
-
-        llvm::StringRef compiledModule = "amdgcn_compiled_module.o";
-        llvm::raw_fd_ostream f(compiledModule, error_code);
-        if (!error_code)
-        {
-            f << out_stream.str();
-        }
-    }
-
     return true;
+
+    // if (debug() > 1)
+    // {
+    //     llvm::StringRef moduleFilename = "amdgcn_module.ll";
+    //     std::error_code error_code;
+    //     llvm::raw_fd_ostream fd(moduleFilename, error_code);
+    //     if (!error_code)
+    //     {
+    //         module()->print(fd, nullptr);
+    //     }
+    //
+    //     llvm::StringRef compiledModule = "amdgcn_compiled_module.o";
+    //     llvm::raw_fd_ostream f(compiledModule, error_code);
+    //     if (!error_code)
+    //     {
+    //         f << out_stream.str();
+    //     }
+    // }
 #else
     return false;
 #endif
