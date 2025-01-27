@@ -26,6 +26,8 @@
 #    include <llvm/Linker/Linker.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/raw_ostream.h>
 #endif
 
 // Create external declarations for all built-in funcs we may call from LLVM
@@ -1240,20 +1242,10 @@ BackendLLVM::build_llvm_code(int beginop, int endop, llvm::BasicBlock* bb)
     if (bb)
         ll.set_insert_point(bb);
     
-    // JPA: Debugging
-    // if (bb)
-    // {
-    //     std::cout << "Basic block: " << bb->getName().str() << std::endl;
-    //     std::cout << "Contains " << bb->size() << " instructions" << std::endl;
-    //     std::cout << "From:" <<  beginop << " to " << endop << std::endl;
-    //     std::cout << "Source: \n"<< std::endl;
-    //     bb->print(llvm::errs()) ;
-    //     std::cout << std::endl;
-    // }
-    
     for (int opnum = beginop; opnum < endop; ++opnum) {
         const Opcode& op        = inst()->ops()[opnum];
         const OpDescriptor* opd = shadingsys().op_descriptor(op.opname());
+        
         if (opd && opd->llvmgen) {
             if (shadingsys().debug_uninit() /* debug uninitialized vals */)
                 llvm_generate_debug_uninit(op);
@@ -1658,12 +1650,7 @@ BackendLLVM::build_llvm_instance(bool groupentry)
             ll.type_int(),
             ll.type_void_ptr(),  // FIXME: interactive_params
         });
-
-    std::cerr << "************************" << std::endl;
-    std::cerr << "Function: " << unique_layer_name << std::endl;
-    function->print(llvm::errs()); std::cerr << std::flush;
-    std::cerr << "************************" << std::endl;
-
+ 
     ll.current_function(function);
 
     if (ll.debug_is_enabled()) {
@@ -1693,14 +1680,6 @@ BackendLLVM::build_llvm_instance(bool groupentry)
 
     llvm::BasicBlock* entry_bb = ll.new_basic_block(unique_layer_name);
     m_exit_instance_block      = NULL;
-
-    std::cerr << "************************" << std::endl;
-    std::cerr << "Basic block: " << entry_bb->getName().str() << std::endl;
-    std::cerr << "Contains " << entry_bb->size() << " instructions" << std::endl;
-    std::cerr << "************************" << std::endl;
-    entry_bb->print(llvm::errs());
-    std::cerr << std::flush;
-
 
     // Set up a new IR builder
     ll.new_builder(entry_bb);
@@ -1746,10 +1725,6 @@ BackendLLVM::build_llvm_instance(bool groupentry)
     m_layers_already_run.clear();
     for (auto&& s : inst()->symbols()) {
 
-        std::cerr << "Processing symbol: " << s.name() << std::endl;
-        std::cerr << "details: " << std::endl;
-        s.print(std::cerr);
-        std::cerr << std::endl;
         // Skip constants -- we always inline scalar constants, and for
         // array constants we will just use the pointers to the copy of
         // the constant that belongs to the instance.
@@ -2079,6 +2054,8 @@ BackendLLVM::initialize_llvm_group()
 void
 BackendLLVM::prepare_module_for_amdgcn_jit()
 {
+     auto TargetCPU = ll.GetTargetAMDGPU();
+
      auto is_inline_fn = [&](const std::string& name) {
         return shadingsys().m_inline_functions.find(ustring(name))
                != shadingsys().m_inline_functions.end();
@@ -2118,6 +2095,19 @@ BackendLLVM::prepare_module_for_amdgcn_jit()
         {
             fn.setLinkage(llvm::GlobalValue::PrivateLinkage);
         }
+
+        // Set the attributes for the functions registered with the ShadingSystem
+        if (fn.getName().starts_with("__direct_callable__") || 
+                fn.getName().starts_with(group().name().c_str()) ||
+                fn.getName().starts_with("osl_init_group") ||
+                fn.getName().starts_with("osl_layer_group"))
+        {
+            // llvm::errs() << "Setting GPU function attributes for: " << fn.getName() << "\n";
+            fn.addFnAttr("no-trapping-math", "true");
+            fn.addFnAttr("stack-protector-buffer-size", "8");
+            fn.addFnAttr("target-cpu", TargetCPU);
+            fn.addFnAttr("target-features", "+16-bit-insts,+ci-insts,+dl-insts,+dot1-insts,+dot10-insts,+dot2-insts,+dot5-insts,+dot6-insts,+dot7-insts,+dpp,+gfx10-3-insts,+gfx10-insts,+gfx8-insts,+gfx9-insts,+s-memrealtime,+s-memtime-inst,+wavefrontsize32");
+        }
     }
 
     // Set the inlining behavior for each function in the module, based on
@@ -2152,8 +2142,8 @@ BackendLLVM::prepare_module_for_amdgcn_jit()
 
         // No-inline the functions registered with the ShadingSystem
         if (is_noinline_fn(fn.getName().str())) {
-            llvm::errs() << "Deleting function body: " << fn.getName() << "\n";
-            fn.print(llvm::errs());
+            // llvm::errs() << "Deleting function body: " << fn.getName() << "\n";
+            // fn.print(llvm::errs());
             fn.deleteBody();
             continue;
         }
@@ -2194,6 +2184,7 @@ BackendLLVM::prepare_module_for_amdgcn_jit()
 #ifndef OSL_HIP_NO_FTZ
     for (llvm::Function& fn : *ll.module()) {
         //fn.addFnAttr("nvptx-f32ftz", "true");
+        
         fn.addFnAttr("amdgpu-flush-denorms-to-zero", "true");
         fn.addFnAttr("denormal-fp-math", "preserve-sign,preserve-sign");
         fn.addFnAttr("denormal-fp-math-f32", "preserve-sign,preserve-sign");
@@ -2443,8 +2434,18 @@ BackendLLVM::run()
 
 
                 std::unique_ptr<llvm::Module> shadeops_ptr(shadeops_module);
-                llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
+                bool linkerStatus = llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
                                         llvm::Linker::Flags::None);
+
+                if (!linkerStatus)
+                {
+                    shadingcontext()->errorfmt(
+                        "llvm::Linker::linkModules failed for cuda llvm_ops\n");
+                }
+                else
+                {
+                    std::cerr << "Linking successful" << std::endl;
+                }
 
                 if (err.length())
                     shadingcontext()->errorfmt(
@@ -2474,25 +2475,20 @@ BackendLLVM::run()
                     }
 
                     std::unique_ptr<llvm::Module> rend_lib_ptr(rend_lib_module);
-                    llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
-                                            llvm::Linker::Flags::OverrideFromSrc);
+                    if(!llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
+                                            llvm::Linker::Flags::OverrideFromSrc))
+                    {
+                        shadingcontext()->errorfmt(
+                            "llvm::Linker::linkModules failed for cuda rend_lib\n");
+                    }
+
                 }
             }
             else if (use_hip())
             {
                 // HIP codegen
-            #ifdef OSL_LLVM_HIP_BITCODE
-                //  shadeops_hip_bc_compiled_ops_block
-                std::cerr << "shadeops_hip_bc_compiled_ops_size: " << shadeops_hip_bc_compiled_ops_size << std::endl;
-                if (ll.module() == nullptr)
-                {
-                    
-                    std::cerr << "ll.module() is nullptr" << std::endl;
-                }
-                else
-                {
-                    ll.module()->print(llvm::errs(), nullptr);
-                }
+#ifdef OSL_LLVM_HIP_BITCODE
+
                 llvm::Module* shadeops_module = ll.module_from_bitcode(
                     (char*)shadeops_hip_bc_compiled_ops_block,
                     shadeops_hip_bc_compiled_ops_size, "llvm_ops", &err
@@ -2501,7 +2497,7 @@ BackendLLVM::run()
                 if (err.length())
                 {
                     shadingcontext()->errorfmt(
-                        "llvm::parseBitcodeFile returned '{}' for cuda llvm_ops\n",
+                        "llvm::parseBitcodeFile returned '{}' for HIP llvm_ops\n",
                         err);
                 }
 
@@ -2510,127 +2506,53 @@ BackendLLVM::run()
                 shadeops_module->setTargetTriple("amdgcn-amd-amdhsa");
 
                 std::unique_ptr<llvm::Module> shadeops_ptr(shadeops_module);
-                 // Define the callback function
-                // Define the lambda function for InternalizeCallback
-                // auto InternalizeCallback = [](llvm::Module &M, const llvm::StringSet<> &Symbols) {
-                //     std::cerr << "Internalizing symbols in module: " << M.getName().str() << std::endl;
-                //     for (const auto &Symbol : Symbols) {
-                //         std::cerr << "Symbol: " << Symbol.getKey().str() << std::endl;
-                //     }
-                // };
 
-                // auto diagnosticHandler = [](const llvm::DiagnosticInfo *DI, void *Context) 
-                // {
-                //     llvm::raw_ostream &OS = llvm::errs();
-                //     OS << "LLVM Diagnostic: ";
-                //     switch (DI->getSeverity()) {
-                //         case llvm::DS_Error:
-                //             OS << "Error: ";
-                //             break;
-                //         case llvm::DS_Warning:
-                //             OS << "Warning: ";
-                //             break;
-                //         case llvm::DS_Remark:
-                //             OS << "Remark: ";
-                //             break;
-                //         case llvm::DS_Note:
-                //             OS << "Note: ";
-                //             break;
-                //     }
-                //     llvm::DiagnosticPrinterRawOStream DP(OS);
-                //     DI->print(DP);
-                //     OS << "\n";
-                //     OS.flush();
-                // };
-
-            //     std::string linkErrors;
-            //     bool hadLinkError = false;
-
-            //     auto linkDiagnosticHandler = [](const llvm::DiagnosticInfo *DI, void *Context) {
-            //     auto *errorCollector = static_cast<std::pair<std::string*, bool*>*>(Context);
-            //     std::string *errors = errorCollector->first;
-            //     bool *hadError = errorCollector->second;
+                llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
+                                        llvm::Linker::Flags::None);
                 
-            //     llvm::raw_string_ostream OS(*errors);
-                
-            //     if (DI->getSeverity() == llvm::DS_Error) {
-            //         *hadError = true;
-            //         OS << "Link Error: ";
-            //     } else if (DI->getSeverity() == llvm::DS_Warning) {
-            //         OS << "Link Warning: ";
-            //     }
-                
-            //     llvm::DiagnosticPrinterRawOStream DP(OS);
-            //     DI->print(DP);
-            //     OS << "\n";
-            //     OS.flush();
-            // };
+                for (llvm::Function& fn : *ll.module()) {
+                    llvm::errs() << "Function: " << fn.getName() << "\n";
+                }
 
-            // auto contextPair = std::make_pair(&linkErrors, &hadLinkError);
-            // ll.module()->getContext().setDiagnosticHandlerCallBack(linkDiagnosticHandler, &contextPair);
-            // shadeops_ptr->getContext().setDiagnosticHandlerCallBack(linkDiagnosticHandler, &contextPair);
-            // ll.context().setDiagnosticHandlerCallBack(linkDiagnosticHandler, &contextPair);
-
-            // llvm::Module* theModule = new llvm::Module("MyEmptyModule", ll.context());
-        
-            // std::unique_ptr<llvm::Module> other_ptr(ll.module());
-            
-            // bool linkStatus = llvm::Linker::linkModules(*theModule, std::move(shadeops_ptr),
-            //                         llvm::Linker::Flags::None);
-
-
-            // bool linkStatus = 
-            llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
-                                     llvm::Linker::Flags::None);
-
-            // if (!linkStatus || hadLinkError)
-            // {
-            //     if (!linkErrors.empty())
-            //     {
-            //         shadingcontext()->errorfmt("Linker errors: %s\n", linkErrors);
-            //     }
-            //     shadingcontext()->errorfmt("HIP linking shadeops did not succeeded\n");
-            //     return;
-            // }
-            // else
-            // {
-            //     shadingcontext()->errorfmt("HIP shadeops linking OK!");
-            // }
-
-            if (err.length())
-                shadingcontext()->errorfmt(
-                    "llvm::parseBitcodeFile returned '{}' for hip rend_lib\n",
-                    err);
-
-            // The renderer may provide additional shadeops bitcode for renderer-specific
-            // functionality ("rend_lib" fuctions). Like the built-in shadeops, the rend_lib
-            // functions may or may not be inlined, depending on the optimization options.
-            std::vector<char>& bitcode = shadingsys().m_lib_bitcode;
-            if (bitcode.size()) {
-                llvm::Module* rend_lib_module = ll.module_from_bitcode(
-                    static_cast<const char*>(bitcode.data()), bitcode.size(),
-                    "hip_rend_lib", &err);
 
                 if (err.length())
                     shadingcontext()->errorfmt(
-                        "llvm::parseBitcodeFile returned '{}' for hip render lib llvm_ops\n",
+                        "llvm::parseBitcodeFile returned '{}' for hip rend_lib\n",
                         err);
 
-                rend_lib_module->setDataLayout(
-                    "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9");
-                rend_lib_module->setTargetTriple("amdgcn-amd-hsa");
+                // The renderer may provide additional shadeops bitcode for renderer-specific
+                // functionality ("rend_lib" fuctions). Like the built-in shadeops, the rend_lib
+                // functions may or may not be inlined, depending on the optimization options.
+                std::vector<char>& bitcode = shadingsys().m_lib_bitcode;
+                if (bitcode.size()) {
+                    llvm::Module* rend_lib_module = ll.module_from_bitcode(
+                        static_cast<const char*>(bitcode.data()), bitcode.size(),
+                        "hip_rend_lib", &err);
 
-                for (llvm::Function& fn : *rend_lib_module) {
-                    fn.addFnAttr("osl-rend_lib-function", "true");
+                    if (err.length())
+                        shadingcontext()->errorfmt(
+                            "llvm::parseBitcodeFile returned '{}' for hip render lib llvm_ops\n",
+                            err);
+
+                    rend_lib_module->setDataLayout(
+                        "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9");
+                    rend_lib_module->setTargetTriple("amdgcn-amd-amdhsa");
+
+                    for (llvm::Function& fn : *rend_lib_module) {
+                        fn.addFnAttr("osl-rend_lib-function", "true");
+                    }
+
+                    std::unique_ptr<llvm::Module> rend_lib_ptr(rend_lib_module);
+                    if (!llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
+                                            llvm::Linker::Flags::OverrideFromSrc))
+                    {
+                        shadingcontext()->errorfmt(
+                            "llvm::Linker::linkModules failed for hip rend_lib\n");
+                    }
                 }
-
-                std::unique_ptr<llvm::Module> rend_lib_ptr(rend_lib_module);
-                llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
-                                        llvm::Linker::Flags::OverrideFromSrc);
-            }
-            #else
-                OSL_ASSERT(0 && "Must generate LLVM CUDA bitcode for HIP");
-            #endif
+                #else
+                    OSL_ASSERT(0 && "Must generate LLVM CUDA bitcode for HIP");
+                #endif
 
             }
 #else
@@ -2649,7 +2571,7 @@ BackendLLVM::run()
             }
             if (use_hip())
             {
-                 ll.module()->setTargetTriple("amdgcn-amd-hsa");
+                 ll.module()->setTargetTriple("amdgcn-amd-amdhsa");
                  ll.module()->setDataLayout(
                     "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9");
             }
@@ -2704,8 +2626,6 @@ BackendLLVM::run()
         // End of mutex lock, for the OSL_LLVM_NO_BITCODE case
     }
 
-    //ll.module()->print(llvm::errs(), nullptr);
-
     m_stat_llvm_setup_time += timer.lap();
 
     // Set up m_num_used_layers to be the number of layers that are
@@ -2732,20 +2652,6 @@ BackendLLVM::run()
     }
     shadingsys().m_stat_empty_instances += nlayers - m_num_used_layers;
 
-    {
-       // ShaderInstance* instance = group()[0]
-        for (const auto& op : group()[0]->ops()) {
-            std::cout << "op: " << op.opname() << std::endl;
-            std::cout << "\tMethod: " << op.method() << std::endl;
-            std::cout << "\tNargs: " << op.nargs() << std::endl;
-
-        }
-
-        for (const auto& sym : group()[0]->symbols()) {
-            std::cout << "sym: " << sym.name().c_str() << std::endl;
-        }
-
-    }
     initialize_llvm_group();
 
     // Generate the LLVM IR for each layer.  Skip unused layers.
@@ -2836,6 +2742,20 @@ BackendLLVM::run()
                                   safegroup.substr(safegroup.size() - 235),
                                   group().id());
         std::string name = fmtformat("{}.ll", safegroup);
+
+#if 1
+        {            
+            std::error_code EC;
+            llvm::raw_fd_ostream fd_out(name.c_str(), EC, llvm::sys::fs::OF_Text);
+            if (!EC) {
+                ll.module()->print(fd_out, nullptr);
+                shadingsys().infofmt("Wrote pre-optimized bitcode to '{}'", name);
+            } else {
+                shadingsys().errorfmt("Could not write to '{}': {}", name,
+                                        EC.message());
+            }
+        }
+#else
         OIIO::ofstream out;
         OIIO::Filesystem::open(out, name);
         if (out) {
@@ -2844,6 +2764,7 @@ BackendLLVM::run()
         } else {
             shadingsys().errorfmt("Could not write to '{}'", name);
         }
+#endif
     }
 
     if (use_rs_bitcode()) {
@@ -2878,6 +2799,27 @@ BackendLLVM::run()
     // Optimize the LLVM IR unless it's a do-nothing group.
     if (!group().does_nothing()) {
         ll.do_optimize();
+
+        {
+            // Make a safe group name that doesn't have "/" in it! Also beware
+            // filename length limits.
+            std::string safegroup;
+            safegroup = Strutil::replace(group().name(), "/", "_", true);
+            safegroup = Strutil::replace(safegroup, ":", "_", true);
+            if (safegroup.size() > 235)
+                safegroup = fmtformat("TRUNC_{}_{}",
+                                    safegroup.substr(safegroup.size() - 235),
+                                    group().id());
+            std::string name = fmtformat("{}.opt.ll", safegroup);
+            OIIO::ofstream out;
+            OIIO::Filesystem::open(out, name);
+            if (out) {
+                out << ll.bitcode_string(ll.module());
+                shadingsys().infofmt("Wrote pre-optimized bitcode to '{}'", name);
+            } else {
+                shadingsys().errorfmt("Could not write to '{}'", name);
+            }
+        }
     }
 
 #if defined(OSL_USE_OPTIX) || defined(OSL_USE_HIP)

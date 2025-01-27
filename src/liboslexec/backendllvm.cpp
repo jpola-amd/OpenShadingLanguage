@@ -309,23 +309,9 @@ BackendLLVM::getOrAllocateLLVMSymbol(const Symbol& sym)
         const auto name_mem =  llnamefmt("{}_mem", mangled_name);
         llvm::Value* a = llvm_alloca(sym.typespec(), sym.has_derivs(), name_mem);
         named_values()[mangled_name] = a;
-        std::cerr << "Allocating symbol: " << sym.name() << " (" << sym.mangled() <<")" << std::endl;
-        sym.print(std::cerr);
-        sym.print_vals(std::cerr);
-        a->print(llvm::errs(), false);
-        std::cerr << std::endl;
-        std::cerr << std::flush;
         return a;
     }
 
-    std::cerr << "Already found in map: " << sym.name() << " (" << sym.mangled() <<")" << std::endl;
-    auto val = (llvm::Value*) map_iter->second;
-    val->print(llvm::errs(), false);
-    val->printAsOperand(llvm::errs(), false);
-
-    std::cerr << std::flush;
-    
-    
     return map_iter->second;
 }
 

@@ -417,30 +417,6 @@ struct SetCommandLineOptionsForLLVM {
     }
 };
 
-static void LLVMUtilDiagnostics(const llvm::DiagnosticInfo *DI, void *Context) 
-{
-    llvm::raw_ostream &OS = llvm::errs();
-    OS << "LLVM Diagnostic: ";
-    switch (DI->getSeverity()) {
-        case llvm::DS_Error:
-            OS << "Error: ";
-            break;
-        case llvm::DS_Warning:
-            OS << "Warning: ";
-            break;
-        case llvm::DS_Remark:
-            OS << "Remark: ";
-            break;
-        case llvm::DS_Note:
-            OS << "Note: ";
-            break;
-    }
-    llvm::DiagnosticPrinterRawOStream DP(OS);
-    DI->print(DP);
-    OS << "\n";
-    OS.flush();
-}
-
 LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
                      int vector_width)
     : m_debug(debuglevel)
@@ -485,9 +461,6 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
             // to fix this and switch to opaque pointers by llvm 16.
 #endif
             //static SetCommandLineOptionsForLLVM sSetCommandLineOptionsForLLVM;
-
-            //JPA: set diagnostics:
-            m_thread->llvm_context->setDiagnosticHandlerCallBack(LLVMUtilDiagnostics, nullptr);
         }
 
         if (!m_thread->llvm_jitmm) {
@@ -1031,11 +1004,25 @@ LLVM_Util::module_from_bitcode(const char* bitcode, size_t size,
     // is part of the symbol name.
     ErrorOrModule ModuleOrErr = llvm::parseBitcodeFile(buf, context());
 #else
+    ErrorOrModule ModuleOrErrParsed = llvm::parseBitcodeFile(buf, context());
+    if (err){
+        error_string(ModuleOrErrParsed.takeError(), err);
+        if (!err->empty())
+        {
+            llvm::outs() << "Error parsing bitcode file: \n" << *err << "\n";
+            llvm::outs().flush();
+        }
+    }
+
     ErrorOrModule ModuleOrErr = llvm::getLazyBitcodeModule(buf, context());
 #endif
 
     if (err) {
         error_string(ModuleOrErr.takeError(), err);
+        if (!err->empty()) {
+            llvm::outs() << "Error getting lazy bitcode module: \n" << *err << "\n";
+            llvm::outs().flush();
+        }
     }
     llvm::Module* m = ModuleOrErr ? ModuleOrErr->release() : nullptr;
 #if 0
@@ -1876,6 +1863,12 @@ LLVM_Util::nvptx_target_machine()
     return m_nvptx_target_machine;
 }
 
+llvm::StringRef
+LLVM_Util::GetTargetAMDGPU() 
+{
+    return amdgcn_target_machine()->getTargetCPU();
+}
+
 llvm::TargetMachine*
 LLVM_Util::amdgcn_target_machine()
 {
@@ -1908,7 +1901,7 @@ LLVM_Util::amdgcn_target_machine()
             HIP_TARGET_ARCH,
             "", //features
             options,
-            llvm::Reloc::Static,
+            llvm::Reloc::PIC_,
             llvm::CodeModel::Small,
 #if OSL_LLVM_VERSION >= 180
             llvm::CodeGenOptLevel::Default
@@ -6925,42 +6918,32 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
  LLVM_Util::amdgcn_compile_group(llvm::Module* lib_module, const std::string& name,
                               std::string& out)
  {
-#if defined(OSL_USE_HIP)
-    llvm::TargetMachine* target_machine = amdgcn_target_machine();
-    llvm::legacy::PassManager mpm;
-    llvm::SmallString<4096> assembly;
-    llvm::raw_svector_ostream assembly_stream(assembly);
+#if defined(OSL_USE_HIP) 
 
-    if (target_machine == nullptr) {
-        std::cerr << "AMDGCN target machine is not available" << std::endl;
-        return false;
-    }
-
-    target_machine->addPassesToEmitFile(mpm, assembly_stream,
-                                        nullptr,  // FIXME: Correct?
-                                        llvm::CodeGenFileType::ObjectFile);
-
-    mpm.run(*module());
-    llvm::raw_string_ostream out_stream(out);
-    module()->print(out_stream, nullptr);
-    return true;
-    //I want to get the module() to be written tou std::string out
-
-    if (debug() > 2 )
     {
-        //save the module to a file
-        std::string filename = name + ".gcn.o";
-        std::error_code local_error;
-        llvm::raw_fd_ostream out(filename, local_error, llvm::sys::fs::OF_None);
-        if (!out.has_error()) {
-            llvm::WriteBitcodeToFile(*module(), out);
-        }
-        std::cout << "AMDGCN Assembly: \n" << assembly_stream.str().str() << std::endl;
-        std::cout << "AMDGCN Assembly saved to: " << filename << std::endl;
+        llvm::raw_string_ostream object_stream(out);
+        llvm::WriteBitcodeToFile(*module(), object_stream);
     }
-   
-    //out = assembly_stream.str();
+
     return true;
+
+    // if (debug() > 1)
+    // {
+    //     llvm::StringRef moduleFilename = "amdgcn_module.ll";
+    //     std::error_code error_code;
+    //     llvm::raw_fd_ostream fd(moduleFilename, error_code);
+    //     if (!error_code)
+    //     {
+    //         module()->print(fd, nullptr);
+    //     }
+    //
+    //     llvm::StringRef compiledModule = "amdgcn_compiled_module.o";
+    //     llvm::raw_fd_ostream f(compiledModule, error_code);
+    //     if (!error_code)
+    //     {
+    //         f << out_stream.str();
+    //     }
+    // }
 #else
     return false;
 #endif

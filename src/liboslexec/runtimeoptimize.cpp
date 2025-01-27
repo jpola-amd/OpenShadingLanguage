@@ -14,6 +14,12 @@
 #include "batched_analysis.h"
 #include "oslexec_pvt.h"
 #include "runtimeoptimize.h"
+
+#include <llvm/Transforms/Utils/SymbolRewriter.h>
+#include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/raw_os_ostream.h>
+
 using namespace OSL;
 using namespace OSL::pvt;
 
@@ -3323,11 +3329,12 @@ RuntimeOptimizer::run()
             // a non-unused layer with a nontrivial op does something
             if (op.opname() != Strings::end && op.opname() != Strings::useparam)
                 does_nothing = false;
+
             // Useparam of a down-connected or renderer output does something
             if (op.opname() == Strings::useparam) {
                 for (int i = 0, e = op.nargs(); i < e; ++i) {
                     Symbol* sym = opargsym(op, i);
-                    if (sym->connected_down() || sym->renderer_output())
+                    if (sym->connected_down() || sym->renderer_output())   
                         does_nothing = false;
                 }
             }

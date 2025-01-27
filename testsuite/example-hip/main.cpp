@@ -137,8 +137,33 @@ int main(int argc, char *argv[])
     
     OSL::ShaderGlobals sg;
     memset((char*)&sg, 0, sizeof(OSL::ShaderGlobals));
-    shadingSystem.optimize_group(shaderGroup.get(), nullptr, true);
 
+    {
+         {
+        // Old fashined way -- tell the shading system which outputs we want
+        std::vector<std::string> outputvars {"Cout"};
+
+        std::vector<const char*> aovnames(outputvars.size());
+        for (size_t i = 0; i < outputvars.size(); ++i) {
+            OSL::ustring varname(outputvars[i]);
+            aovnames[i] = varname.c_str();
+            size_t dot  = varname.find('.');
+            if (dot != OSL::ustring::npos) {
+                // If the name contains a dot, it's intended to be layer.symbol
+                varname = OSL::ustring(varname, dot + 1);
+            }
+        }
+        // shadingsys->attribute(use_group_outputs ? shadergroup.get() : NULL,
+        //                       "renderer_outputs",
+        //                       TypeDesc(TypeDesc::STRING, (int)aovnames.size()),
+        //                       &aovnames[0]);
+        shadingSystem.attribute(shaderGroup.get(), "renderer_outputs",
+                                  OIIO::TypeDesc(OIIO::TypeDesc::STRING, (int)aovnames.size()),
+                                  &aovnames[0]);
+        }
+
+    }
+    shadingSystem.optimize_group(shaderGroup.get(), nullptr, true);
     
     constexpr bool run = false;
     if (!shadingSystem.execute(*ctx, *shaderGroup, sg, run))
@@ -306,7 +331,7 @@ int main(int argc, char *argv[])
 }
 
 const char* hip_compile_options[] = { 
-    "--offload-arch=gfx1030",
+    "--offload-arch=gfx1036",
     "-ffast-math", "-fgpu-rdc", "-emit-llvm", "-c", 
     "-D__HIP_PLATFORM_AMD",
     "--std=c++17" 

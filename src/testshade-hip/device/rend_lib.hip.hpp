@@ -10,7 +10,7 @@
 
 struct ShadingContextHIP {};
 
-namespace OSL_HIP {
+namespace  {
 
 struct ShaderGlobals {
     OSL::Vec3 P, dPdx, dPdy;

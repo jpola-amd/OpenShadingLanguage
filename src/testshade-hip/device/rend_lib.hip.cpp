@@ -48,6 +48,35 @@ __direct_callable__dummy_rend_lib()
 }
 
 
+
+extern "C" __device__ float4
+osl_tex2DLookup(void* handle, float s, float t, float dsdx, float dtdx,
+                float dsdy, float dtdy)
+{
+    const float2 dx           = { dsdx, dtdx };
+    const float2 dy           = { dsdy, dtdy };
+    hipTextureObject_t texID = hipTextureObject_t(handle);
+    return tex2DGrad<float4>(texID, s, t, dx, dy);
+}
+
+__device__ bool
+rs_texture(OSL::OpaqueExecContextPtr ec, OSL::ustringhash filename,
+           OSL::TextureSystem::TextureHandle* texture_handle,
+           OSL::TextureSystem::Perthread* texture_thread_info,
+           OSL::TextureOpt& options, float s, float t, float dsdx, float dtdx,
+           float dsdy, float dtdy, int nchannels, float* result,
+           float* dresultds, float* dresultdt, OSL::ustringhash* errormessage)
+{
+
+    if (!texture_handle)
+        return false;
+    const float4 fromTexture = osl_tex2DLookup(texture_handle, s, t, dsdx, dtdx,
+                                               dsdy, dtdy);
+    *((float3*)result)       = make_float3(fromTexture.x, fromTexture.y,
+                                           fromTexture.z);
+    return true;
+}
+
 __device__ void*
 closure_component_allot(void* pool, int id, size_t prim_size,
                         const OSL::Color3& w)
@@ -117,7 +146,7 @@ closure_add_allot(void* pool, OSL::ClosureColor* a, OSL::ClosureColor* b)
 __device__ void*
 osl_allocate_closure_component(void* sg_, int id, int size)
 {
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     OSL::Color3 w = OSL::Color3(1, 1, 1);
     // Fix up the alignment
@@ -138,7 +167,7 @@ __device__ void*
 osl_allocate_weighted_closure_component(void* sg_, int id, int size,
                                         const void* w)
 {
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     const OSL::Color3* wc
         = (const OSL::Color3*)__builtin_assume_aligned(w, alignof(float));
@@ -163,7 +192,7 @@ osl_allocate_weighted_closure_component(void* sg_, int id, int size,
 __device__ void*
 osl_mul_closure_color(void* sg_, void* a, const void* w)
 {
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
     const OSL::Color3* wc
         = (const OSL::Color3*)__builtin_assume_aligned(w, alignof(float));
 
@@ -195,7 +224,7 @@ osl_mul_closure_float(void* sg_, void* a, float w)
 {
     a = __builtin_assume_aligned(a, alignof(float));
 
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     if (a == NULL || w == 0.0f) {
         return NULL;
@@ -223,7 +252,7 @@ osl_add_closure_closure(void* sg_, void* a, void* b)
     a = __builtin_assume_aligned(a, alignof(float));
     b = __builtin_assume_aligned(b, alignof(float));
 
-    OSL_HIP::ShaderGlobals* sg_ptr = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg_ptr = (ShaderGlobals*)sg_;
 
     if (a == NULL) {
         return b;
@@ -350,6 +379,8 @@ osl_printf(void* sg_, OSL::ustringhash_pod fmt_str_hash, void* args)
 
 
 
+
+
 __forceinline__ __device__ float3
 make_float3(const float4& a)
 {
@@ -379,7 +410,7 @@ osl_get_matrix(void* sg_, void* r, OSL::ustringhash_pod from_)
 {
     r                           = __builtin_assume_aligned(r, alignof(float));
     OSL::ustringhash from       = OSL::ustringhash_from(from_);
-    OSL_HIP::ShaderGlobals* sg = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg = (ShaderGlobals*)sg_;
     if (from == OSL::Hashes::common) {
         MAT(r).makeIdentity();
         return true;
@@ -418,13 +449,39 @@ osl_get_matrix(void* sg_, void* r, OSL::ustringhash_pod from_)
 }
 
 
+__device__ void
+osl_error(void* sg_, char* fmt_str, void* args)
+{
+    // uint64_t fmt_str_hash = HDSTR(fmt_str).hash();
+    // uint64_t args_size    = reinterpret_cast<uint64_t*>(args)[0];
+
+    // // This can be used to limit printing to one Cuda thread for debugging
+    // // if (launch_index.x == 0 && launch_index.y == 0)
+
+    // uint64_t copy_start = atomicAdd(&OSL::pvt::osl_printf_buffer_start,
+    //                                    args_size + sizeof(args_size)
+    //                                        + sizeof(fmt_str_hash));
+
+    // // Only perform copy if there's enough space
+    // if (copy_start + args_size + sizeof(args_size) + sizeof(fmt_str_hash)
+    //     < OSL::pvt::osl_printf_buffer_end) {
+    //     memcpy(reinterpret_cast<void*>(copy_start), &fmt_str_hash,
+    //            sizeof(fmt_str_hash));
+    //     memcpy(reinterpret_cast<void*>(copy_start + sizeof(fmt_str_hash)),
+    //            &args_size, sizeof(args_size));
+    //     memcpy(reinterpret_cast<void*>(copy_start + sizeof(fmt_str_hash)
+    //                                    + sizeof(args_size)),
+    //            reinterpret_cast<char*>(args) + sizeof(args_size), args_size);
+    // }
+}
+
 
 __device__ int
 osl_get_inverse_matrix(void* sg_, void* r, OSL::ustringhash_pod to_)
 {
     r                           = __builtin_assume_aligned(r, alignof(float));
     OSL::ustringhash to         = OSL::ustringhash_from(to_);
-    OSL_HIP::ShaderGlobals* sg = (OSL_HIP::ShaderGlobals*)sg_;
+    ShaderGlobals* sg = (ShaderGlobals*)sg_;
     if (to == OSL::Hashes::common) {
         MAT(r).makeIdentity();
         return true;

@@ -9,7 +9,7 @@
 #include "oslexec_pvt.h"
 #include <OSL/genclosure.h>
 #include "backendllvm.h"
-
+#include <iostream>
 using namespace OSL;
 using namespace OSL::pvt;
 
@@ -2516,6 +2516,7 @@ LLVMGEN(llvm_gen_if)
     llvm::BasicBlock* then_block  = rop.ll.new_basic_block("then");
     llvm::BasicBlock* else_block  = rop.ll.new_basic_block("else");
     llvm::BasicBlock* after_block = rop.ll.new_basic_block("");
+
     rop.ll.op_branch(cond_val, then_block, else_block);
 
     // Then block
