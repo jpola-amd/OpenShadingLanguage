@@ -41,7 +41,7 @@ public:
     bool finalize_scene();
     void prepare_render() final;
     void warmup() final;
-    void render(int xres, int yres) final;
+    void render(int xres, int yres, RenderState& renderState) final;
     void finalize_pixel_buffer() final;
     void clear() final;
 

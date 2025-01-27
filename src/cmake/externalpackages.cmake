@@ -216,12 +216,14 @@ endif ()
 
 if (OSL_USE_HIP)
     checked_find_package (HIP REQUIRED)
-
+    set(HIP_VERSION ${HIP_VERSION_MAJOR}.${HIP_VERSION_MINOR}.${HIP_VERSION_PATCH})
+    message(STATUS "HIP VERSION: ${HIP_VERSION}")
     message(STATUS "HIP_PATH = ${HIP_PATH}")
     message(STATUS "ROCM_PATH = ${ROCM_PATH}")
     message(STATUS "HIP_PLATFORM = ${HIP_PLATFORM}")
     message(STATUS "HIP_COMPILER = ${HIP_COMPILER}")
     message(STATUS "HIP_HIPCC_EXECUTABLE = ${HIP_HIPCC_EXECUTABLE}")
+    
     
     set(HIP_INCLUDE_DIRS "${HIP_PATH}/include")
     set(HIP_LIBRARY_DIR "${HIP_PATH}/lib")

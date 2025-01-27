@@ -2177,7 +2177,7 @@ test_shade(int argc, const char* argv[])
         OIIO::ROI roi(0, xres, 0, yres);
 
         if (use_optix) {
-            rend->render(xres, yres);
+            rend->render(xres, yres, theRenderState);
         } else if (use_shade_image) {
             // TODO: do we need a batched option/version of shade_image?
             OSL::shade_image(*shadingsys, *shadergroup, NULL,

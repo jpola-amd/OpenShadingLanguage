@@ -148,7 +148,7 @@ public:
     virtual void export_state(RenderState&) const;
     virtual void prepare_render() {}
     virtual void warmup() {}
-    virtual void render(int /*xres*/, int /*yres*/) {}
+    virtual void render(int /*xres*/, int /*yres*/, RenderState& renderState) {}
     virtual void clear() { m_shaders.clear(); }
 
     // After render, get the pixel data into the output buffers, if

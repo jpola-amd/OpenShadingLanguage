@@ -9,7 +9,7 @@
 #include "oslexec_pvt.h"
 #include <OSL/genclosure.h>
 #include "backendllvm.h"
-
+#include <iostream>
 using namespace OSL;
 using namespace OSL::pvt;
 
@@ -415,11 +415,11 @@ LLVMGEN(llvm_gen_printf_legacy)
     }
 
 
-#if OSL_USE_OPTIX
+#if defined(OSL_USE_OPTIX) || defined(OSL_USE_HIP)
     // In OptiX, printf currently supports 0 or 1 arguments, and the signature
     // requires 1 argument, so push a null pointer onto the call args if there
     // is no argument.
-    if (rop.use_optix() && arg == format_arg + 1) {
+    if ((rop.use_optix() || rop.use_hip()) && arg == format_arg + 1) {
         call_args.push_back(rop.ll.void_ptr_null());
         // we push the size of the arguments on the stack
         optix_size += sizeof(uint64_t);
@@ -433,8 +433,8 @@ LLVMGEN(llvm_gen_printf_legacy)
     }
 
     // Now go back and put the new format string in its place
-#if OSL_USE_OPTIX
-    if (rop.use_optix()) {
+#if (OSL_USE_OPTIX) || defined(OSL_USE_HIP)
+    if (rop.use_optix() || rop.use_hip()) {
         // In OptiX7+ case, we do this:
         // void* args = { args_size, arg0, arg1, arg2 };
         // (where args_size is the size of arg0 + arg1 + arg2...)
@@ -800,7 +800,7 @@ LLVMGEN(llvm_gen_print_fmt)
 
 LLVMGEN(llvm_gen_printf)
 {
-    if (rop.use_optix())
+    if (rop.use_optix() || rop.use_hip())
         return llvm_gen_printf_legacy(rop, opnum);
     else
         return llvm_gen_print_fmt(rop, opnum);
@@ -1002,6 +1002,18 @@ LLVMGEN(llvm_gen_div)
     Symbol& A      = *rop.opargsym(op, 1);
     Symbol& B      = *rop.opargsym(op, 2);
 
+    //JPA debug op, A and B and Result
+    // std::cout << "op: " << op.opname() << std::endl;
+    // std::cout << "A: " << A.name() << std::endl;
+    // std::cout << "B: " << B.name() << std::endl;
+    // std::cout << "Result: " << Result.name() << std::endl;
+
+    // // can we know the types:
+    // std::cout << "A type: " << A.typespec().string() << std::endl;
+    // std::cout << "B type: " << B.typespec().string() << std::endl;
+    // std::cout << "Result type: " << Result.typespec().string() << std::endl;
+
+
     TypeDesc type      = Result.typespec().simpletype();
     bool is_float      = Result.typespec().is_float_based();
     int num_components = type.aggregate;
@@ -1037,6 +1049,13 @@ LLVMGEN(llvm_gen_div)
     for (int i = 0; i < num_components; i++) {
         llvm::Value* a = rop.llvm_load_value(A, 0, i, type);
         llvm::Value* b = rop.llvm_load_value(B, 0, i, type);
+        // {
+        //     //JPA: print a, b
+        //     std::cerr << "index i: " << i << std::endl;
+        //     std::cerr << "Loaded values: " << std::endl;
+        //     std::cerr << "a: " << std::flush; a->print(llvm::errs()); std::cerr << std::endl;
+        //     std::cerr << "b: " << std::flush; b->print(llvm::errs()); std::cerr << std::endl;
+        // }
         if (!a || !b)
             return false;
         llvm::Value* a_div_b;
@@ -1067,6 +1086,19 @@ LLVMGEN(llvm_gen_div)
                 = rop.ll.op_sub(ay, a_div_b_mul_by);
             ry = rop.ll.op_mul(binv, ay_minus_a_div_b_mul_by);
         }
+
+        // JPA: Print operation
+        // std::cerr << "index i: " << i << std::endl;
+        // std::cerr << " ----- operands -----" << std::endl;
+        // a->print(llvm::errs()); std::cerr << std::endl;
+        // b->print(llvm::errs()); std::cerr << std::endl;
+        // std::cerr << " ----- result -----" << std::endl;
+        // a_div_b->print(llvm::errs()); std::cerr << std::endl;
+        // if (deriv) {
+        //     std::cerr << " ----- derivs -----" << std::endl;
+        //     rx->print(llvm::errs()); std::cerr << std::endl;
+        //     ry->print(llvm::errs()); std::cerr << std::endl;
+        // }
 
         rop.llvm_store_value(a_div_b, Result, 0, i);
         if (deriv) {
@@ -1112,7 +1144,7 @@ LLVMGEN(llvm_gen_modulus)
         if (!a || !b)
             return false;
         llvm::Value* r;
-        if (!rop.use_optix() && B.is_constant() && !rop.is_zero(B))
+        if (!(rop.use_optix() || rop.use_hip()) && B.is_constant() && !rop.is_zero(B))
             r = rop.ll.op_mod(a, b);
         else
             r = rop.ll.call_function(safe_mod, a, b);
@@ -2484,6 +2516,7 @@ LLVMGEN(llvm_gen_if)
     llvm::BasicBlock* then_block  = rop.ll.new_basic_block("then");
     llvm::BasicBlock* else_block  = rop.ll.new_basic_block("else");
     llvm::BasicBlock* after_block = rop.ll.new_basic_block("");
+
     rop.ll.op_branch(cond_val, then_block, else_block);
 
     // Then block
@@ -4001,7 +4034,7 @@ LLVMGEN(llvm_gen_pointcloud_search)
                 else
                     clear_derivs_of.push_back(&Value);
             }
-        } else if (!rop.use_optix()) {
+        } else if (!(rop.use_optix() || rop.use_hip()) ) {
             //TODO: Implement custom attribute arguments for OptiX
 
             // It is a regular attribute, push it to the arg list

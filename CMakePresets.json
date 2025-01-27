@@ -64,7 +64,7 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CUDA_TARGET_ARCH":"sm_89",
-                "HIP_TARGET_ARCH":"gfx1030",
+                "HIP_TARGET_ARCH":"gfx1036",
                 "CUDA_NVCC_FLAGS":"-ccbin /usr/bin/gcc-9",
                 "CMAKE_PREFIX_PATH":"/home/jpola/projects/hip-osl/3rdParty/artifacts/",
                 "LLVM_ROOT":"/home/jpola/projects/hip-osl/3rdParty/llvm-artifacts-release-19/",

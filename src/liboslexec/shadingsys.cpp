@@ -55,6 +55,11 @@ extern int shadeops_cuda_ptx_compiled_ops_size;
 extern unsigned char shadeops_cuda_ptx_compiled_ops_block[];
 #endif
 
+#ifdef OSL_LLVM_HIP_BITCODE
+extern int shadeops_hip_llvm_compiled_ops_size;
+extern unsigned char shadeops_hip_llvm_compiled_ops_block[];
+#endif
+
 
 OSL_NAMESPACE_ENTER
 
@@ -1129,7 +1134,9 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_max_local_mem_KB(2048)
     , m_compile_report(0)
     , m_use_optix(renderer->supports("OptiX"))
+    , m_use_hip ( renderer->supports("HIP"))
     , m_max_optix_groupdata_alloc(0)
+    , m_max_hip_groupdata_alloc(0)
     , m_buffer_printf(true)
     , m_no_noise(false)
     , m_no_pointcloud(false)
@@ -1144,6 +1151,12 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_optix_no_inline_rend_lib(false)
     , m_optix_no_inline_thresh(100000)
     , m_optix_force_inline_thresh(0)
+    , m_hip_no_inline(false)
+    , m_hip_no_inline_layer_funcs(false)
+    , m_hip_merge_layer_funcs(true)
+    , m_hip_no_inline_rend_lib(false)
+    , m_hip_no_inline_thresh(100000)
+    , m_hip_force_inline_thresh(0)
     , m_colorspace("Rec709")
     , m_stat_opt_locking_time(0)
     , m_stat_specialization_time(0)
@@ -1674,6 +1687,7 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     ATTR_SET("max_local_mem_KB", int, m_max_local_mem_KB);
     ATTR_SET("compile_report", int, m_compile_report);
     ATTR_SET("max_optix_groupdata_alloc", int, m_max_optix_groupdata_alloc);
+    ATTR_SET("max_hip_groupdata_alloc", int, m_max_hip_groupdata_alloc);
     ATTR_SET("buffer_printf", int, m_buffer_printf);
     ATTR_SET("no_noise", int, m_no_noise);
     ATTR_SET("no_pointcloud", int, m_no_pointcloud);
@@ -2031,6 +2045,10 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
             deps += ",OptiX-NONE";
         else
             deps += ",OptiX-" OSL_OPTIX_VERSION;
+        if (!strcmp(OSL_HIP_VERSION, ""))
+            deps += ",HIP-NONE";
+        else
+            deps += ",HIP-" OSL_HIP_VERSION;
         *(const char**)val = ustring(deps).c_str();
         return true;
     }
@@ -2042,6 +2060,18 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
     }
     if (name == "shadeops_cuda_ptx_size" && type.basetype == TypeDesc::INT) {
         *(int*)val = shadeops_cuda_ptx_compiled_ops_size;
+        return true;
+    }
+#endif
+
+#if defined(OSL_LLVM_HIP_BITCODE)
+    if (name == "shadeops_hip_llvm" && type.basetype == TypeDesc::PTR) {
+        *(const char**)val = reinterpret_cast<const char*>(
+            shadeops_hip_llvm_compiled_ops_block);
+        return true;
+    }
+    if (name == "shadeops_hip_llvm_size" && type.basetype == TypeDesc::INT) {
+        *(int*)val = shadeops_hip_llvm_compiled_ops_size;
         return true;
     }
 #endif
@@ -2174,6 +2204,12 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         *(std::string*)val = exists ? group->m_llvm_ptx_compiled_version : "";
         return true;
     }
+    if (name == "hip_compiled_version" && type.basetype == TypeDesc::PTR) {
+        bool exists        = !group->m_llvm_hip_compiled_version.empty();
+        *(std::string*)val = exists ? group->m_llvm_hip_compiled_version : "";
+        return true;
+    }
+
     if (name == "interactive_params" && type.basetype == TypeDesc::PTR) {
         *(void**)val = group->m_interactive_arena.get();
         return true;

@@ -31,6 +31,7 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/DiagnosticPrinter.h>
 #if OSL_LLVM_VERSION >= 100
 #    include <llvm/IR/IntrinsicsX86.h>
 #endif
@@ -129,7 +130,8 @@
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/SymbolRewriter.h>
-
+#include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/raw_ostream.h>
 OSL_NAMESPACE_ENTER
 
 
@@ -415,8 +417,6 @@ struct SetCommandLineOptionsForLLVM {
     }
 };
 
-
-
 LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
                      int vector_width)
     : m_debug(debuglevel)
@@ -431,6 +431,7 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
     , m_new_pass_manager(NULL)
     , m_llvm_exec(NULL)
     , m_nvptx_target_machine(nullptr)
+    , m_amdgcn_target_machine(nullptr)
     , m_vector_width(vector_width)
     , m_llvm_type_native_mask(nullptr)
     , mVTuneNotifier(nullptr)
@@ -451,6 +452,8 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
     {
         OIIO::spin_lock lock(llvm_global_mutex);
         if (!m_thread->llvm_context) {
+            
+            
             m_thread->llvm_context = new llvm::LLVMContext();
 #if OSL_LLVM_VERSION >= 150 && !defined(OSL_LLVM_OPAQUE_POINTERS)
             m_thread->llvm_context->setOpaquePointers(false);
@@ -583,6 +586,7 @@ LLVM_Util::~LLVM_Util()
     delete m_builder;
     delete m_llvm_debug_builder;
     delete m_nvptx_target_machine;
+    delete m_amdgcn_target_machine;
     module(NULL);
     // DO NOT delete m_llvm_jitmm;  // just the dummy wrapper around the real MM
 }
@@ -1000,11 +1004,25 @@ LLVM_Util::module_from_bitcode(const char* bitcode, size_t size,
     // is part of the symbol name.
     ErrorOrModule ModuleOrErr = llvm::parseBitcodeFile(buf, context());
 #else
+    ErrorOrModule ModuleOrErrParsed = llvm::parseBitcodeFile(buf, context());
+    if (err){
+        error_string(ModuleOrErrParsed.takeError(), err);
+        if (!err->empty())
+        {
+            llvm::outs() << "Error parsing bitcode file: \n" << *err << "\n";
+            llvm::outs().flush();
+        }
+    }
+
     ErrorOrModule ModuleOrErr = llvm::getLazyBitcodeModule(buf, context());
 #endif
 
     if (err) {
         error_string(ModuleOrErr.takeError(), err);
+        if (!err->empty()) {
+            llvm::outs() << "Error getting lazy bitcode module: \n" << *err << "\n";
+            llvm::outs().flush();
+        }
     }
     llvm::Module* m = ModuleOrErr ? ModuleOrErr->release() : nullptr;
 #if 0
@@ -1845,7 +1863,58 @@ LLVM_Util::nvptx_target_machine()
     return m_nvptx_target_machine;
 }
 
+llvm::StringRef
+LLVM_Util::GetTargetAMDGPU() 
+{
+    return amdgcn_target_machine()->getTargetCPU();
+}
 
+llvm::TargetMachine*
+LLVM_Util::amdgcn_target_machine()
+{
+    if (m_amdgcn_target_machine == nullptr)
+    { 
+        llvm::Triple ModuleTriple(module()->getTargetTriple());
+        llvm::TargetOptions options;
+        options.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+        // N.B. 'Standard' only allow fusion of 'blessed' ops (currently just
+        // fmuladd). To truly disable FMA and never fuse FP-ops, we need to
+        // instead use llvm::FPOpFusion::Strict.
+        options.UnsafeFPMath                           = 1;
+        options.NoInfsFPMath                           = 1;
+        options.NoNaNsFPMath                           = 1;
+        options.HonorSignDependentRoundingFPMathOption = 0;
+        options.FloatABIType          = llvm::FloatABI::Default;
+        options.AllowFPOpFusion       = llvm::FPOpFusion::Fast;
+        options.NoZerosInBSS          = 0;
+        options.GuaranteedTailCallOpt = 0;
+        options.UseInitArray = 0;
+
+        std::string error;
+        const llvm::Target* llvm_target
+            = llvm::TargetRegistry::lookupTarget(ModuleTriple.str(), error);
+        OSL_ASSERT(llvm_target
+                   && "AMDGCN compile error: LLVM Target is not initialized");
+
+        m_amdgcn_target_machine = llvm_target->createTargetMachine(
+            ModuleTriple.str(), 
+            HIP_TARGET_ARCH,
+            "", //features
+            options,
+            llvm::Reloc::PIC_,
+            llvm::CodeModel::Small,
+#if OSL_LLVM_VERSION >= 180
+            llvm::CodeGenOptLevel::Default
+#else
+            llvm::CodeGenOpt::Default
+#endif
+        );
+
+        OSL_ASSERT(m_amdgcn_target_machine
+                   && "Unable to create TargetMachine for AMDGPU");
+    }
+    return m_amdgcn_target_machine;
+}
 
 void*
 LLVM_Util::getPointerToFunction(llvm::Function* func)
@@ -3271,9 +3340,9 @@ LLVM_Util::type_struct_field_at_index(llvm::Type* type, int index)
 
 
 llvm::PointerType*
-LLVM_Util::type_ptr(llvm::Type* type)
+LLVM_Util::type_ptr(llvm::Type* type, unsigned addressSpace)
 {
-    return llvm::PointerType::get(type, 0);
+    return llvm::PointerType::get(type, addressSpace);
 }
 
 llvm::Type*
@@ -6130,7 +6199,9 @@ LLVM_Util::op_store(llvm::Value* val, llvm::Value* ptr)
     // Something bad might happen, and we think it is worth leaving checks.
     // NOTE: this is no longer as useful with opaque pointers, we can only
     // check that ptr is a pointer.
-    if (ptr->getType() != type_ptr(val->getType())) {
+    unsigned addressSpace = ptr->getType()->getPointerAddressSpace();
+
+    if (ptr->getType() != type_ptr(val->getType(), addressSpace)) {
         std::cerr << "We have a type mismatch! op_store ptr->getType()="
                   << std::flush;
         ptr->getType()->print(llvm::errs());
@@ -6365,7 +6436,7 @@ LLVM_Util::op_mod(llvm::Value* a, llvm::Value* b)
         || (a->getType() == type_wide_float()
             && b->getType() == type_wide_float())) {
 #if OSL_LLVM_VERSION >= 160
-        if (m_target_isa == TargetISA::NVPTX) {
+        if (m_target_isa == TargetISA::NVPTX || m_target_isa == TargetISA::AMDGCN) {
             // Since llvm/llvm-project@2c3f82b, FRem generates an
             // optix.ptx.testp.infinite.f32 intrinsic that OptiX does not
             // currently implement. Work around with custom code.
@@ -6843,6 +6914,40 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
 #endif
 }
 
+ bool 
+ LLVM_Util::amdgcn_compile_group(llvm::Module* lib_module, const std::string& name,
+                              std::string& out)
+ {
+#if defined(OSL_USE_HIP) 
+
+    {
+        llvm::raw_string_ostream object_stream(out);
+        llvm::WriteBitcodeToFile(*module(), object_stream);
+    }
+
+    return true;
+
+    // if (debug() > 1)
+    // {
+    //     llvm::StringRef moduleFilename = "amdgcn_module.ll";
+    //     std::error_code error_code;
+    //     llvm::raw_fd_ostream fd(moduleFilename, error_code);
+    //     if (!error_code)
+    //     {
+    //         module()->print(fd, nullptr);
+    //     }
+    //
+    //     llvm::StringRef compiledModule = "amdgcn_compiled_module.o";
+    //     llvm::raw_fd_ostream f(compiledModule, error_code);
+    //     if (!error_code)
+    //     {
+    //         f << out_stream.str();
+    //     }
+    // }
+#else
+    return false;
+#endif
+}
 
 
 std::string

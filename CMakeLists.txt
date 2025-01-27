@@ -156,7 +156,7 @@ option (OSL_USTRINGREP_IS_HASH "Always use ustringhash for strings" OFF)
 
 # HIP support
 option (OSL_USE_HIP "Include HIP support" OFF)
-set (HIP_TARGET_ARCH "gfx1030" CACHE STRING "HIP GPU architecture (e.g. gfx1030)")
+set (HIP_TARGET_ARCH "gfx1036" CACHE STRING "HIP GPU architecture (e.g. gfx1030)")
 message(STATUS "OSL_USE_HIP: ${OSL_USE_HIP}")
 message(STATUS "HIP_TARGET_ARCH: ${HIP_TARGET_ARCH}")
 
@@ -269,6 +269,7 @@ add_subdirectory (src/oslinfo)
 if (OSL_BUILD_TESTS AND BUILD_TESTING)
     add_subdirectory (src/testshade)
     add_subdirectory (src/testrender)
+    add_subdirectory (src/testshade-hip)
 endif ()
 
 if (OSL_BUILD_PLUGINS)

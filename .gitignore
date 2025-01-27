@@ -11,3 +11,14 @@ build
 .vscode
 .envrc
 .DS_Store
+build_1030/*
+
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.bc

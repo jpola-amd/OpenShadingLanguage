@@ -44,6 +44,8 @@ public:
     /// Set additional Module/Function options for the CUDA/OptiX target.
     void prepare_module_for_cuda_jit();
 
+    void prepare_module_for_amdgcn_jit();
+
 
 
     /// What LLVM debug level are we at?
@@ -65,6 +67,12 @@ public:
     // Create llvm functions for OptiX callables
     std::vector<llvm::Function*> build_llvm_optix_callables();
     llvm::Function* build_llvm_fused_callable();
+
+    std::vector<llvm::Function*> build_llvm_hip_callables();
+    llvm::Function* build_hip_fused_callable();
+
+
+
 
     /// Build up LLVM IR code for the given range [begin,end) or
     /// opcodes, putting them (initially) into basic block bb (or the
@@ -446,7 +454,7 @@ public:
     {
         if (typespec.is_closure_based())
             return TypeDesc(TypeDesc::PTR, typespec.arraylength());
-        else if (use_optix() && typespec.is_string_based()) {
+        else if ((use_optix() || use_hip())  && typespec.is_string_based()) {
             // On the OptiX side, we use the uint64 hash to represent a string
             return TypeDesc(TypeDesc::UINT64, typespec.arraylength());
         } else
@@ -525,6 +533,8 @@ public:
     /// Return whether or not we are compiling for an OptiX-based renderer.
     bool use_optix() { return m_use_optix; }
 
+    bool use_hip() { return m_use_hip;}
+
     /// Return if we should compile against free function versions of Renderer Service.
     bool use_rs_bitcode() { return m_use_rs_bitcode; }
 
@@ -594,6 +604,7 @@ private:
     std::vector<std::string> m_groupdata_field_names;
 
     bool m_use_optix;  ///< Compile for OptiX?
+    bool m_use_hip;     ///< Compile for HIP?
     bool m_use_rs_bitcode;  /// To use free function versions of Renderer Service functions.
 
     friend class ShadingSystemImpl;

@@ -28,6 +28,7 @@ BackendLLVM::BackendLLVM(ShadingSystemImpl& shadingsys, ShaderGroup& group,
     , m_stat_llvm_jit_time(0)
 {
     m_use_optix      = shadingsys.use_optix();
+    m_use_hip        = shadingsys.use_hip();
     m_use_rs_bitcode = !shadingsys.m_rs_bitcode.empty();
     m_name_llvm_syms = shadingsys.m_llvm_output_bitcode;
 
@@ -259,6 +260,10 @@ BackendLLVM::getLLVMSymbolBase(const Symbol& sym)
             mangled_name, dealiased->unmangled());
         return 0;
     }
+    // auto val = (llvm::Value*) map_iter->second;
+    // std::cout << "*** getLLVMSymbolBase: " << mangled_name << std::endl;
+    // val->print(llvm::errs(), false);
+    // std::cout << std::endl;
     return (llvm::Value*)map_iter->second;
 }
 
@@ -300,11 +305,13 @@ BackendLLVM::getOrAllocateLLVMSymbol(const Symbol& sym)
     AllocationMap::iterator map_iter = named_values().find(mangled_name);
 
     if (map_iter == named_values().end()) {
-        llvm::Value* a = llvm_alloca(sym.typespec(), sym.has_derivs(),
-                                     llnamefmt("{}_mem", mangled_name));
+
+        const auto name_mem =  llnamefmt("{}_mem", mangled_name);
+        llvm::Value* a = llvm_alloca(sym.typespec(), sym.has_derivs(), name_mem);
         named_values()[mangled_name] = a;
         return a;
     }
+
     return map_iter->second;
 }
 
@@ -429,7 +436,9 @@ BackendLLVM::llvm_load_value(llvm::Value* ptr, const TypeSpec& type, int deriv,
     // If it's multi-component (triple or matrix), step to the right field
     if (!type.is_closure_based() && t.aggregate > 1)
         ptr = ll.GEP(element_type, ptr, 0, component);
-
+    // std::cerr << " - " << std::endl;
+    // ptr->print(llvm::errs(), false);
+    // std::cerr << std::endl;
     // Now grab the value
     llvm::Type* component_type = llvm_type(t.scalartype());
     llvm::Value* result        = ll.op_load(component_type, ptr, llname);
