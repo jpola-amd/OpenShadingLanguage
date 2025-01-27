@@ -325,8 +325,8 @@ HIPRenderer::prepare_render(RenderState& renderState)
         // HIPRTC_CHECK(hiprtcAddNameExpression(program, init_name_addr.c_str()));
         // HIPRTC_CHECK(hiprtcAddNameExpression(program, entry_name_addr.c_str()));
          // Add the name expressions to the HIPRTC program
-    hiprtcAddNameExpression(program, init_name_addr.c_str());
-    hiprtcAddNameExpression(program, entry_name_addr.c_str());
+    // hiprtcAddNameExpression(program, init_name_addr.c_str());
+    // hiprtcAddNameExpression(program, entry_name_addr.c_str());
     //hiprtcAddNameExpression(program, fused_name_addr.c_str());
         // HIPRTC_CHECK(hiprtcAddNameExpression(program, fused_name_addr.c_str()));
 
@@ -495,8 +495,110 @@ HIPRenderer::render(int xres, int yres, RenderState& renderState)
         0, 
         m_stream, args, nullptr);
 
-    // Launch the kernel
-    //hipLaunchKernelGGL(m_function, dim3(1), dim3(1), 0, m_stream);
+    std::vector<uint8_t> printf_buffer(OSL_PRINTF_BUFFER_SIZE);
+    HIP_CHECK(hipMemcpy(printf_buffer.data(), d_osl_printf_buffer, OSL_PRINTF_BUFFER_SIZE, hipMemcpyDeviceToHost));
+
+    processPrintfBuffer(printf_buffer.data(), OSL_PRINTF_BUFFER_SIZE);
+
+
+}
+
+void HIPRenderer::processPrintfBuffer(void* buffer_data, size_t buffer_size)
+{
+    const uint8_t* ptr = reinterpret_cast<uint8_t*>(buffer_data);
+    // process until
+    std::string fmt_string;
+    size_t total_read = 0;
+    while (total_read < buffer_size) {
+        size_t src = 0;
+        // set max size of each output string
+        const size_t BufferSize = 4096;
+        char buffer[BufferSize];
+        size_t dst = 0;
+        // get hash of the format string
+        uint64_t fmt_str_hash = *reinterpret_cast<const uint64_t*>(&ptr[src]);
+        src += sizeof(uint64_t);
+        // get sizeof the argument stack
+        uint64_t args_size = *reinterpret_cast<const uint64_t*>(&ptr[src]);
+        src += sizeof(size_t);
+        uint64_t next_args = src + args_size;
+
+        // have we reached the end?
+        if (fmt_str_hash == 0)
+            break;
+        const char* format = OSL::ustring::from_hash(fmt_str_hash).c_str();
+        OSL_ASSERT(format != nullptr
+                   && "The string should have been a valid ustring");
+        const size_t len = strlen(format);
+
+        for (size_t j = 0; j < len; j++) {
+            // If we encounter a '%', then we'll copy the format string to 'fmt_string'
+            // and provide that to printf() directly along with a pointer to the argument
+            // we're interested in printing.
+            if (format[j] == '%') {
+                fmt_string            = "%";
+                bool format_end_found = false;
+                for (size_t i = 0; !format_end_found; i++) {
+                    j++;
+                    fmt_string += format[j];
+                    switch (format[j]) {
+                    case '%':
+                        // seems like a silly to print a '%', but it keeps the logic parallel with the other cases
+                        dst += snprintf(&buffer[dst], BufferSize - dst, "%s",
+                                        fmt_string.c_str());
+                        format_end_found = true;
+                        break;
+                    case 'd':
+                    case 'i':
+                    case 'o':
+                    case 'x':
+                        dst += snprintf(&buffer[dst], BufferSize - dst,
+                                        fmt_string.c_str(),
+                                        *reinterpret_cast<const int*>(
+                                            &ptr[src]));
+                        src += sizeof(int);
+                        format_end_found = true;
+                        break;
+                    case 'f':
+                    case 'g':
+                    case 'e':
+                        // TODO:  For OptiX llvm_gen_printf() aligns doubles on sizeof(double) boundaries -- since we're not
+                        // printing from the device anymore, maybe we don't need this alignment?
+                        src = (src + sizeof(double) - 1)
+                              & ~(sizeof(double) - 1);
+                        dst += snprintf(&buffer[dst], BufferSize - dst,
+                                        fmt_string.c_str(),
+                                        *reinterpret_cast<const double*>(
+                                            &ptr[src]));
+                        src += sizeof(double);
+                        format_end_found = true;
+                        break;
+                    case 's':
+                        src = (src + sizeof(uint64_t) - 1)
+                              & ~(sizeof(uint64_t) - 1);
+                        uint64_t str_hash = *reinterpret_cast<const uint64_t*>(
+                            &ptr[src]);
+                        OSL::ustring str = OSL::ustring::from_hash(str_hash);
+                        dst += snprintf(&buffer[dst], BufferSize - dst,
+                                        fmt_string.c_str(), str.c_str());
+                        src += sizeof(uint64_t);
+                        format_end_found = true;
+                        break;
+
+                        break;
+                    }
+                }
+            } else {
+                buffer[dst++] = format[j];
+            }
+        }
+        // realign
+        ptr = ptr + next_args;
+        total_read += next_args;
+
+        buffer[dst++] = '\0';
+        OIIO::print("{}", buffer);
+    }
 }
 
 
@@ -644,7 +746,8 @@ HIPRenderer::initialize_render_parameters()
         copy_to_device(d_color_system, colorSys, podDataSize);
 
         d_osl_printf_buffer = device_alloc(OSL_PRINTF_BUFFER_SIZE);
-        copy_to_device(d_osl_printf_buffer, nullptr, OSL_PRINTF_BUFFER_SIZE);
+        HIP_CHECK(hipMemset(d_osl_printf_buffer, 0, OSL_PRINTF_BUFFER_SIZE));
+        
         
         // Transforms
         d_object2common = device_alloc(sizeof(OSL::Matrix44));

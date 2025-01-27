@@ -116,7 +116,7 @@ private:
 
      std::vector<std::string> m_search_paths;
 
-
+    void processPrintfBuffer(void* buffer_data, size_t buffer_size);
 
 };
 

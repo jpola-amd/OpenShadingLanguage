@@ -2517,21 +2517,12 @@ LLVMGEN(llvm_gen_if)
     llvm::BasicBlock* else_block  = rop.ll.new_basic_block("else");
     llvm::BasicBlock* after_block = rop.ll.new_basic_block("");
 
-    std::string buffer;
-    llvm::raw_string_ostream stream(buffer);
-
-    then_block->print(stream);
-    std::cout << buffer << "\n";
-
     rop.ll.op_branch(cond_val, then_block, else_block);
 
     // Then block
-    std::cerr << "\t\tGenerating then block\n" <<std::endl;
     rop.build_llvm_code(opnum + 1, op.jump(0), then_block);
-    std::cerr << "\t\top_branch after block" <<std::endl;
     rop.ll.op_branch(after_block);
 
-    std::cerr << "Generating else block\n" << std::endl;
     // Else block
     rop.build_llvm_code(op.jump(0), op.jump(1), else_block);
     rop.ll.op_branch(after_block);  // insert point is now after_block

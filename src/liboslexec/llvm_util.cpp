@@ -132,8 +132,6 @@
 #include <llvm/Transforms/Utils/SymbolRewriter.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
-
-
 OSL_NAMESPACE_ENTER
 
 
@@ -419,30 +417,6 @@ struct SetCommandLineOptionsForLLVM {
     }
 };
 
-static void LLVMUtilDiagnostics(const llvm::DiagnosticInfo *DI, void *Context) 
-{
-    llvm::raw_ostream &OS = llvm::errs();
-    OS << "LLVM Diagnostic: ";
-    switch (DI->getSeverity()) {
-        case llvm::DS_Error:
-            OS << "Error: ";
-            break;
-        case llvm::DS_Warning:
-            OS << "Warning: ";
-            break;
-        case llvm::DS_Remark:
-            OS << "Remark: ";
-            break;
-        case llvm::DS_Note:
-            OS << "Note: ";
-            break;
-    }
-    llvm::DiagnosticPrinterRawOStream DP(OS);
-    DI->print(DP);
-    OS << "\n";
-    OS.flush();
-}
-
 LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
                      int vector_width)
     : m_debug(debuglevel)
@@ -487,9 +461,6 @@ LLVM_Util::LLVM_Util(const PerThreadInfo& per_thread_info, int debuglevel,
             // to fix this and switch to opaque pointers by llvm 16.
 #endif
             //static SetCommandLineOptionsForLLVM sSetCommandLineOptionsForLLVM;
-
-            //JPA: set diagnostics:
-            m_thread->llvm_context->setDiagnosticHandlerCallBack(LLVMUtilDiagnostics, nullptr);
         }
 
         if (!m_thread->llvm_jitmm) {

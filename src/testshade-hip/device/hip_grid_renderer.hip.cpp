@@ -6,6 +6,9 @@
 
 #include "rend_lib.hip.hpp"
 #include "../render_params.hpp"
+#include <OSL/rs_free_function.h>
+
+
 
 
 // Definition is in the hip_grid_renderer.hip.cpp

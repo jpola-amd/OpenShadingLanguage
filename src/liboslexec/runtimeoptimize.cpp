@@ -3268,7 +3268,6 @@ RuntimeOptimizer::run()
             continue;  // no need to print or gather stats for unused layers
         FOREACH_SYM(Symbol & s, inst())
         {
-            llvm::outs() << "Processing symbol: " << s.name().string() << "\n";
             // set the layer numbers
             s.layer(layer);
             // Find interpolated parameters
@@ -3329,20 +3328,14 @@ RuntimeOptimizer::run()
                 continue;
             // a non-unused layer with a nontrivial op does something
             if (op.opname() != Strings::end && op.opname() != Strings::useparam)
-            {
-                llvm::outs() << "1. Processing operation: " << op.opname().string() << "\n";
                 does_nothing = false;
 
-            }
             // Useparam of a down-connected or renderer output does something
             if (op.opname() == Strings::useparam) {
                 for (int i = 0, e = op.nargs(); i < e; ++i) {
                     Symbol* sym = opargsym(op, i);
-                    if (sym->connected_down() || sym->renderer_output())
-                    {   
-                        llvm::outs() << "2. Processing: " << sym->name().string() << " for operation: " << op.opname().string() << "\n";
+                    if (sym->connected_down() || sym->renderer_output())   
                         does_nothing = false;
-                    }
                 }
             }
             if (opd->flags & OpDescriptor::Tex) {
