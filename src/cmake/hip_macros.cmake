@@ -41,6 +41,7 @@ function ( HIP_COMPILE hip_src extra_headers bc_generated extra_hip_args)
         ${LLVM_COMPILE_FLAGS}
         -xhip -fgpu-rdc -c -emit-llvm -ffast-math --offload-arch=${HIP_TARGET_ARCH}
         -DOSL_USE_FAST_MATH=1
+        ${extra_hip_args}
         --std=c++${CMAKE_CXX_STANDARD}
         ${HIP_OPT_FLAG_HIPCC}
         ${OSL_EXTRA_HIP_ARGS}
@@ -158,6 +159,7 @@ function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args )
         COMMAND ${LLVM_BC_GENERATOR}
             # "-I${OPTIX_INCLUDES}"
             "-I${HIP_INCLUDE_DIRS}"
+            "-I/opt/rocm/hip/include"
             "-I${CMAKE_CURRENT_SOURCE_DIR}"
             "-I${CMAKE_SOURCE_DIR}/src/liboslexec"
             "-I${CMAKE_BINARY_DIR}/include"

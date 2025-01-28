@@ -270,6 +270,7 @@ if (OSL_BUILD_TESTS AND BUILD_TESTING)
     add_subdirectory (src/testshade)
     add_subdirectory (src/testrender)
     add_subdirectory (src/testshade-hip)
+    add_subdirectory (src/testshade-hip-2)
 endif ()
 
 if (OSL_BUILD_PLUGINS)

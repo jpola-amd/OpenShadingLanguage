@@ -114,8 +114,8 @@ endforeach()
 set(device_src_dir ${CMAKE_CURRENT_SOURCE_DIR}/device)
 set(device_bc_dir ${CMAKE_CURRENT_BINARY_DIR})
 
-message(STAUS "device_src_dir: ${device_src_dir}")
-message(STAUS "device_bc_dir: ${device_bc_dir}")
+message(STATUS "device_src_dir: ${device_src_dir}")
+message(STATUS "device_bc_dir: ${device_bc_dir}")
 
 foreach(bitcode_src ${bitcode_sources})
     HIP_COMPILE_TO_BC("${bitcode_src}"
