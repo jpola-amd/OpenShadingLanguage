@@ -63,8 +63,9 @@ private:
     hipStream_t m_stream { nullptr };
     hipModule_t m_module { nullptr };
 
-    hipFunction_t m_function_osl_init { nullptr };
-    hipFunction_t m_function_osl_entry { nullptr };
+    hipDeviceptr_t m_function_osl_init { nullptr };
+    hipDeviceptr_t m_function_osl_entry { nullptr };
+    hipDeviceptr_t m_function_fused { nullptr };
     hipFunction_t m_function_shade { nullptr };
 
     // render parameters

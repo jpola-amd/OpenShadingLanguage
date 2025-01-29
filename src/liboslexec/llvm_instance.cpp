@@ -2543,12 +2543,9 @@ BackendLLVM::run()
                     }
 
                     std::unique_ptr<llvm::Module> rend_lib_ptr(rend_lib_module);
-                    if (!llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr),
-                                            llvm::Linker::Flags::OverrideFromSrc))
-                    {
-                        shadingcontext()->errorfmt(
-                            "llvm::Linker::linkModules failed for hip rend_lib\n");
-                    }
+                    // The flags are important so it overrides the implementation from the source
+                    llvm::Linker::linkModules(*ll.module(), std::move(rend_lib_ptr), llvm::Linker::Flags::OverrideFromSrc);
+                    
                 }
                 #else
                     OSL_ASSERT(0 && "Must generate LLVM CUDA bitcode for HIP");

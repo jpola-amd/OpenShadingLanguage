@@ -13,14 +13,14 @@
 
 OSL_NAMESPACE_ENTER
 namespace pvt {
-__device__ hipDeviceptr_t s_color_system          = 0;
+__device__ hipDeviceptr_t s_color_system    = 0;
 __device__ uint64_t osl_printf_buffer_start = 0;
 __device__ uint64_t osl_printf_buffer_end   = 0;
-__device__ uint64_t test_str_1                 = 0;
-__device__ uint64_t test_str_2                 = 0;
-__device__ uint64_t num_named_xforms           = 0;
-__device__ hipDeviceptr_t xform_name_buffer       = 0;
-__device__ hipDeviceptr_t xform_buffer            = 0;
+__device__ uint64_t test_str_1              = 0;
+__device__ uint64_t test_str_2              = 0;
+__device__ uint64_t num_named_xforms        = 0;
+__device__ hipDeviceptr_t xform_name_buffer = 0;
+__device__ hipDeviceptr_t xform_buffer      = 0;
 }  // namespace pvt
 OSL_NAMESPACE_EXIT
 

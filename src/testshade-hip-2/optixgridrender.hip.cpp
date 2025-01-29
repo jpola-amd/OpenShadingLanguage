@@ -15,6 +15,9 @@
 #include "render_params.hip.h"
 
 
+#include <hip/hiprtc.h>
+
+
 // The pre-compiled renderer support library LLVM bitcode is embedded
 // into the executable and made available through these variables.
 extern int rend_lib_llvm_compiled_ops_size;
@@ -48,6 +51,16 @@ OSL_NAMESPACE_ENTER
 // Define optix_check as CUDA_CHECK for now
 #define OPTIX_CHECK(call) CUDA_CHECK(call)
 
+#define HIPRTC_CHECK(call)                                              \
+    {                                                                   \
+        hiprtcResult res = call;                                        \
+        if (res != HIPRTC_SUCCESS) {                                     \
+            print(stderr,                                               \
+                  "[HIPRTC ERROR] HIPRTC call '{}' failed with error:"   \
+                  " {} ({}:{})\n",                                       \
+                  #call, hiprtcGetErrorString(res), __FILE__, __LINE__); \
+        }                                                               \
+    }
 
 #define OPTIX_CHECK_MSG(call, msg)                                         \
     {                                                                      \
@@ -291,489 +304,188 @@ OptixGridRenderer::synch_attributes()
 bool
 OptixGridRenderer::make_optix_materials()
 {
-    // Stand-in: names of shader outputs to preserve
-    // FIXME
-//     std::vector<const char*> outputs { "Cout" };
-
-//     // Optimize each ShaderGroup in the scene, and use the resulting
-//     // PTX to create OptiX Programs which can be called by the closest
-//     // hit program in the wrapper to execute the compiled OSL shader.
-//     int mtl_id = 0;
-
-//     std::vector<OptixModule> modules;
-
-//     // Space for message logging
-//     char msg_log[8192];
-//     size_t sizeof_msg_log;
-
-//     // Make module that contains programs we'll use in this scene
-//     OptixModuleCompileOptions module_compile_options = {};
-
-//     module_compile_options.maxRegisterCount
-//         = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-//     module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-// #if OPTIX_VERSION >= 70400
-//     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_MINIMAL;
-// #else
-//     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO;
-// #endif
-
-//     OptixPipelineCompileOptions pipeline_compile_options = {};
-
-//     pipeline_compile_options.traversableGraphFlags
-//         = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_ANY;
-//     pipeline_compile_options.usesMotionBlur     = false;
-//     pipeline_compile_options.numPayloadValues   = 0;
-//     pipeline_compile_options.numAttributeValues = 0;
-//     pipeline_compile_options.exceptionFlags
-//         = OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
-//     pipeline_compile_options.pipelineLaunchParamsVariableName = "render_params";
-
-//     // Create 'raygen' program
-
-//     // Load the renderer CUDA source and generate PTX for it
-//     std::string progName    = "optix_grid_renderer.ptx";
-//     std::string program_ptx = load_ptx_file(progName);
-//     if (program_ptx.empty()) {
-//         errhandler().severefmt("Could not find PTX for the raygen program");
-//         return false;
-//     }
-
-//     sizeof_msg_log = sizeof(msg_log);
-//     OptixModule program_module;
-//     OPTIX_CHECK_MSG(optixModuleCreateFn(m_optix_ctx, &module_compile_options,
-//                                         &pipeline_compile_options,
-//                                         program_ptx.c_str(), program_ptx.size(),
-//                                         msg_log, &sizeof_msg_log,
-//                                         &program_module),
-//                     fmtformat("Creating Module from PTX-file {}", msg_log));
-
-//     // Record it so we can destroy it later
-//     modules.push_back(program_module);
-
-//     OptixProgramGroupOptions program_options = {};
-//     std::vector<OptixProgramGroup> program_groups;
-//     std::vector<void*> material_interactive_params;
-
-//     // Raygen group
-//     OptixProgramGroupDesc raygen_desc    = {};
-//     raygen_desc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-//     raygen_desc.raygen.module            = program_module;
-//     raygen_desc.raygen.entryFunctionName = "__raygen__";
-
-//     OptixProgramGroup raygen_group;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(optixProgramGroupCreate(m_optix_ctx, &raygen_desc,
-//                                             1,  // number of program groups
-//                                             &program_options,  // program options
-//                                             msg_log, &sizeof_msg_log,
-//                                             &raygen_group),
-//                     fmtformat("Creating 'ray-gen' program group: {}", msg_log));
-
-//     // Set Globals Raygen group
-//     OptixProgramGroupDesc setglobals_raygen_desc = {};
-//     setglobals_raygen_desc.kind          = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-//     setglobals_raygen_desc.raygen.module = program_module;
-//     setglobals_raygen_desc.raygen.entryFunctionName = "__raygen__setglobals";
-
-//     OptixProgramGroup setglobals_raygen_group;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(optixProgramGroupCreate(
-//                         m_optix_ctx, &setglobals_raygen_desc,
-//                         1,                 // number of program groups
-//                         &program_options,  // program options
-//                         msg_log, &sizeof_msg_log, &setglobals_raygen_group),
-//                     fmtformat("Creating 'ray-gen' program group: {}", msg_log));
-
-//     // Miss group
-//     OptixProgramGroupDesc miss_desc  = {};
-//     miss_desc.kind                   = OPTIX_PROGRAM_GROUP_KIND_MISS;
-//     miss_desc.miss.module            = program_module;
-//     miss_desc.miss.entryFunctionName = "__miss__";
-
-//     OptixProgramGroup miss_group;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(optixProgramGroupCreate(m_optix_ctx, &miss_desc, 1,
-//                                             &program_options, msg_log,
-//                                             &sizeof_msg_log, &miss_group),
-//                     fmtformat("Creating 'miss' program group: {}", msg_log));
-
-//     // Set Globals Miss group
-//     OptixProgramGroupDesc setglobals_miss_desc  = {};
-//     setglobals_miss_desc.kind                   = OPTIX_PROGRAM_GROUP_KIND_MISS;
-//     setglobals_miss_desc.miss.module            = program_module;
-//     setglobals_miss_desc.miss.entryFunctionName = "__miss__setglobals";
-
-//     OptixProgramGroup setglobals_miss_group;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(optixProgramGroupCreate(m_optix_ctx, &setglobals_miss_desc,
-//                                             1, &program_options, msg_log,
-//                                             &sizeof_msg_log,
-//                                             &setglobals_miss_group),
-//                     fmtformat("Creating set-globals 'miss' program group: {}",
-//                               msg_log));
-
-//     // Hitgroup
-//     OptixProgramGroupDesc hitgroup_desc = {};
-//     hitgroup_desc.kind                  = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-//     hitgroup_desc.hitgroup.moduleCH     = program_module;
-//     hitgroup_desc.hitgroup.entryFunctionNameCH = "__closesthit__";
-//     hitgroup_desc.hitgroup.moduleAH            = program_module;
-//     hitgroup_desc.hitgroup.entryFunctionNameAH = "__anyhit__";
-
-//     OptixProgramGroup hitgroup_group;
-
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(
-//         optixProgramGroupCreate(m_optix_ctx, &hitgroup_desc,
-//                                 1,                 // number of program groups
-//                                 &program_options,  // program options
-//                                 msg_log, &sizeof_msg_log, &hitgroup_group),
-//         fmtformat("Creating 'hitgroup' program group: {}", msg_log));
-
-//     // Retrieve the compiled shadeops PTX
-//     const char* shadeops_ptx = nullptr;
-//     shadingsys->getattribute("shadeops_cuda_ptx", OSL::TypeDesc::PTR,
-//                              &shadeops_ptx);
-
-//     int shadeops_ptx_size = 0;
-//     shadingsys->getattribute("shadeops_cuda_ptx_size", OSL::TypeDesc::INT,
-//                              &shadeops_ptx_size);
-
-//     if (shadeops_ptx == nullptr || shadeops_ptx_size == 0) {
-//         errhandler().severefmt(
-//             "Could not retrieve PTX for the shadeops library");
-//         return false;
-//     }
-
-//     // Create the shadeops library program group
-//     OptixModule shadeops_module;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(optixModuleCreateFn(m_optix_ctx, &module_compile_options,
-//                                         &pipeline_compile_options, shadeops_ptx,
-//                                         shadeops_ptx_size, msg_log,
-//                                         &sizeof_msg_log, &shadeops_module),
-//                     fmtformat("Creating module for shadeops library{}",
-//                               msg_log));
-
-//     // Record it so we can destroy it later
-//     modules.push_back(shadeops_module);
-
-//     // Load the PTX for the rend_lib
-//     std::string rend_libName = "rend_lib_testshade.ptx";
-//     std::string rend_lib_ptx = load_ptx_file(rend_libName);
-//     if (rend_lib_ptx.empty()) {
-//         errhandler().severefmt("Could not find PTX for the renderer library");
-//         return false;
-//     }
-
-//     // Create rend_lib program group
-//     sizeof_msg_log = sizeof(msg_log);
-//     OptixModule rend_lib_module;
-//     OPTIX_CHECK_MSG(optixModuleCreateFn(m_optix_ctx, &module_compile_options,
-//                                         &pipeline_compile_options,
-//                                         rend_lib_ptx.c_str(),
-//                                         rend_lib_ptx.size(), msg_log,
-//                                         &sizeof_msg_log, &rend_lib_module),
-//                     fmtformat("Creating module from PTX-file: {}", msg_log));
-
-//     // Record it so we can destroy it later
-//     modules.push_back(rend_lib_module);
-
-//     // Direct-callable -- built-in support functions for OSL on the device
-//     OptixProgramGroupDesc shadeops_desc = {};
-//     shadeops_desc.kind                  = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
-//     shadeops_desc.callables.moduleDC    = shadeops_module;
-//     shadeops_desc.callables.entryFunctionNameDC
-//         = "__direct_callable__dummy_shadeops";
-//     shadeops_desc.callables.moduleCC            = 0;
-//     shadeops_desc.callables.entryFunctionNameCC = nullptr;
-
-//     OptixProgramGroup shadeops_group;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(
-//         optixProgramGroupCreate(m_optix_ctx, &shadeops_desc,
-//                                 1,                 // number of program groups
-//                                 &program_options,  // program options
-//                                 msg_log, &sizeof_msg_log, &shadeops_group),
-//         fmtformat("Creating 'shadeops' program group: {}", msg_log));
-
-//     // Direct-callable -- renderer-specific support functions for OSL on the device
-//     OptixProgramGroupDesc rend_lib_desc = {};
-//     rend_lib_desc.kind                  = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
-//     rend_lib_desc.callables.moduleDC    = rend_lib_module;
-//     rend_lib_desc.callables.entryFunctionNameDC
-//         = "__direct_callable__dummy_rend_lib";
-//     rend_lib_desc.callables.moduleCC            = 0;
-//     rend_lib_desc.callables.entryFunctionNameCC = nullptr;
-
-//     OptixProgramGroup rend_lib_group;
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(
-//         optixProgramGroupCreate(m_optix_ctx, &rend_lib_desc,
-//                                 1,                 // number of program groups
-//                                 &program_options,  // program options
-//                                 msg_log, &sizeof_msg_log, &rend_lib_group),
-//         fmtformat("Creating 'rend_lib' program group: {}", msg_log));
-
-//     int callables = m_fused_callable ? 1 : 2;
-
-//     // Create materials
-//     for (const auto& groupref : shaders()) {
-//         shadingsys->attribute(groupref.get(), "renderer_outputs",
-//                               TypeDesc(TypeDesc::STRING, outputs.size()),
-//                               outputs.data());
-
-//         shadingsys->optimize_group(groupref.get(), nullptr);
-
-//         if (!shadingsys->find_symbol(*groupref.get(), ustring(outputs[0]))) {
-//             // FIXME: This is for cases where testshade is run with 1x1 resolution
-//             //        Those tests may not have a Cout parameter to write to.
-//             if (m_xres > 1 && m_yres > 1) {
-//                 errhandler().warningfmt(
-//                     "Requested output '{}', which wasn't found", outputs[0]);
-//             }
-//         }
-
-//         std::string group_name, init_name, entry_name, fused_name;
-//         shadingsys->getattribute(groupref.get(), "groupname", group_name);
-//         shadingsys->getattribute(groupref.get(), "group_init_name", init_name);
-//         shadingsys->getattribute(groupref.get(), "group_entry_name",
-//                                  entry_name);
-//         shadingsys->getattribute(groupref.get(), "group_fused_name",
-//                                  fused_name);
-
-//         // Retrieve the compiled ShaderGroup PTX
-//         std::string osl_ptx;
-//         shadingsys->getattribute(groupref.get(), "ptx_compiled_version",
-//                                  OSL::TypeDesc::PTR, &osl_ptx);
-
-//         if (osl_ptx.empty()) {
-//             errhandler().errorfmt("Failed to generate PTX for ShaderGroup {}",
-//                                   group_name);
-//             return false;
-//         }
-
-//         if (options.get_int("saveptx")) {
-//             std::string filename
-//                 = OIIO::Strutil::fmt::format("{}_{}.ptx", group_name, mtl_id++);
-//             OIIO::ofstream out;
-//             OIIO::Filesystem::open(out, filename);
-//             out << osl_ptx;
-//         }
-
-//         OptixModule optix_module;
-
-//         // Create Programs from the init and group_entry functions,
-//         // and set the OSL functions as Callable Programs so that they
-//         // can be executed by the closest hit program in the wrapper
-//         sizeof_msg_log = sizeof(msg_log);
-//         OPTIX_CHECK_MSG(optixModuleCreateFn(m_optix_ctx,
-//                                             &module_compile_options,
-//                                             &pipeline_compile_options,
-//                                             osl_ptx.c_str(), osl_ptx.size(),
-//                                             msg_log, &sizeof_msg_log,
-//                                             &optix_module),
-//                         fmtformat("Creating Module from PTX-file {}", msg_log));
-
-//         modules.push_back(optix_module);
-
-
-//         // Create shader program groups (for direct callables)
-//         OptixProgramGroupOptions program_options = {};
-//         OptixProgramGroupDesc pgDesc[2]          = {};
-
-//         if (m_fused_callable) {
-//             pgDesc[0].kind               = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
-//             pgDesc[0].callables.moduleDC = optix_module;
-//             pgDesc[0].callables.entryFunctionNameDC = fused_name.c_str();
-//             pgDesc[0].callables.moduleCC            = 0;
-//             pgDesc[0].callables.entryFunctionNameCC = nullptr;
-//         } else {
-//             pgDesc[0].kind               = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
-//             pgDesc[0].callables.moduleDC = optix_module;
-//             pgDesc[0].callables.entryFunctionNameDC = init_name.c_str();
-//             pgDesc[0].callables.moduleCC            = 0;
-//             pgDesc[0].callables.entryFunctionNameCC = nullptr;
-//             pgDesc[1].kind               = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
-//             pgDesc[1].callables.moduleDC = optix_module;
-//             pgDesc[1].callables.entryFunctionNameDC = entry_name.c_str();
-//             pgDesc[1].callables.moduleCC            = 0;
-//             pgDesc[1].callables.entryFunctionNameCC = nullptr;
-//         }
-//         program_groups.resize(program_groups.size() + callables);
-//         void* interactive_params = nullptr;
-//         shadingsys->getattribute(groupref.get(), "device_interactive_params",
-//                                  TypeDesc::PTR, &interactive_params);
-//         material_interactive_params.push_back(interactive_params);
-
-//         sizeof_msg_log = sizeof(msg_log);
-//         OPTIX_CHECK_MSG(optixProgramGroupCreate(
-//                             m_optix_ctx, &pgDesc[0],
-//                             callables,         // number of program groups
-//                             &program_options,  // program options
-//                             msg_log, &sizeof_msg_log,
-//                             &program_groups[program_groups.size() - callables]),
-//                         fmtformat("Creating 'shader' group for group {}: {}",
-//                                   group_name, msg_log));
-//     }
-
-//     OptixPipelineLinkOptions pipeline_link_options;
-//     pipeline_link_options.maxTraceDepth = 1;
-// #if (OPTIX_VERSION < 70700)
-//     pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-// #endif
-// #if (OPTIX_VERSION < 70100)
-//     pipeline_link_options.overrideUsesMotionBlur = false;
-// #endif
-
-//     // Set up OptiX pipeline
-//     std::vector<OptixProgramGroup> final_groups = {
-//         shadeops_group,        rend_lib_group,
-//         raygen_group,          miss_group,
-//         hitgroup_group,        setglobals_raygen_group,
-//         setglobals_miss_group,
-//     };
-//     if (m_fused_callable) {
-//         final_groups.push_back(program_groups[0]);  // fused
-//     } else {
-//         final_groups.push_back(program_groups[0]);  // init
-//         final_groups.push_back(program_groups[1]);  // entry
-//     }
-
-//     sizeof_msg_log = sizeof(msg_log);
-//     OPTIX_CHECK_MSG(optixPipelineCreate(m_optix_ctx, &pipeline_compile_options,
-//                                         &pipeline_link_options,
-//                                         final_groups.data(),
-//                                         int(final_groups.size()), msg_log,
-//                                         &sizeof_msg_log, &m_optix_pipeline),
-//                     fmtformat("Creating optix pipeline: {}", msg_log));
-
-//     // Set the pipeline stack size
-//     OptixStackSizes stack_sizes = {};
-//     for (OptixProgramGroup& program_group : final_groups) {
-// #if (OPTIX_VERSION < 70700)
-//         OPTIX_CHECK(optixUtilAccumulateStackSizes(program_group, &stack_sizes));
-// #else
-//         // OptiX 7.7+ is able to take the whole pipeline into account
-//         // when calculating the stack requirements.
-//         OPTIX_CHECK(optixUtilAccumulateStackSizes(program_group, &stack_sizes,
-//                                                   m_optix_pipeline));
-// #endif
-//    }
-
-//     uint32_t max_trace_depth = 1;
-//     uint32_t max_cc_depth    = 1;
-//     uint32_t max_dc_depth    = 1;
-//     uint32_t direct_callable_stack_size_from_traversal;
-//     uint32_t direct_callable_stack_size_from_state;
-//     uint32_t continuation_stack_size;
-
-//     std::cout << "JPA Fix this" << __FILE__ << ": " << __LINE__ << std::endl;
-//     // OPTIX_CHECK(optixUtilComputeStackSizes(
-//     //     &stack_sizes, max_trace_depth, max_cc_depth, max_dc_depth,
-//     //     &direct_callable_stack_size_from_traversal,
-//     //     &direct_callable_stack_size_from_state, &continuation_stack_size));
-
-// #if (OPTIX_VERSION < 70700)
-//     // NB: Older versions of OptiX are unable to compute the stack requirements
-//     //     for extern functions (e.g., the shadeops functions), so we need to
-//     //     pad the direct callable stack size to accommodate these functions.
-//     direct_callable_stack_size_from_state += 512;
-// #endif
-
-//     const uint32_t max_traversal_depth = 1;
-//     std::cout << "JPA Fix this" << __FILE__ << ": " << __LINE__ << std::endl;
-//     // OPTIX_CHECK(optixPipelineSetStackSize(
-//     //     m_optix_pipeline, direct_callable_stack_size_from_traversal,
-//     //     direct_callable_stack_size_from_state, continuation_stack_size,
-//     //     max_traversal_depth));
-
-//     // Build OptiX Shader Binding Table (SBT)
-//     hipDeviceptr_t d_raygenRecord;
-//     hipDeviceptr_t d_missRecord;
-//     hipDeviceptr_t d_hitgroupRecord;
-//     hipDeviceptr_t d_callablesRecord;
-//     hipDeviceptr_t d_setglobals_raygenRecord;
-//     hipDeviceptr_t d_setglobals_missRecord;
-
-//     GenericRecord raygenRecord, missRecord, hitgroupRecord, callablesRecord[2];
-//     GenericRecord setglobals_raygenRecord, setglobals_missRecord;
-
-//     std::cout << "JPA Fix this" << __FILE__ << ": " <<  __LINE__ << std::endl;
-//     // OPTIX_CHECK(optixSbtRecordPackHeader(raygen_group, &raygenRecord));
-//     // OPTIX_CHECK(optixSbtRecordPackHeader(miss_group, &missRecord));
-//     // OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_group, &hitgroupRecord));
-//     // if (m_fused_callable) {
-//     //     OPTIX_CHECK(
-//     //         optixSbtRecordPackHeader(program_groups[0], &callablesRecord[0]));
-//     // } else {
-//     //     OPTIX_CHECK(
-//     //         optixSbtRecordPackHeader(program_groups[0], &callablesRecord[0]));
-//     //     OPTIX_CHECK(
-//     //         optixSbtRecordPackHeader(program_groups[1], &callablesRecord[1]));
-//     // }
-//     // OPTIX_CHECK(optixSbtRecordPackHeader(setglobals_raygen_group,
-//     //                                      &setglobals_raygenRecord));
-//     // OPTIX_CHECK(optixSbtRecordPackHeader(setglobals_miss_group,
-//     //                                      &setglobals_missRecord));
-
-//     raygenRecord.data            = material_interactive_params[0];
-//     missRecord.data              = nullptr;
-//     hitgroupRecord.data          = nullptr;
-//     callablesRecord[0].data      = nullptr;
-//     callablesRecord[1].data      = nullptr;
-//     setglobals_raygenRecord.data = nullptr;
-//     setglobals_missRecord.data   = nullptr;
-
-//     d_raygenRecord            = DEVICE_ALLOC(sizeof(GenericRecord));
-//     d_missRecord              = DEVICE_ALLOC(sizeof(GenericRecord));
-//     d_hitgroupRecord          = DEVICE_ALLOC(sizeof(GenericRecord));
-//     d_callablesRecord         = DEVICE_ALLOC(callables * sizeof(GenericRecord));
-//     d_setglobals_raygenRecord = DEVICE_ALLOC(sizeof(GenericRecord));
-//     d_setglobals_missRecord   = DEVICE_ALLOC(sizeof(GenericRecord));
-
-//     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_raygenRecord),
-//                           &raygenRecord, sizeof(GenericRecord),
-//                           hipMemcpyHostToDevice));
-//     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_missRecord), &missRecord,
-//                           sizeof(GenericRecord), hipMemcpyHostToDevice));
-//     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_hitgroupRecord),
-//                           &hitgroupRecord, sizeof(GenericRecord),
-//                           hipMemcpyHostToDevice));
-//     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_callablesRecord),
-//                           &callablesRecord[0],
-//                           callables * sizeof(GenericRecord),
-//                           hipMemcpyHostToDevice));
-//     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_setglobals_raygenRecord),
-//                           &setglobals_raygenRecord, sizeof(GenericRecord),
-//                           hipMemcpyHostToDevice));
-//     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_setglobals_missRecord),
-//                           &setglobals_missRecord, sizeof(GenericRecord),
-//                           hipMemcpyHostToDevice));
-
-    std::cout << "JPA Fix this" << __FILE__ << ": " <<  __LINE__ << std::endl;
-    // // Looks like OptixShadingTable needs to be filled out completely
-    // m_optix_sbt.raygenRecord                 = d_raygenRecord;
-    // m_optix_sbt.missRecordBase               = d_missRecord;
-    // m_optix_sbt.missRecordStrideInBytes      = sizeof(GenericRecord);
-    // m_optix_sbt.missRecordCount              = 1;
-    // m_optix_sbt.hitgroupRecordBase           = d_hitgroupRecord;
-    // m_optix_sbt.hitgroupRecordStrideInBytes  = sizeof(GenericRecord);
-    // m_optix_sbt.hitgroupRecordCount          = 1;
-    // m_optix_sbt.callablesRecordBase          = d_callablesRecord;
-    // m_optix_sbt.callablesRecordStrideInBytes = sizeof(GenericRecord);
-    // m_optix_sbt.callablesRecordCount         = callables;
-
-    // // Shader binding table for SetGlobals stage
-    // m_setglobals_optix_sbt                         = {};
-    // m_setglobals_optix_sbt.raygenRecord            = d_setglobals_raygenRecord;
-    // m_setglobals_optix_sbt.missRecordBase          = d_setglobals_missRecord;
-    // m_setglobals_optix_sbt.missRecordStrideInBytes = sizeof(GenericRecord);
-    // m_setglobals_optix_sbt.missRecordCount         = 1;
-    return false;
+
+    // Optimize each ShaderGroup in the scene, and use the resulting
+    // PTX to create OptiX Programs which can be called by the closest
+    // hit program in the wrapper to execute the compiled OSL shader.
+   
+    // char msg_log[8192];
+    // size_t sizeof_msg_log;
+
+    // Renderer
+    std::string name = "optix_grid_renderer.bc";
+    std::string program_ptx = load_ptx_file(name);
+
+    if (program_ptx.empty()) {
+        errhandler().severefmt("Could not find PTX for the raygen program");
+        return false;
+    }
+
+    // Shadeops
+    const char* shadeops_ptx = nullptr;
+    // jpa this should be changed to shadeops_hip_bitcode
+    shadingsys->getattribute("shadeops_hip_llvm", OSL::TypeDesc::PTR,
+                             &shadeops_ptx);
+
+    int shadeops_ptx_size = 0;
+    shadingsys->getattribute("shadeops_hip_llvm_size", OSL::TypeDesc::INT,
+                             &shadeops_ptx_size);
+
+    if (shadeops_ptx == nullptr || shadeops_ptx_size == 0) {
+        errhandler().severefmt(
+            "Could not retrieve bitcode for the shadeops library");
+        return false;
+    }
+
+    /* Render Library 
+    It is created based on the 
+        - cuda/rend_lib.hip.cu - this overrides the osl functions and multiple other required functions i.e: closure_component_allot
+        - cuda/rend_lib.hip.h - defines the shader globals struct
+        - rs_simplerend.hip.cpp - this defines multiple rs_* functions
+        - raytracer.h - camera, sphere, shape, scene etc.
+    */
+    std::string rend_libName = "rend_lib_testshade.bc";
+    std::string rend_lib_ptx = load_ptx_file(rend_libName);
+
+    if (rend_lib_ptx.empty()) {
+        errhandler().severefmt("Could not find BC for the renderer library");
+        return false;
+    }
+
+    
+    //int callables = m_fused_callable ? 1 : 2;
+
+    std::vector<void*> material_interactive_params;
+
+    // Stand-in: names of shader outputs to preserve the code
+    std::vector<const char*> outputs { "Cout" };
+    // here create a shader bc for each shader group
+    std::vector<std::string> shader_bitcodes(shaders().size());
+    std::vector<std::string> shader_names(shaders().size());
+    std::vector<std::string> shader_init_names(shaders().size());
+    std::vector<std::string> shader_entry_names(shaders().size());
+    std::vector<std::string> shader_fused_names(shaders().size());
+
+    int material_layer_id = 0;
+    for (const auto& groupref : shaders()) 
+    {
+        shadingsys->attribute(groupref.get(), "renderer_outputs",
+                              TypeDesc(TypeDesc::STRING, outputs.size()),
+                              outputs.data());
+
+        shadingsys->optimize_group(groupref.get(), nullptr);
+
+        if (!shadingsys->find_symbol(*groupref.get(), ustring(outputs[0]))) 
+        {
+            // FIXME: This is for cases where testshade is run with 1x1 resolution
+            //        Those tests may not have a Cout parameter to write to.
+            if (m_xres > 1 && m_yres > 1) {
+                errhandler().warningfmt(
+                    "Requested output '{}', which wasn't found", outputs[0]);
+            }
+        }
+        std::string group_name, init_name, entry_name, fused_name;
+        shadingsys->getattribute(groupref.get(), "groupname", group_name);
+        shadingsys->getattribute(groupref.get(), "group_init_name", init_name);
+        shadingsys->getattribute(groupref.get(), "group_entry_name", entry_name);
+        shadingsys->getattribute(groupref.get(), "group_fused_name", fused_name);
+
+        // Retrieve the compiled ShaderGroup PTX
+        std::string osl_ptx;
+        shadingsys->getattribute(groupref.get(), "hip_compiled_version", OSL::TypeDesc::PTR, &osl_ptx);
+        if (osl_ptx.empty()) {
+        errhandler().errorfmt("Failed to generate PTX for ShaderGroup {}",
+                                group_name);
+        return false;
+        }
+        
+        if (options.get_int("saveptx")) {
+        std::string filename
+            = OIIO::Strutil::fmt::format("{}_{}.bc", group_name, material_layer_id++);
+        OIIO::ofstream out;
+        OIIO::Filesystem::open(out, filename);
+        out << osl_ptx;
+        }
+      
+        shader_bitcodes[material_layer_id] = std::move(osl_ptx);
+        shader_names[material_layer_id] = std::move(group_name);
+        shader_init_names[material_layer_id] = std::move(init_name);
+        shader_entry_names[material_layer_id] = std::move(entry_name);
+        shader_fused_names[material_layer_id] = std::move(fused_name);
+
+        void* interactive_params = nullptr;
+        shadingsys->getattribute(groupref.get(), "device_interactive_params",
+                                 TypeDesc::PTR, &interactive_params);
+        if (nullptr != interactive_params)
+        {
+            std::cout << "Interactive params found for " << group_name << std::endl;
+        }
+        material_interactive_params.push_back(interactive_params);
+    }
+
+    // link everything together
+    std::vector<uint8_t> hip_fatbin; 
+    {
+        hiprtcLinkState linkState;
+        HIPRTC_CHECK(hiprtcLinkCreate(0, nullptr, nullptr, &linkState));
+
+        HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, program_ptx.data(), program_ptx.size(), name.c_str(), 0, nullptr, nullptr));
+        HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)shadeops_ptx, shadeops_ptx_size, "hip_llvm_ops", 0, nullptr, nullptr));
+        HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, (void*)rend_lib_ptx.data(), rend_lib_ptx.size(), rend_libName.c_str(), 0, nullptr, nullptr));
+
+        for (size_t i = 0; i < shader_bitcodes.size(); ++i)
+        {
+            HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, shader_bitcodes[i].data(), shader_bitcodes[i].size(), shader_names[i].c_str(), 0, nullptr, nullptr));
+        }
+
+      
+
+        {
+            void* code { nullptr };
+            size_t size { 0 };
+
+            HIPRTC_CHECK(hiprtcLinkComplete(linkState, &code, &size));
+
+            //JPA: This is stupid and not intuitive. the owner of the code_ptr and size is the linker. 
+            // Copy the data before destroying the linker
+            if (size == 0)
+            {
+                errhandler().errorfmt("HIPRTC Error: the HIP fatbin size is 0");
+                HIPRTC_CHECK(hiprtcLinkDestroy(linkState)); 
+                return false;
+            }
+
+            std::cout << "Program compiled successfully size: " << size << " B" << std::endl;
+
+            hip_fatbin.resize(size);
+            memcpy(hip_fatbin.data(), code, size);
+
+            //save the code for further analysis
+            std::ofstream outFile("hip_fatbin.bin", std::ios::out | std::ios::binary);
+            if (outFile.is_open())
+            {
+                outFile.write(reinterpret_cast<const char*>(hip_fatbin.data()), hip_fatbin.size());
+                outFile.close();
+            }
+            else{
+                errhandler().errorfmt("Proble with opening hip_fatbin.bin file for writing compiled code");
+            }
+
+            HIPRTC_CHECK(hiprtcLinkDestroy(linkState)); 
+        }
+    }
+
+    CUDA_CHECK(hipModuleLoadData(&m_module, hip_fatbin.data()));
+
+    CUDA_CHECK(hipModuleGetFunction(&m_function_shade, m_module, "__raygen__"));
+
+    // size_t bytes {0};
+    // HIP_CHECK(hipModuleGetGlobal(&m_function_osl_init, &bytes, m_module, "init_func"));
+    // HIP_CHECK(hipModuleGetGlobal(&m_function_osl_entry, &bytes, m_module, "entry_func"));
+    // HIP_CHECK(hipModuleGetGlobal(&m_function_fused, &bytes, m_module, "fused_func"));
+
+    return true;
 }
-
 
 
 bool

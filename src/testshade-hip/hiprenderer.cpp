@@ -305,7 +305,6 @@ HIPRenderer::prepare_render(RenderState& renderState)
 
     std::cout << "Generated code: " << std::endl;
     std::cout << ss.str() << std::endl;
-
     
     // dummy kernel
     //ss << "extern \"C\" __global__ void dummy_trampoline() { ShaderGlobals sg; __osl__init(sg, nullptr); __osl_entry(sg, nullptr); __osl_fused(sg); }\n"; 
@@ -439,6 +438,12 @@ HIPRenderer::prepare_render(RenderState& renderState)
     HIP_CHECK(hipModuleLoadData(&m_module, hip_fatbin.data()));
 
     HIP_CHECK(hipModuleGetFunction(&m_function_shade, m_module, "shade"));
+
+    size_t bytes {0};
+    HIP_CHECK(hipModuleGetGlobal(&m_function_osl_init, &bytes, m_module, "init_func"));
+    HIP_CHECK(hipModuleGetGlobal(&m_function_osl_entry, &bytes, m_module, "entry_func"));
+    HIP_CHECK(hipModuleGetGlobal(&m_function_fused, &bytes, m_module, "fused_func"));
+
 }
 
 void

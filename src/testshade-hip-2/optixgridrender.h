@@ -97,8 +97,9 @@ private:
     uint64_t test_str_2;
     const unsigned long OSL_PRINTF_BUFFER_SIZE = 8 * 1024 * 1024;
 
-    std::string m_materials_ptx;
     std::unordered_map<ustringhash, optix::TextureSampler> m_samplers;
+    hipModule_t m_module { nullptr };
+    hipFunction_t m_function_shade { nullptr };
 
     OSL::Matrix44 m_shader2common;  // "shader" space to "common" space matrix
     OSL::Matrix44 m_object2common;  // "object" space to "common" space matrix

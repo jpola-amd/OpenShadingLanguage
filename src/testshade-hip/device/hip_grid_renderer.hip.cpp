@@ -1,18 +1,17 @@
-
-
-
-
 #include <hip/hip_runtime.h>
 
 #include "rend_lib.hip.hpp"
 #include "../render_params.hpp"
 #include <OSL/rs_free_function.h>
 
-
-
-
 // Definition is in the hip_grid_renderer.hip.cpp
 OSL_NAMESPACE_ENTER
+using OSLDeviceFunc = void (*)(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);
+
+extern "C" __device__ __constant__ OSLDeviceFunc init_func {nullptr};   
+extern "C" __device__ __constant__ OSLDeviceFunc entry_func {nullptr};
+extern "C" __device__ __constant__ OSLDeviceFunc fused_func {nullptr};
+
 
 namespace pvt {
     __device__ hipDeviceptr_t s_color_system {nullptr};
@@ -36,6 +35,8 @@ __osl__entry(ShaderGlobals*, void*, void*, void*, int, void*);
 extern "C" {
 __device__ __constant__ testshadeHIP::RenderParams gc_render_params;
 }
+
+
 
 
 extern "C" __device__  void __prepare_globals(testshadeHIP::RenderParams& render_params)

@@ -114,8 +114,8 @@ if (OSL_USE_HIP)
 
     # Generate PTX for all of the CUDA files
     foreach (cudasrc ${testshade_cuda_srcs})
-        HIP_COMPILE_TO_BC ( ${cudasrc} ${extra_cuda_headers} ptx_generated ptx_llvm "-I cuda -DOSL_TEST_SHADE_HIP -D__HIP_DEVICE_COMPILE__ --offload-device-only" )
-        list (APPEND ptx_list ${ptx_generated})
+        HIP_COMPILE_TO_BC ( ${cudasrc} ${extra_cuda_headers} generated_bc generated_llvm "-I cuda -DOSL_TEST_SHADE_HIP -D__HIP_DEVICE_COMPILE__ --offload-device-only" )
+        list (APPEND bitcode_list ${generated_bc})
         
     endforeach ()
 
@@ -123,25 +123,28 @@ if (OSL_USE_HIP)
     add_compile_definitions (OSL_LLVM_CUDA_BITCODE)
     HIP_SHADEOPS_COMPILE ( "rend_lib_testshade"
         rend_lib_bc
-        rend_lib_ptx
+        rend_lib_llvm
         "${testshade_rend_lib_srcs}"
         "${testshade_cuda_headers}"
     )
+
+    message(STATUS "testshade-hip-2 bitcode_sources: rend_lib_bc: ${rend_lib_bc}")
+    message(STATUS "testshade-hip-2 bitcode_sources: rend_lib_llvm: ${rend_lib_llvm}")
 
     # Serialize the rend_lib bitcode into a CPP file to be embedded in the current target binary
     set (rend_lib_bc_cuda_cpp "${CMAKE_CURRENT_BINARY_DIR}/rend_lib_cuda.bc.cpp")
     MAKE_EMBEDDED_CPP( "rend_lib_llvm_compiled_ops" ${rend_lib_bc_cuda_cpp} ${rend_lib_bc} )
     list (APPEND testshade_srcs ${rend_lib_bc_cuda_cpp})
-    list (APPEND ptx_list ${rend_lib_ptx})
+    list (APPEND bitcode_list ${rend_lib_bc})
 
     add_custom_target (testshade_ptx_hip ALL
-        DEPENDS ${ptx_list}
+        DEPENDS ${bitcode_list}
         SOURCES ${testshade_cuda_srcs} )
 
     # Install the PTX files in a fixed location so that they can be
     # loaded at run time
-    install (FILES ${ptx_list}
-             DESTINATION ${OSL_PTX_INSTALL_DIR})
+    install (FILES ${bitcode_list}
+             DESTINATION ${OSL_BC_INSTALL_DIR})
 endif()
 
 set ( rs_srcs
@@ -165,7 +168,7 @@ function(hip_target TARGET)
     target_include_directories(${TARGET} PRIVATE ${HIP_INCLUDE_DIRS})
     target_link_libraries(${TARGET} PRIVATE hip::host)
     target_compile_options(${TARGET} PRIVATE ${HIP_COMPILE_OPTIONS})
-    target_compile_definitions (${TARGET} PRIVATE PTX_PATH="${OSL_PTX_INSTALL_DIR}")
+    target_compile_definitions (${TARGET} PRIVATE PTX_PATH="${OSL_BC_INSTALL_DIR}")
     # add -Wno-deprecated-declarations to suppress warnings from hip headers
     target_compile_options(${TARGET} PRIVATE -Wno-deprecated-declarations)
     target_link_options(${TARGET} PRIVATE ${HIP_LINK_OPTIONS})
@@ -174,14 +177,13 @@ endfunction()
 
 add_executable ( testshade-hip-2 ${testshade_srcs} testshademain.cpp )
 target_compile_definitions(testshade-hip-2 PRIVATE __HIP_PLATFORM_AMD__)
-target_link_libraries (testshade-hip-2
-                       PRIVATE
-                           oslexec oslquery oslcomp)
-
+target_link_libraries (testshade-hip-2 PRIVATE
+                        oslexec
+                        oslquery
+                        oslcomp
+                    )
 hip_target(testshade-hip-2)
-
 install (TARGETS testshade-hip-2 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} )
-#osl_optix_target(testshade-hip-2)
 
 
 # As explained in PR #39, problems were reported with calling OSL from a

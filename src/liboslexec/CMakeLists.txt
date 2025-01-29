@@ -292,7 +292,7 @@ if (USE_LLVM_BITCODE)
         # # retrieve it through the shading system. But for testing purposes it is
         # # handy to make the BC available offline.
         install (FILES ${shadeops_hip_bc} ${shadeops_hip_llvm}
-            DESTINATION ${OSL_PTX_INSTALL_DIR})
+            DESTINATION ${OSL_BC_INSTALL_DIR})
 
         foreach(l ${lib_src})
             message(STATUS "LIB: ${l}")
