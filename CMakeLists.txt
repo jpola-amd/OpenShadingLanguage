@@ -150,6 +150,8 @@ set (OSL_SHADER_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/shade
      CACHE STRING "Directory where shaders will be installed")
 set (OSL_PTX_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/ptx"
      CACHE STRING "Directory where OptiX PTX files will be installed")
+set (OSL_BC_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/bc"
+     CACHE STRING "Directory where HIP BC files will be installed")
 set (CMAKE_DEBUG_POSTFIX "" CACHE STRING "Library naming postfix for Debug builds (e.g., '_debug')")
 option (OSL_USTRINGREP_IS_HASH "Always use ustringhash for strings" OFF)
 
