@@ -168,12 +168,26 @@ function(hip_target TARGET)
     target_include_directories(${TARGET} PRIVATE ${HIP_INCLUDE_DIRS})
     target_link_libraries(${TARGET} PRIVATE hip::host)
     target_compile_options(${TARGET} PRIVATE ${HIP_COMPILE_OPTIONS})
-    target_compile_definitions (${TARGET} PRIVATE PTX_PATH="${OSL_BC_INSTALL_DIR}")
+    target_compile_definitions (${TARGET} PRIVATE 
+        PTX_PATH="${OSL_BC_INSTALL_DIR}"
+        TEST_SHADE_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        TEST_SHADE_BC_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+        TEST_SHADE_INSTALL_DIR="${CMAKE_INSTALL_PREFIX}"
+        TEST_SHADE_3RD_PARTY_DIR="${IMATH_INCLUDES}"
+        TEST_SHADE_TARGET="${HIP_TARGET_ARCH}"
+        TEST_SHADE_COMPILER="${LLVM_BC_GENERATOR}"
+        )
+        
+    message(STATUS "TEST_SHADE_SRC_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
+    message(STATUS "TEST_SHADE_BC_DIR: ${CMAKE_CURRENT_BINARY_DIR}")
+    message(STATUS "TEST_SHADE_INSTALL_DIR: ${CMAKE_INSTALL_PREFIX}")
+    message(STATUS "TEST_SHADE_3RD_PARTY_DIR: ${IMATH_INCLUDES}")
+    message(STATUS "TEST_SHADE_TARGET: ${HIP_TARGET_ARCH}")
+
     # add -Wno-deprecated-declarations to suppress warnings from hip headers
     target_compile_options(${TARGET} PRIVATE -Wno-deprecated-declarations)
     target_link_options(${TARGET} PRIVATE ${HIP_LINK_OPTIONS})
 endfunction()
-
 
 add_executable ( testshade-hip-2 ${testshade_srcs} testshademain.cpp )
 target_compile_definitions(testshade-hip-2 PRIVATE __HIP_PLATFORM_AMD__)

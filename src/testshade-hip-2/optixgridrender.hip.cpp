@@ -11,12 +11,10 @@
 #include <OSL/oslconfig.h>
 
 #include "optixgridrender.h"
-
 #include "render_params.hip.h"
 
-
 #include <hip/hiprtc.h>
-
+#include <filesystem>
 
 // The pre-compiled renderer support library LLVM bitcode is embedded
 // into the executable and made available through these variables.
@@ -86,11 +84,6 @@ OSL_NAMESPACE_ENTER
     }
 
 
-#define DEVICE_ALLOC(size) reinterpret_cast<hipDeviceptr_t>(device_alloc(size))
-#define COPY_TO_DEVICE(dst_device, src_host, size) \
-    copy_to_device(reinterpret_cast<void*>(dst_device), src_host, size)
-
-
 // static void
 // context_log_cb(unsigned int level, const char* tag, const char* message,
 //                void* /*cbdata */)
@@ -125,21 +118,22 @@ OptixGridRenderer::OptixGridRenderer()
 
 
 
-void*
+hipDeviceptr_t
 OptixGridRenderer::device_alloc(size_t size)
 {
-    void* ptr       = nullptr;
-    hipError_t res = hipMalloc(reinterpret_cast<void**>(&ptr), size);
+    hipDeviceptr_t ptr       = nullptr;
+    hipError_t res = hipMalloc(&ptr, size);
     if (res != hipSuccess) {
         errhandler().errorfmt("hipMalloc({}) failed with error: {}\n", size,
                               hipGetErrorString(res));
     }
+    m_ptrs_to_free.push_back(ptr);
     return ptr;
 }
 
 
 void
-OptixGridRenderer::device_free(void* ptr)
+OptixGridRenderer::device_free(hipDeviceptr_t ptr)
 {
     hipError_t res = hipFree(ptr);
     if (res != hipSuccess) {
@@ -149,8 +143,8 @@ OptixGridRenderer::device_free(void* ptr)
 }
 
 
-void*
-OptixGridRenderer::copy_to_device(void* dst_device, const void* src_host,
+hipDeviceptr_t
+OptixGridRenderer::copy_to_device(hipDeviceptr_t dst_device, const void* src_host,
                                   size_t size)
 {
     hipError_t res = hipMemcpy(dst_device, src_host, size,
@@ -166,13 +160,16 @@ OptixGridRenderer::copy_to_device(void* dst_device, const void* src_host,
 
 
 std::string
-OptixGridRenderer::load_ptx_file(string_view filename)
+OptixGridRenderer::load_ptx_file(string_view filename, const std::vector<std::string>& search_paths)
 {
+    
     std::vector<std::string> paths
         = { OIIO::Filesystem::parent_path(OIIO::Sysutil::this_program_path()),
             PTX_PATH };
-    std::string filepath = OIIO::Filesystem::searchpath_find(filename, paths,
-                                                             false);
+
+    paths.insert(paths.end(), search_paths.begin(), search_paths.end());
+    
+    std::string filepath = OIIO::Filesystem::searchpath_find(filename, paths, false);
     if (OIIO::Filesystem::exists(filepath)) {
         std::string ptx_string;
         if (OIIO::Filesystem::read_text_file(filepath, ptx_string))
@@ -258,20 +255,20 @@ OptixGridRenderer::synch_attributes()
         const size_t podDataSize = cpuDataSize
                                    - sizeof(ustringhash) * numStrings;
 
-        d_color_system = DEVICE_ALLOC(podDataSize
+        d_color_system = device_alloc(podDataSize
                                       + sizeof(uint64_t) * numStrings);
         CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_color_system), colorSys,
                               podDataSize, hipMemcpyHostToDevice));
-        d_osl_printf_buffer = DEVICE_ALLOC(OSL_PRINTF_BUFFER_SIZE);
+        d_osl_printf_buffer = device_alloc(OSL_PRINTF_BUFFER_SIZE);
         CUDA_CHECK(hipMemset(reinterpret_cast<void*>(d_osl_printf_buffer), 0,
                               OSL_PRINTF_BUFFER_SIZE));
 
         // Transforms
-        d_object2common = DEVICE_ALLOC(sizeof(OSL::Matrix44));
+        d_object2common = device_alloc(sizeof(OSL::Matrix44));
         CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_object2common),
                               &m_object2common, sizeof(OSL::Matrix44),
                               hipMemcpyHostToDevice));
-        d_shader2common = DEVICE_ALLOC(sizeof(OSL::Matrix44));
+        d_shader2common = device_alloc(sizeof(OSL::Matrix44));
         CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_shader2common),
                               &m_shader2common, sizeof(OSL::Matrix44),
                               hipMemcpyHostToDevice));
@@ -299,6 +296,172 @@ OptixGridRenderer::synch_attributes()
     return true;
 }
 
+// static bool hiprtcCompileRenderer(const char* source, const char* name, 
+//                 int num_headers, std::vector<const char*> headers, 
+//                 std::vector<const char*> include_names, 
+//                 std::vector<std::string> include_paths, 
+//                 OIIO::ErrorHandler& errhandler)
+// {
+//     hiprtcProgram prog;
+//     hiprtcResult res = hiprtcCreateProgram(&prog, source, name, num_headers, headers.data(), include_names.data());
+//     if (res != HIPRTC_SUCCESS) {
+//         errhandler.errorfmt("hiprtcCreateProgram failed with error: {}\n", hiprtcGetErrorString(res));
+//         return false;
+//     }
+
+//     // Prepare compiler options
+
+//     std::vector<std::string> include_options;
+
+//     std::transform(include_paths.begin(), include_paths.end(), std::back_inserter(include_options),
+//                [](const std::string& path) { return std::string("-I") + path; });
+    
+   
+//     std::vector<const char*> options { 
+//         "-std=c++17",
+//         "-fgpu-rdc",
+//         "-emit-llvm",
+//         "-ffast-math",
+//         "--offload-arch=" TEST_SHADE_TARGET,
+//         "--offload-device-only",
+//         "-D__HIP_PLATFORM_AMD__",
+//         "-D__HIP_DEVICE_COMPILE__",
+//         "-DUSE_HIP",
+//         "-DHIP",
+//         "-DOSL_USE_FAST_MATH=1"
+//     };
+
+//     std::transform(include_options.begin(), include_options.end(), std::back_inserter(options),
+//                [](const std::string& option) { return option.c_str(); });
+
+//     hiprtcResult compile_res = hiprtcCompileProgram(prog, options.size(), options.data());
+//     if (compile_res != HIPRTC_SUCCESS) {
+//         size_t log_size;
+//         hiprtcGetProgramLogSize(prog, &log_size);
+//         std::vector<char> log(log_size);
+//         hiprtcGetProgramLog(prog, log.data());
+//         errhandler.errorfmt("hiprtcCompileProgram failed with error: {}\n{}", hiprtcGetErrorString(compile_res), log.data());
+//         return false;
+//     }
+//     return true;
+// }
+static std::string generate_source(const std::string& init_name, const std::string& layer_name, const std::string& fused_name, const std::string& group_name)
+{
+    /**
+     *  The generated header should look like this:
+        #include "osl_wrapper.hip.h"
+
+
+        // here we define the extern "C" functions that are called from the OSL generated code
+
+        extern "C" __device__ void __direct_callable__osl_init_group_unnamed_group_1(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);
+        extern "C" __device__ void __direct_callable__osl_entry_group_unnamed_group_1_name_test_0(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);
+        extern "C" __device__ void __direct_callable__fused_unnamed_group_1_name_test_0(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);
+
+
+        extern "C" __device__ __constant__ OslDeviceFunction init_func = __direct_callable__osl_init_group_unnamed_group_1;
+        extern "C" __device__ __constant__ OslDeviceFunction entry_func = __direct_callable__osl_entry_group_unnamed_group_1_name_test_0;
+        extern "C" __device__ __constant__ OslDeviceFunction fused_func = __direct_callable__fused_unnamed_group_1_name_test_0;
+
+     */
+    std::string source = "#include \"osl_wrapper.hip.h\"\n\n";
+    source += "\n\n";
+    source += "extern \"C\" __device__ void " + init_name + "(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);\n";
+    source += "extern \"C\" __device__ void " + layer_name + "(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);\n";
+    source += "extern \"C\" __device__ void " + fused_name + "(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);\n";
+    source += "\n\n";
+    source += "extern \"C\" __device__ __constant__ OslDeviceFunction "+ group_name + "_init_func = " + init_name + ";\n";
+    source += "extern \"C\" __device__ __constant__ OslDeviceFunction "+ group_name + "_entry_func = " + layer_name + ";\n";
+    source += "extern \"C\" __device__ __constant__ OslDeviceFunction "+ group_name + "_fused_func = " + fused_name + ";\n";
+
+
+    return source;
+}
+
+static std::string generate_header(const std::string& init_name, const std::string& layer_name, const std::string& fused_name, const std::string& group_name)
+{
+    /**
+     *  The generated header should look like this:
+        #ifndef OSL_WRAPPER_HIP_H
+        #define OSL_WRAPPER_HIP_H
+
+        using OslDeviceFunction = void (*)(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);
+
+        struct OslShaderLayer {
+            OslDeviceFunction init_func {nullptr};
+            OslDeviceFunction entry_func {nullptr};
+            OslDeviceFunction fused_func {nullptr};
+        };
+
+        struct OslFunctionTable {
+            OslShaderLayer* layers;
+            int num_layers;
+        }
+    */
+
+    std::string header = R"(
+#ifndef OSL_WRAPPER_HIP_H
+#define OSL_WRAPPER_HIP_H
+
+using OslDeviceFunction = void (*)(void* sg, void* params, void* userdata, void* outdata, int idx, void* interactive);
+
+struct OslShaderLayer {
+    OslDeviceFunction init_func {nullptr};
+    OslDeviceFunction entry_func {nullptr};
+    OslDeviceFunction fused_func {nullptr};
+};
+
+struct OslFunctionTable {
+    OslShaderLayer* layers;
+    int num_layers;
+};
+
+#endif // OSL_WRAPPER_HIP_H
+)";
+
+    return header;
+}
+
+
+static bool compile(const std::string& source, const std::string& header, const std::string& name, std::string& out_bc)
+{
+    std::string source_name = name + ".hip.cpp";
+    std::string header_name = "osl_wrapper.hip.h";
+
+    std::ofstream source_file(source_name);
+    source_file << source;
+    source_file.close();
+
+    std::ofstream header_file(header_name);
+    header_file << header;
+    header_file.close();
+ 
+    std::string include_path = "-I" + OIIO::Filesystem::parent_path(OIIO::Sysutil::this_program_path());
+    std::string command = "hipcc -std=c++17 -fgpu-rdc -emit-llvm -ffast-math --offload-arch=" TEST_SHADE_TARGET " --offload-device-only -D__HIP_PLATFORM_AMD__ -D__HIP_DEVICE_COMPILE__ -DUSE_HIP -DHIP -DOSL_USE_FAST_MATH=1 " + source_name + " -o " + name + ".bc " + include_path;
+    int status = system(command.c_str());
+
+    std::ifstream file(name + ".bc");
+    if (!file.good()) {
+        std::cerr << "Failed to compile " << name << std::endl;
+        return false;
+    }
+
+    //read the file
+    std::string bc((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    out_bc = bc;
+    
+    return status == 0;
+}
+
+static bool compile_wrapper(const std::string& init_name, const std::string& layer_name, const std::string& fused_name, const std::string& group_name, std::string& out_bc)
+{
+    std::string header = generate_header(init_name, layer_name, fused_name, group_name);
+    std::string source = generate_source(init_name, layer_name, fused_name, group_name);
+
+    std::string name = "wrapper_" + group_name + ".hip.cpp";
+    bool status = compile(source, header, name, out_bc);
+    return status;
+}
 
 
 bool
@@ -311,6 +474,43 @@ OptixGridRenderer::make_optix_materials()
    
     // char msg_log[8192];
     // size_t sizeof_msg_log;
+    std::cout << "Compiling renderer source code with HIPRTC\n";
+    std::cout << "Current directory:" << OIIO::Filesystem::parent_path(OIIO::Sysutil::this_program_path()) << std::endl;
+    {
+        
+        // prepare search paths
+        std::vector<std::string> paths
+            = { OIIO::Filesystem::parent_path(OIIO::Sysutil::this_program_path()),
+                TEST_SHADE_SRC_DIR,
+                TEST_SHADE_SRC_DIR "/cuda",
+                TEST_SHADE_SRC_DIR "/../include",
+                TEST_SHADE_INSTALL_DIR  "/include",
+                TEST_SHADE_INSTALL_DIR  "/include/OSL",
+                TEST_SHADE_3RD_PARTY_DIR,
+                PTX_PATH };
+        
+
+        std::cout << "Searching path for includes is:\n";
+        for (const auto& path : paths) {
+            if (std::filesystem::exists(path)) {
+                std::cout << path << std::endl;
+            }
+            else {
+                std::cout << "Path does not exist: " << path << std::endl;
+            }
+        }
+
+        // load the optix grid renderer source code
+        std::string program_source = load_ptx_file("optix_grid_renderer.hip.cu", paths);
+        if (program_source.empty()) {
+            errhandler().severefmt("Could not find the source code for the renderer");
+            return false;
+        }
+        // it is easier to provide the include paths instead of reading all the sources and headers
+        //hiprtcCompileRenderer(program_source.c_str(), "optix_grid_renderer.hip.cpp", 0, {}, {}, paths, errhandler());
+        
+    }
+
 
     // Renderer
     std::string name = "optix_grid_renderer.bc";
@@ -361,6 +561,7 @@ OptixGridRenderer::make_optix_materials()
     std::vector<const char*> outputs { "Cout" };
     // here create a shader bc for each shader group
     std::vector<std::string> shader_bitcodes(shaders().size());
+    std::vector<std::string> shader_wrappers(shaders().size());
     std::vector<std::string> shader_names(shaders().size());
     std::vector<std::string> shader_init_names(shaders().size());
     std::vector<std::string> shader_entry_names(shaders().size());
@@ -389,6 +590,21 @@ OptixGridRenderer::make_optix_materials()
         shadingsys->getattribute(groupref.get(), "group_init_name", init_name);
         shadingsys->getattribute(groupref.get(), "group_entry_name", entry_name);
         shadingsys->getattribute(groupref.get(), "group_fused_name", fused_name);
+
+        std::cout << "Init: " << init_name << std::endl;
+        std::cout << "Entry: " << entry_name << std::endl;
+        std::cout << "Fused: " << fused_name << std::endl;
+
+        std::string shader_wrapper_bc;
+        compile_wrapper(init_name, entry_name, fused_name, group_name, shader_wrapper_bc);
+        shader_wrappers[material_layer_id] = std::move(shader_wrapper_bc);
+
+        ShaderWrapperInfo info;
+        info.init_name = init_name;
+        info.entry_name = entry_name;
+        info.fused_name = fused_name;
+        info.group_name = group_name;
+        m_shader_wrappers.push_back(info);
 
         // Retrieve the compiled ShaderGroup PTX
         std::string osl_ptx;
@@ -438,6 +654,11 @@ OptixGridRenderer::make_optix_materials()
             HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, shader_bitcodes[i].data(), shader_bitcodes[i].size(), shader_names[i].c_str(), 0, nullptr, nullptr));
         }
 
+        for (size_t i = 0; i < shader_wrappers.size(); ++i)
+        {
+            HIPRTC_CHECK(hiprtcLinkAddData(linkState, HIPRTC_JIT_INPUT_LLVM_BITCODE, shader_wrappers[i].data(), shader_wrappers[i].size(), shader_names[i].c_str(), 0, nullptr, nullptr));
+        }
+
       
 
         {
@@ -477,13 +698,43 @@ OptixGridRenderer::make_optix_materials()
 
     CUDA_CHECK(hipModuleLoadData(&m_module, hip_fatbin.data()));
 
+    CUDA_CHECK(hipModuleGetFunction(&m_function_init_globals, m_module, "__raygen__setglobals"));
     CUDA_CHECK(hipModuleGetFunction(&m_function_shade, m_module, "__raygen__"));
 
-    // size_t bytes {0};
-    // HIP_CHECK(hipModuleGetGlobal(&m_function_osl_init, &bytes, m_module, "init_func"));
-    // HIP_CHECK(hipModuleGetGlobal(&m_function_osl_entry, &bytes, m_module, "entry_func"));
-    // HIP_CHECK(hipModuleGetGlobal(&m_function_fused, &bytes, m_module, "fused_func"));
 
+
+    
+    size_t bytes {0};
+    for (const auto& shaderInfo : m_shader_wrappers)
+    {
+        OslHostShaderLayer layer;
+        CUDA_CHECK(hipModuleGetGlobal(&layer.init_func, &bytes, m_module, shaderInfo.GetInitName().c_str()));
+        CUDA_CHECK(hipModuleGetGlobal(&layer.entry_func, &bytes, m_module, shaderInfo.GetEntryName().c_str()));
+        CUDA_CHECK(hipModuleGetGlobal(&layer.fused_func, &bytes, m_module, shaderInfo.GetFusedName().c_str()));
+
+        m_shader_layers.push_back(layer);
+    }
+
+    m_function_table.layers = m_shader_layers.data();
+    m_function_table.num_layers = m_shader_layers.size();
+
+    // walk trough the m_function table and print the function addresses
+    for (int i = 0; i < m_function_table.num_layers; ++i)
+    {
+        std::cout << "Layer " << i << " init: " << m_function_table.layers[i].init_func << std::endl;
+        std::cout << "Layer " << i << " entry: " << m_function_table.layers[i].entry_func << std::endl;
+        std::cout << "Layer " << i << " fused: " << m_function_table.layers[i].fused_func << std::endl;
+    }
+
+    static_assert(sizeof(OslDeviceFunctionTable) == sizeof(OslHostFunctionTable), "Size of OslDeviceFunctionTable and OslHostFunctionTable must be the same");
+    hipDeviceptr_t device_function_table = device_alloc(sizeof(OslDeviceFunctionTable));
+    copy_to_device(device_function_table, &m_function_table, sizeof(OslDeviceFunctionTable));
+    
+    CUDA_CHECK(hipModuleGetGlobal(&m_device_function_table, &bytes, m_module, "oslDeviceFunctionTable"));
+    std::cout << "Device function table global size: " << bytes << std::endl;
+    assert(bytes == sizeof(OslDeviceFunctionTable));
+    CUDA_CHECK(hipMemcpy(m_device_function_table, &device_function_table, sizeof(OslDeviceFunctionTable), hipMemcpyHostToDevice));
+    
     return true;
 }
 
@@ -635,9 +886,9 @@ OptixGridRenderer::warmup()
 void
 OptixGridRenderer::render(int xres OSL_MAYBE_UNUSED, int yres OSL_MAYBE_UNUSED, RenderState& renderStae)
 {
-    d_output_buffer = DEVICE_ALLOC(xres * yres * 4 * sizeof(float));
-    d_launch_params = DEVICE_ALLOC(sizeof(RenderParams));
-
+    d_output_buffer = device_alloc(xres * yres * 4 * sizeof(float));
+    d_launch_params = device_alloc(sizeof(RenderParams));
+    printf("Output buffer: %p\n", d_output_buffer);
     m_xres = xres;
     m_yres = yres;
 
@@ -660,23 +911,49 @@ OptixGridRenderer::render(int xres OSL_MAYBE_UNUSED, int yres OSL_MAYBE_UNUSED, 
     params.xform_buffer          = d_xform_buffer;
     params.fused_callable        = m_fused_callable;
 
-    CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_launch_params), &params,
-                          sizeof(RenderParams), hipMemcpyHostToDevice));
+    copy_to_device(d_launch_params, &params, sizeof(RenderParams));
+    // hipDeviceptr_t render_params{nullptr};
+    // CUDA_CHECK( hipModuleGetGlobal(&render_params, nullptr, m_module, "render_params") );
+    // CUDA_CHECK( hipMemcpy(render_params, &d_launch_params, sizeof(RenderParams), hipMemcpyHostToDevice) );
 
-    // // Set up global variables
-    // OPTIX_CHECK(optixLaunch(m_optix_pipeline, m_cuda_stream, d_launch_params,
-    //                         sizeof(RenderParams), &m_setglobals_optix_sbt, 1, 1,
-    //                         1));
-    // CUDA_SYNC_CHECK();
+    void *args[] = { &d_launch_params };
+    //setup globals
+    {
+        CUDA_CHECK(hipModuleLaunchKernel(m_function_init_globals, 
+            1, 1, 1, 
+            1, 1, 1, 
+            0, 
+            m_cuda_stream,
+            args,
+            nullptr));
+    }
 
-    // // Launch real render
-    // OPTIX_CHECK(optixLaunch(m_optix_pipeline, m_cuda_stream, d_launch_params,
-    //                         sizeof(RenderParams), &m_optix_sbt, xres, yres, 1));
-    // CUDA_SYNC_CHECK();
+    // Launch the OptiX kernel
+    {
+         uint3 blockSize {8, 8, 1};
 
-    //
-    //  Let's print some basic stuff
-    //
+        uint3 gridSize = {  (m_xres + blockSize.x - 1) / blockSize.x,
+                            (m_yres + blockSize.y - 1) / blockSize.y,
+                            1};
+        
+        std::cout << "Xres: " << m_xres << " Yres: " << m_yres << std::endl;
+        std::cout << "Block size: " << blockSize.x << " " << blockSize.y << " " << blockSize.z << std::endl;
+        std::cout << "Grid size: " << gridSize.x << " " << gridSize.y << " " << gridSize.z << std::endl;
+
+        CUDA_CHECK(
+            hipModuleLaunchKernel(m_function_shade, 
+                gridSize.x, gridSize.y, gridSize.z, 
+                blockSize.x, blockSize.y, blockSize.z, 
+                0, 
+                m_cuda_stream, args, nullptr));
+    }
+
+    // CUDA_CHECK(hipMemcpy(d_launch_params, render_params, sizeof(RenderParams), hipMemcpyDeviceToHost));
+
+   
+    
+    //Let's print some basic stuff
+    
     std::vector<uint8_t> printf_buffer(OSL_PRINTF_BUFFER_SIZE);
     CUDA_CHECK(hipMemcpy(printf_buffer.data(),
                           reinterpret_cast<void*>(d_osl_printf_buffer),
@@ -794,12 +1071,19 @@ OptixGridRenderer::finalize_pixel_buffer()
     std::string buffer_name = "output_buffer";
     std::vector<float> tmp_buff(m_xres * m_yres * 3);
     CUDA_CHECK(hipMemcpy(tmp_buff.data(),
-                          reinterpret_cast<void*>(d_output_buffer),
+                          d_output_buffer,
                           m_xres * m_yres * 3 * sizeof(float),
                           hipMemcpyDeviceToHost));
     OIIO::ImageBuf* buf = outputbuf(0);
     if (buf)
         buf->set_pixels(OIIO::ROI::All(), OIIO::TypeFloat, tmp_buff.data());
+    
+    // // check if any value is non zero:
+    // for (int i = 0; i < m_xres * m_yres * 3; ++i) {
+    //     if (tmp_buff[i] != 0.0f) {
+    //         std::cout << "Buffer value: " << tmp_buff[i] << std::endl;
+    //     }
+    // }
 }
 
 
@@ -844,12 +1128,12 @@ OptixGridRenderer::register_named_transforms()
 
     // Push the names and transforms to the device
     size_t sz           = sizeof(uint64_t) * xform_name_buffer.size();
-    d_xform_name_buffer = DEVICE_ALLOC(sz);
+    d_xform_name_buffer = device_alloc(sz);
     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_xform_name_buffer),
                           xform_name_buffer.data(), sz,
                           hipMemcpyHostToDevice));
     sz             = sizeof(OSL::Matrix44) * xform_buffer.size();
-    d_xform_buffer = DEVICE_ALLOC(sz);
+    d_xform_buffer = device_alloc(sz);
     CUDA_CHECK(hipMemcpy(reinterpret_cast<void*>(d_xform_buffer),
                           xform_buffer.data(), sz, hipMemcpyHostToDevice));
     m_num_named_xforms = xform_name_buffer.size();

@@ -2510,11 +2510,6 @@ BackendLLVM::run()
                 llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
                                         llvm::Linker::Flags::None);
                 
-                for (llvm::Function& fn : *ll.module()) {
-                    llvm::errs() << "Function: " << fn.getName() << "\n";
-                }
-
-
                 if (err.length())
                     shadingcontext()->errorfmt(
                         "llvm::parseBitcodeFile returned '{}' for hip rend_lib\n",

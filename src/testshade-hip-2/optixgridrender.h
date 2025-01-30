@@ -12,10 +12,23 @@
 
 #include "hip_compat.h"
 #include "simplerend.h"
+// helps to retreive the osl device function pointers 
+#include "cuda/osl_wrapper.hip.h"
 
 
 OSL_NAMESPACE_ENTER
 
+struct ShaderWrapperInfo {
+    std::string init_name;
+    std::string entry_name;
+    std::string fused_name;
+    std::string group_name;
+
+    std::string GetInitName() const { return group_name + "_init_func"; }
+    std::string GetEntryName() const { return group_name + "_entry_func"; }
+    std::string GetFusedName() const { return group_name + "_fused_func"; }
+    
+};
 
 class OptixGridRenderer final : public SimpleRenderer {
 public:
@@ -32,7 +45,7 @@ public:
         return SimpleRenderer::supports(feature);
     }
 
-    std::string load_ptx_file(string_view filename);
+    std::string load_ptx_file(string_view filename, const std::vector<std::string>& search_paths = {});
     bool synch_attributes();
 
     void init_shadingsys(ShadingSystem* ss) final;
@@ -99,8 +112,15 @@ private:
 
     std::unordered_map<ustringhash, optix::TextureSampler> m_samplers;
     hipModule_t m_module { nullptr };
+    hipFunction_t m_function_init_globals { nullptr };
     hipFunction_t m_function_shade { nullptr };
 
+    OslHostFunctionTable m_function_table;
+    hipDeviceptr_t m_device_function_table;
+
+    std::vector<ShaderWrapperInfo> m_shader_wrappers;
+    std::vector<OslHostShaderLayer> m_shader_layers;
+    
     OSL::Matrix44 m_shader2common;  // "shader" space to "common" space matrix
     OSL::Matrix44 m_object2common;  // "object" space to "common" space matrix
 

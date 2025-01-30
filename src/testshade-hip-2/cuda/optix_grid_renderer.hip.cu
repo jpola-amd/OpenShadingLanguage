@@ -4,10 +4,8 @@
 
 
 #include <hip/hip_runtime.h>
-
+#include "osl_wrapper.hip.h"
 #include "rend_lib.hip.h"
-
-
 #include "render_params.hip.h"
 
 
@@ -24,10 +22,13 @@ __device__ hipDeviceptr_t xform_buffer      = 0;
 }  // namespace pvt
 OSL_NAMESPACE_EXIT
 
-
 extern "C" {
-__device__ __constant__ testshade::RenderParams render_params;
+    __device__ __constant__ OslDeviceFunctionTable oslDeviceFunctionTable;
 }
+
+// extern "C" {
+// __device__ __constant__ testshade::RenderParams render_params;
+// }
 
 extern "C" __global__ void
 __miss__()
@@ -49,8 +50,10 @@ __anyhit__()
 
 
 extern "C" __global__ void
-__raygen__setglobals()
+__raygen__setglobals(testshade::RenderParams* lp)
 {
+    testshade::RenderParams& render_params = *lp;
+    printf("Test string before global: %lu render param: %lu\n", OSL::pvt::test_str_1, render_params.test_str_1);
     // Set global variables
     OSL::pvt::osl_printf_buffer_start = render_params.osl_printf_buffer_start;
     OSL::pvt::osl_printf_buffer_end   = render_params.osl_printf_buffer_end;
@@ -60,6 +63,9 @@ __raygen__setglobals()
     OSL::pvt::num_named_xforms        = render_params.num_named_xforms;
     OSL::pvt::xform_name_buffer       = render_params.xform_name_buffer;
     OSL::pvt::xform_buffer            = render_params.xform_buffer;
+
+    printf("Test string before global: %lu render param: %lu\n", OSL::pvt::test_str_1, render_params.test_str_1);
+    printf("Test osl layers: %d\n", oslDeviceFunctionTable.num_layers);
 }
 
 
@@ -69,11 +75,13 @@ __miss__setglobals()
 {
 }
 
-
+ 
 
 extern "C" __global__ void
-__raygen__()
+__raygen__(testshade::RenderParams* lp)
 {
+    testshade::RenderParams& render_params = *lp;
+
     const uint32_t x	 = blockIdx.x * blockDim.x + threadIdx.x;
 	const uint32_t y	 = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -180,7 +188,18 @@ __raygen__()
 
     float* f_output      = (float*)params;
     int pixel            = index;
+    f_output[1]          = 1.0f;
+    f_output[2]          = 1.0f;
+    f_output[3]          = 1.0f;
+
     output_buffer[pixel] = { f_output[1], f_output[2], f_output[3] };
+    if (x < 2 && y < 1 )
+    {
+        printf("Pixel: %d: (%f, %f, %f) \n", pixel, f_output[1], f_output[2], f_output[3]);
+        printf(" buffer values %f, %f, %f\n", output_buffer[pixel].x, output_buffer[pixel].y, output_buffer[pixel].z);
+    }
+    
+    
 }
 
 // Because clang++ 9.0 seems to have trouble with some of the texturing "intrinsics"
