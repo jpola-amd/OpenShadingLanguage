@@ -108,6 +108,8 @@ private:
     hipDeviceptr_t d_xform_buffer;
     uint64_t test_str_1;
     uint64_t test_str_2;
+    hipDeviceptr_t d_interactive_params;
+
     const unsigned long OSL_PRINTF_BUFFER_SIZE = 8 * 1024 * 1024;
 
     std::unordered_map<ustringhash, optix::TextureSampler> m_samplers;
@@ -115,11 +117,10 @@ private:
     hipFunction_t m_function_init_globals { nullptr };
     hipFunction_t m_function_shade { nullptr };
 
-    OslHostFunctionTable m_function_table;
-    hipDeviceptr_t m_device_function_table;
+    
+
 
     std::vector<ShaderWrapperInfo> m_shader_wrappers;
-    std::vector<OslHostShaderLayer> m_shader_layers;
     
     OSL::Matrix44 m_shader2common;  // "shader" space to "common" space matrix
     OSL::Matrix44 m_object2common;  // "object" space to "common" space matrix

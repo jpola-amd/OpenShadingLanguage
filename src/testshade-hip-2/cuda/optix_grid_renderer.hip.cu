@@ -22,13 +22,6 @@ __device__ hipDeviceptr_t xform_buffer      = 0;
 }  // namespace pvt
 OSL_NAMESPACE_EXIT
 
-extern "C" {
-    __device__ __constant__ OslDeviceFunctionTable oslDeviceFunctionTable;
-}
-
-// extern "C" {
-// __device__ __constant__ testshade::RenderParams render_params;
-// }
 
 extern "C" __global__ void
 __miss__()
@@ -64,8 +57,7 @@ __raygen__setglobals(testshade::RenderParams* lp)
     OSL::pvt::xform_name_buffer       = render_params.xform_name_buffer;
     OSL::pvt::xform_buffer            = render_params.xform_buffer;
 
-    printf("Test string before global: %lu render param: %lu\n", OSL::pvt::test_str_1, render_params.test_str_1);
-    printf("Test osl layers: %d\n", oslDeviceFunctionTable.num_layers);
+    printf("Test string before global: %lu render param: %lu\n", OSL::pvt::test_str_1, render_params.test_str_1);       
 }
 
 
@@ -157,6 +149,17 @@ __raygen__(testshade::RenderParams* lp)
     *(int*)&closure_pool[0] = 0;
     sg.renderstate          = &closure_pool[0];
 
+    if (render_params.fused_callable)
+    {
+        osl_fused(&sg, params, nullptr, nullptr, 0, nullptr);
+    }
+    else
+    {
+        osl_init(&sg, params, nullptr, nullptr, 0, nullptr);
+        osl_entry(&sg, params, nullptr, nullptr, 0, nullptr);
+    }
+   
+    
     // Run the OSL group and init functions
     // if (render_params.fused_callable)
     //     // call osl_init_func
@@ -188,16 +191,16 @@ __raygen__(testshade::RenderParams* lp)
 
     float* f_output      = (float*)params;
     int pixel            = index;
-    f_output[1]          = 1.0f;
-    f_output[2]          = 1.0f;
-    f_output[3]          = 1.0f;
+    // f_output[1]          = 1.0f;
+    // f_output[2]          = 1.0f;
+    // f_output[3]          = 1.0f;
 
     output_buffer[pixel] = { f_output[1], f_output[2], f_output[3] };
-    if (x < 2 && y < 1 )
-    {
-        printf("Pixel: %d: (%f, %f, %f) \n", pixel, f_output[1], f_output[2], f_output[3]);
-        printf(" buffer values %f, %f, %f\n", output_buffer[pixel].x, output_buffer[pixel].y, output_buffer[pixel].z);
-    }
+    // if (x < 2 && y < 1 )
+    // {
+    //     printf("Pixel: %d: (%f, %f, %f) \n", pixel, f_output[1], f_output[2], f_output[3]);
+    //     printf(" buffer values %f, %f, %f\n", output_buffer[pixel].x, output_buffer[pixel].y, output_buffer[pixel].z);
+    // }
     
     
 }

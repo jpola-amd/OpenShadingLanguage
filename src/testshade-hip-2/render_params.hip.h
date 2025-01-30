@@ -26,6 +26,9 @@ struct RenderParams {
     // for used-data tests
     uint64_t test_str_1;
     uint64_t test_str_2;
+
+    //TODO: Make use of it in the shader code.
+    hipDeviceptr_t interactive_params;
 };
 
 
