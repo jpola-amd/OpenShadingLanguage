@@ -14,6 +14,8 @@ namespace pvt {
 __device__ hipDeviceptr_t s_color_system    = 0;
 __device__ uint64_t osl_printf_buffer_start = 0;
 __device__ uint64_t osl_printf_buffer_end   = 0;
+__device__ hipDeviceptr_t osl_printf_buffer = 0;
+__device__ uint64_t osl_printf_buffer_size  = 0;
 __device__ uint64_t test_str_1              = 0;
 __device__ uint64_t test_str_2              = 0;
 __device__ uint64_t num_named_xforms        = 0;
@@ -41,6 +43,13 @@ __anyhit__()
     // do nothing
 }
 
+extern "C"  __device__ void
+osl_printf(void* sg_, OSL::ustringhash_pod fmt_str_hash, void* args);
+
+extern "C" __device__ void 
+osl_printf(void* sg_, char *fmt_str, void* args);
+
+
 
 extern "C" __global__ void
 __raygen__setglobals(testshade::RenderParams* lp)
@@ -50,6 +59,10 @@ __raygen__setglobals(testshade::RenderParams* lp)
     // Set global variables
     OSL::pvt::osl_printf_buffer_start = render_params.osl_printf_buffer_start;
     OSL::pvt::osl_printf_buffer_end   = render_params.osl_printf_buffer_end;
+
+    OSL::pvt::osl_printf_buffer       = render_params.osl_printf_buffer;
+    OSL::pvt::osl_printf_buffer_size  = render_params.osl_printf_buffer_size;
+    
     OSL::pvt::s_color_system          = render_params.color_system;
     OSL::pvt::test_str_1              = render_params.test_str_1;
     OSL::pvt::test_str_2              = render_params.test_str_2;
@@ -57,7 +70,18 @@ __raygen__setglobals(testshade::RenderParams* lp)
     OSL::pvt::xform_name_buffer       = render_params.xform_name_buffer;
     OSL::pvt::xform_buffer            = render_params.xform_buffer;
 
-    printf("Test string before global: %lu render param: %lu\n", OSL::pvt::test_str_1, render_params.test_str_1);       
+    printf("Test string before global: %lu render param: %lu\n", OSL::pvt::test_str_1, render_params.test_str_1);
+    printf("Testing the printf params: %lu, %lu, %p, %lu, %lu, %lu\n", 
+        OSL::pvt::osl_printf_buffer_start, 
+        OSL::pvt::osl_printf_buffer_end, 
+        OSL::pvt::osl_printf_buffer, 
+        OSL::pvt::osl_printf_buffer_size,
+        uint64_t(OSL::pvt::osl_printf_buffer),
+        uint64_t( (uint64_t) OSL::pvt::osl_printf_buffer  + OSL::pvt::osl_printf_buffer_size)
+        );
+
+   
+
 }
 
 
@@ -149,20 +173,20 @@ __raygen__(testshade::RenderParams* lp)
     *(int*)&closure_pool[0] = 0;
     sg.renderstate          = &closure_pool[0];
 
-    if (render_params.fused_callable)
-    {
-        osl_fused(&sg, params, nullptr, nullptr, 0, nullptr);
-    }
-    else
-    {
-        osl_init(&sg, params, nullptr, nullptr, 0, nullptr);
-        osl_entry(&sg, params, nullptr, nullptr, 0, nullptr);
-    }
+    // if (render_params.fused_callable)
+    // {
+    //     osl_fused(&sg, params, nullptr, nullptr, 0, nullptr);
+    // }
+    // else
+    // {
+    //     osl_init(&sg, params, nullptr, nullptr, 0, nullptr);
+    //     osl_entry(&sg, params, nullptr, nullptr, 0, nullptr);
+    // }
    
     
     // Run the OSL group and init functions
     // if (render_params.fused_callable)
-    //     // call osl_init_func
+    //     // call osl_init_func 
     //     optixDirectCall<void, OSL_CUDA::ShaderGlobals*, void*, void*, void*,
     //                     int, void*>(0u, &sg /*shaderglobals_ptr*/,
     //                                 params /*groupdata_ptr*/,
@@ -201,8 +225,18 @@ __raygen__(testshade::RenderParams* lp)
     //     printf("Pixel: %d: (%f, %f, %f) \n", pixel, f_output[1], f_output[2], f_output[3]);
     //     printf(" buffer values %f, %f, %f\n", output_buffer[pixel].x, output_buffer[pixel].y, output_buffer[pixel].z);
     // }
+
+     //OSL::ustring fmt_str = OSL::ustring("Hello from OptiX!\n");
+    int data = 10;
+    int data1 = 20;
+    double data2 = 30.0f;
+    // int data2 = 20;
+    // float data3 = 30.0f;
+    uint64_t size = sizeof(data) + sizeof(data1) + sizeof(data2);
+    void * args[] = {&size, &data, &data1, &data2};
     
-    
+
+    osl_printf(nullptr, OSL::pvt::test_str_1, args);
 }
 
 // Because clang++ 9.0 seems to have trouble with some of the texturing "intrinsics"

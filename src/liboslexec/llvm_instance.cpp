@@ -2436,8 +2436,8 @@ BackendLLVM::run()
                 std::unique_ptr<llvm::Module> shadeops_ptr(shadeops_module);
                 bool linkerStatus = llvm::Linker::linkModules(*ll.module(), std::move(shadeops_ptr),
                                         llvm::Linker::Flags::None);
-
-                if (!linkerStatus)
+                //Returns true on error!
+                if (linkerStatus)
                 {
                     shadingcontext()->errorfmt(
                         "llvm::Linker::linkModules failed for cuda llvm_ops\n");

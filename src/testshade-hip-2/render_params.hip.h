@@ -16,6 +16,9 @@ struct RenderParams {
     uint64_t osl_printf_buffer_end;
     hipDeviceptr_t color_system;
 
+    hipDeviceptr_t osl_printf_buffer;
+    uint64_t osl_printf_buffer_size;
+
     // for transforms
     hipDeviceptr_t object2common;
     hipDeviceptr_t shader2common;

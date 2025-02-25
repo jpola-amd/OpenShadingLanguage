@@ -17,12 +17,24 @@ OSL_NAMESPACE_ENTER
 
 // TODO: update types from char * to ustringhash or ustringhash_pod
 //       and remove uses of HDSTR
-#define HDSTR(cstr) (*((OSL::ustringhash*)&cstr))
+// #define HDSTR(cstr) (*((OSL::ustringhash*)&cstr))
+inline OSL::ustringhash to_ustringhash(const char* cstr) {
+    return OSL::ustringhash(cstr);
+}
+
+#define HDSTR(cstr) to_ustringhash(cstr)
+
+
 
 namespace pvt {
 extern __device__ hipDeviceptr_t s_color_system;
 extern __device__ uint64_t osl_printf_buffer_start;
 extern __device__ uint64_t osl_printf_buffer_end;
+
+extern __device__ hipDeviceptr_t osl_printf_buffer;
+extern __device__ uint64_t osl_printf_buffer_size;
+
+
 extern __device__ uint64_t test_str_1;
 extern __device__ uint64_t test_str_2;
 extern __device__ uint64_t num_named_xforms;

@@ -635,6 +635,15 @@ target_link_libraries (${local_lib}
         ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES}
     )
 
+# just to see what llvm libs are being linked
+# set(ALL_LLVM_LIBS ${LLVM_LIBRARIES})
+# list(APPEND ALL_LLVM_LIBS ${LLVM_SYSTEM_LIBRARIES})
+# list(APPEND ALL_LLVM_LIBS ${LLVM_LDFLAGS})
+# foreach(llvm_lib ${ALL_LLVM_LIBS})
+#     message(STATUS "** LLVM library ${llvm_lib}")
+
+# endforeach(llvm_lib)
+
 target_compile_features (${local_lib}
                          INTERFACE cxx_std_${DOWNSTREAM_CXX_STANDARD})
 

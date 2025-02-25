@@ -76,7 +76,8 @@ function ( MAKE_HIPCC_BITCODE src suffix generated_bc extra_clang_args )
         # Wasn't in their build, look anywhere
         FIND_PROGRAM(LLVM_BC_GENERATOR NAMES clang++ llvm-g++)
     endif ()
-
+    #set(LLVM_BC_GENERATOR "/opt/rocm/llvm/bin/clang++")
+    
     if (NOT LLVM_BC_GENERATOR)
         message (FATAL_ERROR "You must have a valid llvm bitcode generator (clang++) somewhere.")
     endif ()

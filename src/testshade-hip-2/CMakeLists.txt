@@ -124,7 +124,7 @@ if (OSL_USE_HIP)
     HIP_SHADEOPS_COMPILE ( "rend_lib_testshade"
         rend_lib_bc
         rend_lib_llvm
-        "${testshade_rend_lib_srcs}"
+        "${testshade_rend_lib_srcs}" 
         "${testshade_cuda_headers}"
     )
 
@@ -143,6 +143,10 @@ if (OSL_USE_HIP)
 
     # Install the PTX files in a fixed location so that they can be
     # loaded at run time
+    message(STATUS "Installing PTX files to ${OSL_BC_INSTALL_DIR}")
+    foreach(bc ${bitcode_list})
+        message(STATUS "Installing PTX file ${bc}")
+    endforeach()
     install (FILES ${bitcode_list}
              DESTINATION ${OSL_BC_INSTALL_DIR})
 endif()

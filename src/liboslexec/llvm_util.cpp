@@ -132,6 +132,11 @@
 #include <llvm/Transforms/Utils/SymbolRewriter.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+
+// from asm 
+#include <llvm/AsmParser/Parser.h>
+#include <llvm/Support/ToolOutputFile.h>
+
 OSL_NAMESPACE_ENTER
 
 
@@ -6908,10 +6913,78 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
     }
     out = ptx_stream.str();
 
+    // save ptx to file:
+    {
+        llvm::StringRef moduleFilename = "optix_module.ptx";
+        std::error_code error_code;
+        llvm::raw_fd_ostream fd(moduleFilename, error_code);
+        if (!error_code)
+        {
+            fd <<  out;
+        }
+    }
+
     return true;
 #else
     return false;
 #endif
+}
+
+static bool WriteToFile(const llvm::Module* M, llvm::StringRef outputFileName)
+{
+    std::error_code EC;
+    std::unique_ptr<llvm::ToolOutputFile> Out(
+        new llvm::ToolOutputFile(outputFileName, EC, llvm::sys::fs::OF_None)
+    );
+
+    if (EC)
+    {
+        llvm::errs() << EC.message() << "\n";
+        return false;
+    }
+
+    Out->os() << *M;
+
+    Out->keep();
+
+    return true;
+}
+
+static bool WriteOutput(const llvm::Module* M, const llvm::ModuleSummaryIndex* Index, llvm::StringRef outputFileName)
+{
+    std::error_code EC;
+    std::unique_ptr<llvm::ToolOutputFile> Out(
+        new llvm::ToolOutputFile(outputFileName, EC, llvm::sys::fs::OF_None)
+    );
+
+    if (EC)
+    {
+        llvm::errs() << EC.message() << "\n";
+        return false;
+    }
+
+    {
+
+        const llvm::ModuleSummaryIndex *IndexToWrite {nullptr};
+        constexpr bool PreserveBitcodeUseListOrder {true};
+        constexpr bool EmitModuleHash {false};
+
+        if (Index && (Index->begin() != Index->end() || Index->getFlags()))
+        {
+            IndexToWrite = Index;
+        }
+
+        if (!IndexToWrite || (M && (!M->empty() || !M->global_empty())))
+        {
+            WriteBitcodeToFile(*M, Out->os(), PreserveBitcodeUseListOrder,
+            IndexToWrite, EmitModuleHash);
+        }
+        else
+            llvm::writeIndexToFile(*IndexToWrite, Out->os());
+    }
+    Out->keep();
+    
+    return true;
 }
 
  bool 
@@ -6919,13 +6992,70 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
                               std::string& out)
  {
 #if defined(OSL_USE_HIP) 
-
     {
-        llvm::raw_string_ostream object_stream(out);
-        llvm::WriteBitcodeToFile(*module(), object_stream);
-    }
 
-    return true;
+        // save to file the llvm assembly to reflect the same flow as llvm-as
+        llvm::StringRef tmpModuleFileName {"amdgcn_module_tmp.ll"};
+        WriteToFile(module(), tmpModuleFileName);
+
+        llvm::SMDiagnostic Err;
+        llvm::ParsedModuleAndIndex ModuleAndIndex;
+
+        const std::string ClDataLayout = "";
+        auto SetDataLayout = [&ClDataLayout](llvm::StringRef, llvm::StringRef) -> std::optional<std::string> {
+            if (ClDataLayout.empty())
+              return std::nullopt;
+            return ClDataLayout;
+          };
+
+        ModuleAndIndex = llvm::parseAssemblyFileWithIndex(tmpModuleFileName, Err, context(), nullptr, SetDataLayout);
+
+        std::unique_ptr<llvm::Module> M = std::move(ModuleAndIndex.Mod);
+
+        if (!M)
+        {
+            Err.print("OSL:", llvm::errs());
+            return false;
+        }
+
+        std::unique_ptr<llvm::ModuleSummaryIndex> Index = std::move(ModuleAndIndex.Index);
+
+        // verify 
+        {
+            std::string ErrorStr;
+            llvm::raw_string_ostream OS(ErrorStr);
+
+            //If there are no errors, the function returns false
+            if (llvm::verifyModule(*M, &OS))
+            {
+                llvm::errs() << "OSL->amdgcn_compile_group"
+                    << ": assembly parsed but does not verify as correct!\n";
+                llvm::errs() << OS.str();
+                return false;
+            }
+        }
+
+        // write to file
+        bool result = WriteOutput(M.get(), Index.get(), "amdgcn_module.bc");
+        if (!result)
+        {
+            llvm::errs() << "OSL->amdgcn_compile_group"
+                << ": failed to write to file\n";
+            return false;
+        }
+
+        auto BufferOrError = llvm::MemoryBuffer::getFile("amdgcn_module.bc");
+        if (!BufferOrError)
+        {
+            llvm::errs() << "OSL->amdgcn_compile_group"
+                << ": failed to read file\n";
+            return false;
+        }
+
+        llvm::StringRef Buffer = BufferOrError.get()->getBuffer();
+        out = Buffer.str();
+        return true;
+    }
 
     // if (debug() > 1)
     // {
@@ -6934,16 +7064,10 @@ LLVM_Util::ptx_compile_group(llvm::Module*, const std::string& name,
     //     llvm::raw_fd_ostream fd(moduleFilename, error_code);
     //     if (!error_code)
     //     {
-    //         module()->print(fd, nullptr);
-    //     }
-    //
-    //     llvm::StringRef compiledModule = "amdgcn_compiled_module.o";
-    //     llvm::raw_fd_ostream f(compiledModule, error_code);
-    //     if (!error_code)
-    //     {
-    //         f << out_stream.str();
+    //        fd <<  *module();
     //     }
     // }
+    // return true;
 #else
     return false;
 #endif

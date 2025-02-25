@@ -22,6 +22,10 @@ namespace pvt {
 extern __device__ hipDeviceptr_t s_color_system;
 extern __device__ uint64_t osl_printf_buffer_start;
 extern __device__ uint64_t osl_printf_buffer_end;
+
+extern __device__ hipDeviceptr_t osl_printf_buffer;
+extern __device__ uint64_t osl_printf_buffer_size;
+
 extern __device__ uint64_t test_str_1;
 extern __device__ uint64_t test_str_2;
 extern __device__ uint64_t num_named_xforms;
@@ -330,30 +334,58 @@ osl_getchar_isi(OSL::ustringhash_pod str, int index)
 // all the arguments to our print buffer.
 // Note:  the first element of 'args' is the size of the argument list
 __device__ void
-osl_printf(void* sg_, OSL::ustringhash_pod fmt_str_hash, void* args)
+osl_printf_hash(void* sg_, OSL::ustringhash_pod fmt_str_hash, void* args)
 {
-    uint64_t args_size = reinterpret_cast<uint64_t*>(args)[0];
+    void** arguments = static_cast<void**>(args);
+    uint64_t args_size = *reinterpret_cast<uint64_t*>(arguments[0]);
 
-    // This can be used to limit printing to one Cuda thread for debugging
-    // if (launch_index.x == 0 && launch_index.y == 0)
 
-    uint64_t copy_start = atomicAdd(&OSL::pvt::osl_printf_buffer_start,
-                                       args_size + sizeof(args_size)
-                                           + sizeof(fmt_str_hash));
+    const uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+ 	const uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    // Only perform copy if there's enough space
-    if (copy_start + args_size + sizeof(args_size) + sizeof(fmt_str_hash)
-        < OSL::pvt::osl_printf_buffer_end) {
-        memcpy(reinterpret_cast<void*>(copy_start), &fmt_str_hash,
-               sizeof(fmt_str_hash));
-        memcpy(reinterpret_cast<void*>(copy_start + sizeof(fmt_str_hash)),
-               &args_size, sizeof(args_size));
-        memcpy(reinterpret_cast<void*>(copy_start + sizeof(fmt_str_hash)
-                                       + sizeof(args_size)),
-               reinterpret_cast<char*>(args) + sizeof(args_size), args_size);
+    // we want to have a numeric value for the address
+    uint64_t print_buffer_begin = reinterpret_cast<uint64_t>(OSL::pvt::osl_printf_buffer);
+    const uint64_t print_buffer_size = OSL::pvt::osl_printf_buffer_size;
+    const uint64_t print_buffer_end = print_buffer_begin + print_buffer_size;
+    const uint64_t offset = args_size + sizeof(args_size) + sizeof(fmt_str_hash);
+
+    if (x == 0 && y == 0)   
+    {
+        printf("OSL_PRINTF: copying %lu elements\n", args_size);
+        //printf("Values: %lu \n", * reunarguments[1]);
+     
+    }   
+
+    //compute the location of the start of the copy
+    uint64_t copy_start_address = atomicAdd(&print_buffer_begin, offset);
+    if (x == 0 && y == 0)   
+    {
+        printf("Copy start address: %lu %p, new print_buffer_begin %lu, %p\n", copy_start_address, (void*)copy_start_address, print_buffer_begin, (void*)print_buffer_begin);
+    }
+    
+    if (copy_start_address + offset < print_buffer_end)
+    {
+        // copy string (hash)
+        memcpy(reinterpret_cast<void*>(copy_start_address), &fmt_str_hash, sizeof(fmt_str_hash));
+        // copy the artguemnts size
+        memcpy(reinterpret_cast<void*>(copy_start_address + sizeof(fmt_str_hash)), arguments[0], sizeof(args_size));
+        // copy the arguments values
+        // copy data starting from arguments[1] to the end of the arguments
+
+        memcpy(reinterpret_cast<void*>(copy_start_address + sizeof(fmt_str_hash) + sizeof(args_size)), arguments[1], args_size);
+    }
+    else
+    {
+        printf("OSL_PRINTF: Not enough space in the buffer\n");
     }
 }
 
+__device__ void
+osl_printf(void* sg_, char *fmt_str, void* args)
+{
+    uint64_t fmt_str_hash = HDSTR(fmt_str).hash();
+    osl_printf_hash(sg_, fmt_str_hash, args);
+}
 
 
 __forceinline__ __device__ float3
