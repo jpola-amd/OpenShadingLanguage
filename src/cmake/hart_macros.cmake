@@ -193,7 +193,12 @@ function (MAKE_HART_BITCODE src suffix arch generated_bc extra_clang_args includ
     list (TRANSFORM include_dirs PREPEND "-I")
     set (math_flags -fno-math-errno)
     if (USE_FAST_MATH)
-        list (APPEND math_flags -ffast-math)
+        # Keep Inf/NaN checks. ROCm also uses -ffast-math to select
+        # finite-only device libraries, regardless of individual overrides.
+        list (APPEND math_flags
+            -fapprox-func -fassociative-math -freciprocal-math
+            -fno-signed-zeros -fno-trapping-math -fno-rounding-math
+            -ffp-contract=fast)
     endif ()
     set (depfile_args)
     set (dependency_flags)
