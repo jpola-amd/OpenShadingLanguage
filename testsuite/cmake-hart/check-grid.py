@@ -16,8 +16,12 @@ import tempfile
 parser = argparse.ArgumentParser()
 parser.add_argument("testshade")
 parser.add_argument("--module", help="Enable GPU execution using the smoke bitcode")
+parser.add_argument("--callable-grid", help="Raygen bitcode dispatching the two callables")
+parser.add_argument("--callable-module", help="Init/entry bitcode linked with OSL shadeops")
 parser.add_argument("--llvm-opt", help="LLVM opt for constructing bitcode validation cases")
 args = parser.parse_args()
+if bool(args.callable_grid) != bool(args.callable_module):
+    parser.error("--callable-grid and --callable-module must be supplied together")
 env = os.environ.copy()
 env["TESTSHADE_OPTIX"] = "0"
 
@@ -55,6 +59,30 @@ def assemble(ir, path):
     assert result.returncode == 0, result.stderr
 
 
+def check_grid(output, width, height, callable_shader=False):
+    rows = re.findall(
+        r"Pixel \((\d+), (\d+)\): Cout = (\S+) (\S+) (\S+)", output
+    )
+    assert len(rows) == width * height, output
+    for index, row in enumerate(rows):
+        x, y = index % width, index // width
+        assert (int(row[0]), int(row[1])) == (x, y), row
+        u = 0.5 if width == 1 else x / (width - 1)
+        v = 0.5 if height == 1 else y / (height - 1)
+        blue = 0.25 + 2 * math.sin(u + v) if callable_shader else u + v
+        tolerance = 2e-6 if callable_shader else 1e-6
+        for actual, expected in zip(map(float, row[2:]), (u, v, blue)):
+            assert math.isclose(actual, expected, abs_tol=tolerance), row
+
+
+def read_image(path):
+    with path.open("rb") as stream:
+        assert stream.readline().strip() == b"PF"
+        assert stream.readline().split() == [b"2", b"2"]
+        scale = float(stream.readline())
+        return struct.unpack(("<" if scale < 0 else ">") + "12f", stream.read())
+
+
 with tempfile.TemporaryDirectory(prefix="osl-hart-grid-") as directory:
     root = Path(directory)
     missing = str(root / "missing.bc")
@@ -80,6 +108,11 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-grid-") as directory:
     run(["--hart", "--optix"], "mutually exclusive")
     run(["--optix", "--hart"], "mutually exclusive")
     run(["--hart-module", missing], "require --hart")
+    run(["--hart-callable-module", missing], "require --hart")
+    run(["--hart-no-cache"], "require --hart")
+    run(base + ["--hart-callable-module", ""], "requires a nonempty filename")
+    run(base + ["--hart-callable-module", str(text), "-g", "46341", "46341"],
+        "int shade-index range")
 
     corrupt = root / "corrupt.bc"
     corrupt.write_bytes(b"BC\xc0\xde" + b"\x00" * 12)
@@ -98,23 +131,23 @@ attributes #1 = { "target-cpu"="gfx1201" }
 ''', mixed)
         run(["--hart", "--hart-module", str(mixed)],
             "mixes target-cpu", forbidden=("HART device",))
+        neutral = root / "neutral.bc"
+        assemble('target triple = "amdgcn-amd-amdhsa"\n', neutral)
+        for bad, error in [(missing, "Cannot read HART bitcode"),
+                           (str(text), "Assemble textual LLVM IR"),
+                           (str(corrupt), "Cannot parse HART bitcode"),
+                           (str(host), "must target amdgcn-amd-amdhsa"),
+                           (str(mixed), "mixes target-cpu")]:
+            run(["--hart", "--hart-module", str(neutral),
+                 "--hart-callable-module", bad, "-v"], error,
+                forbidden=("HART device", "Initializing HART runtime"))
 
     if args.module:
         base = ["--hart", "--hart-module", args.module, "-v"]
         for width, height in [(1, 1), (3, 2), (37, 5)]:
             output = run(base + ["-g", str(width), str(height), "--print",
                                  "--warmup", "--iters", "2"])
-            rows = re.findall(
-                r"Pixel \((\d+), (\d+)\): Cout = (\S+) (\S+) (\S+)", output
-            )
-            assert len(rows) == width * height, output
-            for index, row in enumerate(rows):
-                x, y = index % width, index // width
-                assert (int(row[0]), int(row[1])) == (x, y), row
-                u = 0.5 if width == 1 else x / (width - 1)
-                v = 0.5 if height == 1 else y / (height - 1)
-                for actual, expected in zip(map(float, row[2:]), (u, v, u + v)):
-                    assert math.isclose(actual, expected, abs_tol=1e-6), row
+            check_grid(output, width, height)
 
         if args.llvm_opt:
             ir = subprocess.check_output(
@@ -144,14 +177,59 @@ attributes #1 = { "target-cpu"="gfx1201" }
         run(base + ["--hart-device", "2147483647"], "hipSetDevice")
         image = root / "grid.pfm"
         run(base + ["-g", "2", "2", "-o", "Cout", str(image)])
-        with image.open("rb") as stream:
-            assert stream.readline().strip() == b"PF"
-            assert stream.readline().split() == [b"2", b"2"]
-            scale = float(stream.readline())
-            pixels = struct.unpack(("<" if scale < 0 else ">") + "12f",
-                                   stream.read())
+        pixels = read_image(image)
         # PFM stores rows bottom-to-top.
         assert pixels == (0, 1, 1, 1, 1, 2, 0, 0, 0, 1, 0, 1), pixels
 
+    if args.callable_grid:
+        base = ["--hart", "--hart-module", args.callable_grid,
+                "--hart-callable-module", args.callable_module,
+                "--hart-no-cache", "-v"]
+        for width, height in [(1, 1), (3, 2), (37, 5)]:
+            output = run(base + ["-g", str(width), str(height), "--print",
+                                 "--warmup", "--iters", "2"])
+            assert "HART pipeline cache disabled" in output, output
+            assert "Compiling HART pipeline" in output, output
+            check_grid(output, width, height, callable_shader=True)
+
+        image = root / "callable.pfm"
+        run(base + ["-g", "2", "2", "-o", "Cout", str(image)])
+        pixels = read_image(image)
+        expected = (0, 1, 0.25 + 2 * math.sin(1),
+                    1, 1, 0.25 + 2 * math.sin(2),
+                    0, 0, 0.25, 1, 0, 0.25 + 2 * math.sin(1))
+        assert all(math.isclose(a, b, abs_tol=2e-6)
+                   for a, b in zip(pixels, expected)), pixels
+
+        if args.llvm_opt:
+            ir = subprocess.check_output(
+                [args.llvm_opt, "-S", "-passes=verify",
+                 args.callable_module, "-o", "-"],
+                text=True, timeout=30,
+            )
+            targets = set(re.findall(r'"target-cpu"="([^"]+)"', ir))
+            assert len(targets) == 1, targets
+            target = targets.pop()
+            wrong_target = "gfx1100" if target != "gfx1100" else "gfx1201"
+            mismatch = root / f"callable_{target}.bc"
+            assemble(ir.replace(f'"target-cpu"="{target}"',
+                                f'"target-cpu"="{wrong_target}"'), mismatch)
+            run(["--hart", "--hart-module", args.callable_grid,
+                 "--hart-callable-module", str(mismatch), "-v"],
+                f"targets '{wrong_target}', but HIP device",
+                forbidden=("Initializing HART runtime", "Compiling HART pipeline",
+                           "Launching HART grid"))
+            for entry in ("init", "entry"):
+                missing_entry = root / f"missing_{entry}.bc"
+                assemble(ir.replace(f"@__direct_callable__testshade_{entry}",
+                                    f"@__direct_callable__missing_{entry}"),
+                         missing_entry)
+                run(["--hart", "--hart-module", args.callable_grid,
+                     "--hart-callable-module", str(missing_entry),
+                     "--hart-no-cache", "-v"],
+                    ("hartProgramGroupCreate failed", "hartPipelineCreate failed"),
+                    forbidden=("Launching HART grid",))
+
 print("HART grid CLI checks passed"
-      + ("; GPU grid/readback/image checks passed" if args.module else ""))
+      + ("; GPU grid/readback/image checks passed" if args.module else "")
+      + ("; cold-cache callable/shadeops checks passed" if args.callable_grid else ""))

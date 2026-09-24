@@ -327,11 +327,48 @@ The initial external-module contract is intentionally small:
   bitcode libraries can be linked beforehand with the matching `llvm-link`.
   No acceleration structure, miss program, or hit program is required.
 
-The supported options are `--hart-module`, `--hart-entry`, `--hart-device`,
+The supported options are `--hart-module`, `--hart-callable-module`,
+`--hart-entry`, `--hart-device`, `--hart-no-cache`,
 `--res`/`-g`, `--iters`, `--warmup`, `--print`, `-v`/`--debug`, and
 `-o Cout FILE`. As in ordinary testshade, `--print` suppresses image writing
 and the filename `null` suppresses it as well. Image output is linear RGB
 float data; no display color conversion is performed.
+
+For an OSL-shaped callable integration test, supply a separate callable module:
+
+```powershell
+.\build\bin\Release\testshade.exe --hart `
+  --hart-module .\build\src\testshade\hart\gfx1201\callable_grid_hart_gfx1201.bc `
+  --hart-callable-module .\build\src\testshade\hart\gfx1201\callable_shadeops_hart_gfx1201.bc `
+  --hart-no-cache -g 3 2 --print -v
+```
+
+The optional callable module provides two fixed entries:
+`__direct_callable__testshade_init` at callable SBT index 0 and
+`__direct_callable__testshade_entry` at index 1. Both use OSL's existing
+six-argument group calling pattern:
+`void (ShaderGlobals*, void* groupdata, void* userdata, void* output,
+int shadeindex, void* interactive_params)`.
+The supplied raygen must invoke these entries; adding the module does not
+change a raygen's behavior automatically. Both modules undergo the same
+bitcode and architecture checks before HART initialization.
+Compile callable sources with HART's device header even when they use no HART
+intrinsics: it emits device-storage ABI provenance required by HART.
+
+The hand-written fixture uses the actual OSL `ShaderGlobals` header and a
+small, typed per-point group structure, not a generated shader-group layout.
+Raygen passes private shader globals, group storage, userdata and interactive
+parameters, plus a global output pointer. Init populates the group, then entry
+calls the real `osl_sin_ff` shadeop and writes
+`(u, v, 0.25 + 2 * sin(u+v))` through the output pointer and shade index.
+The build links only the needed definitions from the matching architecture's
+shadeops bitcode into the callable module; HART links it with raygen at runtime.
+This tests callable dispatch, pointer passing and shadeop integration without
+implementing OSL AMDGPU code generation or renderer services.
+Callable grids are limited to `INT_MAX` pixels by the shade-index argument.
+
+`--hart-no-cache` disables HART's pipeline cache for this invocation, forcing
+pipeline compilation without deleting or changing the user's cache contents.
 
 Compile external sources with matching Clang using `-x hip`, the HART
 include directory, and the device-bitcode flags below. Textual LLVM IR must
@@ -347,13 +384,17 @@ a GPU. To enable `hart-grid-runtime` during configuration, set the environment
 variable `TESTSUITE_HART=1`. That test executes the example for the **first**
 configured HART architecture on HIP device 0; those must match. It checks
 numeric results, rectangular grids, repeated launches, image output, and
-runtime errors. With `--llvm-opt`, the test also verifies malformed,
+runtime errors. It also runs the callable/shadeops fixture with caching disabled,
+including singleton and rectangular grids, image output and missing callable
+entries. With `--llvm-opt`, the test also verifies malformed,
 non-AMDGPU, mixed-target, and device-mismatched bitcode rejection, including
 misleading filenames. It can also be run directly:
 
 ```powershell
 python .\testsuite\cmake-hart\check-grid.py .\build\bin\Release\testshade.exe `
-  --module .\build\src\testshade\hart\gfx1201\grid_smoke_hart_gfx1201.bc
+  --module .\build\src\testshade\hart\gfx1201\grid_smoke_hart_gfx1201.bc `
+  --callable-grid .\build\src\testshade\hart\gfx1201\callable_grid_hart_gfx1201.bc `
+  --callable-module .\build\src\testshade\hart\gfx1201\callable_shadeops_hart_gfx1201.bc
 ```
 
 ### Device compilation details

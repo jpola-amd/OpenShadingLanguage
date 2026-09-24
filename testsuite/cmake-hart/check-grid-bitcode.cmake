@@ -18,3 +18,20 @@ foreach (bc IN LISTS BITCODE_FILES)
     endif ()
     message (STATUS "Verified HART grid module: ${bc}")
 endforeach ()
+
+foreach (bc IN LISTS CALLABLE_FILES)
+    execute_process (
+        COMMAND "${LLVM_OPT_TOOL}" -passes=verify -S "${bc}" -o -
+        RESULT_VARIABLE result OUTPUT_VARIABLE ir ERROR_VARIABLE error)
+    if (NOT result STREQUAL "0")
+        message (FATAL_ERROR "Cannot verify ${bc}:\n${error}")
+    endif ()
+    if (NOT ir MATCHES "target triple = \"amdgcn-amd-amdhsa\""
+        OR NOT ir MATCHES "define [^\n]*@__direct_callable__testshade_init\\("
+        OR NOT ir MATCHES "define [^\n]*@__direct_callable__testshade_entry\\("
+        OR NOT ir MATCHES "define [^\n]*@osl_sin_ff\\("
+        OR NOT ir MATCHES "call [^\n]*@osl_sin_ff\\(")
+        message (FATAL_ERROR "${bc} must define both callables and call the linked OSL shadeop")
+    endif ()
+    message (STATUS "Verified HART callable/shadeops module: ${bc}")
+endforeach ()

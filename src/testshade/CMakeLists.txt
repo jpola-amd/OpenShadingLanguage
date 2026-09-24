@@ -184,30 +184,55 @@ endif ()
 
 if (OSL_USE_HART AND USE_LLVM_BITCODE)
     get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
-    list (APPEND hart_include_dirs "${CMAKE_CURRENT_SOURCE_DIR}")
-    set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartgridparams.h")
+    list (APPEND hart_include_dirs ${include_dirs})
+    list (REMOVE_DUPLICATES hart_include_dirs)
+    set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartgridparams.h"
+                      "${CMAKE_CURRENT_SOURCE_DIR}/hart/callable_smoke.h")
     set (hart_grid_bitcode)
+    set (hart_callable_grids)
+    set (hart_callable_bitcode)
+    get_target_property (shadeops_binary_dir osl_hart_bitcode BINARY_DIR)
     set (hart_grid_architectures ${HART_TARGET_ARCHITECTURES})
     list (REMOVE_DUPLICATES hart_grid_architectures)
     foreach (arch IN LISTS hart_grid_architectures)
         MAKE_HART_BITCODE ("hart/grid_smoke.hip" "_hart_${arch}" "${arch}"
                           grid_bc "" "${hart_include_dirs}")
         list (APPEND hart_grid_bitcode "${grid_bc}")
+        MAKE_HART_BITCODE ("hart/callable_grid.hip" "_hart_${arch}" "${arch}"
+                          callable_grid_bc "" "${hart_include_dirs}")
+        MAKE_HART_BITCODE ("hart/callable_shader.hip" "_hart_${arch}" "${arch}"
+                          callable_shader_bc "" "${hart_include_dirs}")
+        set (shadeops_bc "${shadeops_binary_dir}/hart/${arch}/shadeops_hart.bc")
+        set (callable_bc "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/callable_shadeops_hart_${arch}.bc")
+        add_custom_command (OUTPUT "${callable_bc}"
+            COMMAND "${LLVM_LINK_TOOL}" --only-needed
+                "${callable_shader_bc}" "${shadeops_bc}" -o "${callable_bc}"
+            DEPENDS "${callable_shader_bc}" "${shadeops_bc}" "${LLVM_LINK_TOOL}"
+            VERBATIM)
+        list (APPEND hart_callable_grids "${callable_grid_bc}")
+        list (APPEND hart_callable_bitcode "${callable_bc}")
     endforeach ()
-    add_custom_target (testshade_hart_bitcode ALL DEPENDS ${hart_grid_bitcode})
+    add_custom_target (testshade_hart_bitcode ALL
+        DEPENDS ${hart_grid_bitcode} ${hart_callable_grids} ${hart_callable_bitcode})
+    add_dependencies (testshade_hart_bitcode osl_hart_bitcode)
     add_dependencies (testshade testshade_hart_bitcode)
     if (BUILD_TESTING)
         add_test (NAME hart-grid-bitcode
             COMMAND "${CMAKE_COMMAND}"
                 "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}"
-                "-DBITCODE_FILES=${hart_grid_bitcode}"
+                "-DBITCODE_FILES=${hart_grid_bitcode};${hart_callable_grids}"
+                "-DCALLABLE_FILES=${hart_callable_bitcode}"
                 -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid-bitcode.cmake")
         if ("$ENV{TESTSUITE_HART}")
             list (GET hart_grid_bitcode 0 hart_grid_test_module)
+            list (GET hart_callable_grids 0 hart_callable_test_grid)
+            list (GET hart_callable_bitcode 0 hart_callable_test_module)
             add_test (NAME hart-grid-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"
                     "$<TARGET_FILE:testshade>" --module "${hart_grid_test_module}"
+                    --callable-grid "${hart_callable_test_grid}"
+                    --callable-module "${hart_callable_test_module}"
                     --llvm-opt "${LLVM_OPT_TOOL}")
             set_tests_properties (hart-grid-runtime PROPERTIES LABELS "hart;gpu")
         endif ()

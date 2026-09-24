@@ -731,11 +731,17 @@ getargs(int argc, const char* argv[])
     ap.arg("--hart-module %s:FILE")
       .help("HART grid module: raw LLVM bitcode")
       .action([&](cspan<const char*>) { hart_options = true; });
+    ap.arg("--hart-callable-module %s:FILE")
+      .help("Optional HART bitcode with testshade init/entry callables")
+      .action([&](cspan<const char*>) { hart_options = true; });
     ap.arg("--hart-entry %s:NAME")
       .help("HART raygen entry (default: __raygen__testshade)")
       .action([&](cspan<const char*>) { hart_options = true; });
     ap.arg("--hart-device %d:INDEX")
       .help("HIP device ordinal (default: 0)")
+      .action([&](cspan<const char*>) { hart_options = true; });
+    ap.arg("--hart-no-cache")
+      .help("Disable the HART pipeline cache for this run")
       .action([&](cspan<const char*>) { hart_options = true; });
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
@@ -1975,7 +1981,7 @@ test_shade(int argc, const char* argv[])
     }
     if (hart_options) {
         ErrorHandler::default_handler().errorfmt(
-            "--hart-module, --hart-entry, and --hart-device require --hart");
+            "HART-specific options require --hart");
         return EXIT_FAILURE;
     }
 

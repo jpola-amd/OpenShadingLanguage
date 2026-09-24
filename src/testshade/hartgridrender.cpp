@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -45,10 +46,47 @@ namespace llvm = LLVM_NAMESPACE;
 OSL_NAMESPACE_BEGIN
 namespace {
 
+struct HartModuleInput {
+    std::string filename;
+    std::string bitcode;
+    std::string arch;
+};
+
+
+
+struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HartSbtRecord {
+    std::array<unsigned char, OPTIX_SBT_RECORD_HEADER_SIZE> header { };
+};
+
+
+
 bool
-read_module_architecture(cspan<char> bitcode, string_view filename,
-                         std::string& arch, ErrorHandler& err)
+read_module(HartModuleInput& input, ErrorHandler& err)
 {
+    const auto& filename = input.filename;
+    auto& bitcode        = input.bitcode;
+    auto& arch           = input.arch;
+    const auto size      = OIIO::Filesystem::file_size(filename);
+    if (!size || size > bitcode.max_size()) {
+        err.errorfmt("Cannot read HART bitcode file '{}' (missing, empty, or "
+                     "too large)",
+                     filename);
+        return false;
+    }
+    bitcode.resize(size_t(size));
+    if (OIIO::Filesystem::read_bytes(filename, bitcode.data(), bitcode.size())
+        != bitcode.size()) {
+        err.errorfmt("Cannot read complete HART bitcode file '{}'", filename);
+        return false;
+    }
+    if (bitcode.compare(0, 4, "BC\xc0\xde", 4) != 0
+        && bitcode.compare(0, 4, "\xde\xc0\x17\x0b", 4) != 0) {
+        err.errorfmt("'{}' is not LLVM bitcode. Assemble textual LLVM IR with "
+                     "llvm-as first; PTX and HIP code objects are not HART "
+                     "module inputs.",
+                     filename);
+        return false;
+    }
     llvm::LLVMContext context;
     llvm::MemoryBufferRef buffer(llvm::StringRef(bitcode.data(), bitcode.size()),
                                  llvm::StringRef(filename.data(),
@@ -101,8 +139,8 @@ public:
     HartGridRenderer(const HartGridRenderer&)            = delete;
     HartGridRenderer& operator=(const HartGridRenderer&) = delete;
 
-    bool initialize(int device, bool verbose, string_view module_arch,
-                    string_view filename)
+    bool initialize(int device, bool verbose, cspan<HartModuleInput> inputs,
+                    bool no_cache)
     {
         m_verbose = verbose;
         hipDeviceProp_t properties { };
@@ -118,13 +156,15 @@ public:
         const string_view device_target(properties.gcnArchName);
         const string_view device_arch
             = device_target.substr(0, device_target.find(':'));
-        if (!module_arch.empty() && module_arch != device_arch) {
-            m_err.errorfmt(
-                "HART bitcode '{}' targets '{}', but HIP device {} ({}) is '{}'. "
-                "Use bitcode compiled for '{}'; refusing to create a HART pipeline.",
-                filename, module_arch, device, properties.name, device_arch,
-                device_arch);
-            return false;
+        for (const auto& input : inputs) {
+            if (!input.arch.empty() && input.arch != device_arch) {
+                m_err.errorfmt(
+                    "HART bitcode '{}' targets '{}', but HIP device {} ({}) is '{}'. "
+                    "Use bitcode compiled for '{}'; refusing to create a HART pipeline.",
+                    input.filename, input.arch, device, properties.name,
+                    device_arch, device_arch);
+                return false;
+            }
         }
         if (!hip_check(hipFree(nullptr), "HIP context initialization"))
             return false;
@@ -139,54 +179,80 @@ public:
             return false;
         if (m_verbose)
             m_err.infofmt("Creating HART context");
-        return hart_check(optixDeviceContextCreate(nullptr, &options,
-                                                   &m_context),
-                          "hartDeviceContextCreate")
-               && hip_check(hipStreamCreate(&m_stream), "hipStreamCreate");
+        if (!hart_check(optixDeviceContextCreate(nullptr, &options, &m_context),
+                        "hartDeviceContextCreate"))
+            return false;
+        if (no_cache) {
+            if (!hart_check(optixDeviceContextSetCacheEnabled(m_context, 0),
+                            "hartDeviceContextSetCacheEnabled"))
+                return false;
+            if (m_verbose)
+                m_err.infofmt("HART pipeline cache disabled");
+        }
+        return hip_check(hipStreamCreate(&m_stream), "hipStreamCreate");
     }
 
-    bool load(cspan<char> bitcode, const std::string& entry)
+    bool load(cspan<HartModuleInput> inputs, const std::string& entry)
     {
-        if (m_verbose)
-            m_err.infofmt("Loading HART module ({} bytes), entry '{}'",
-                          bitcode.size(), entry);
         OptixModuleCompileOptions module_options { };
         OptixPipelineCompileOptions compile_options { };
         compile_options.pipelineLaunchParamsVariableName
             = "testshade_hart_params";
         std::array<char, 8192> log { };
-        size_t log_size = log.size();
-        if (!hart_check(optixModuleCreate(m_context, &module_options,
-                                          &compile_options, bitcode.data(),
-                                          bitcode.size(), log.data(), &log_size,
-                                          &m_module),
-                        "hartModuleCreate")) {
-            log.back() = '\0';
-            m_err.errorfmt("HART module: {}", log.data());
-            return false;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            const auto& input = inputs[i];
+            if (m_verbose)
+                m_err.infofmt("Loading HART module '{}' ({} bytes)",
+                              input.filename, input.bitcode.size());
+            size_t log_size = log.size();
+            if (!hart_check(optixModuleCreate(m_context, &module_options,
+                                              &compile_options,
+                                              input.bitcode.data(),
+                                              input.bitcode.size(), log.data(),
+                                              &log_size, &m_modules[i]),
+                            "hartModuleCreate")) {
+                log.back() = '\0';
+                m_err.errorfmt("HART module '{}': {}", input.filename,
+                               log.data());
+                return false;
+            }
         }
 
-        OptixProgramGroupDesc desc { };
-        desc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        desc.raygen.module            = m_module;
-        desc.raygen.entryFunctionName = entry.c_str();
-        log_size                      = log.size();
-        if (!hart_check(optixProgramGroupCreate(m_context, &desc, 1, nullptr,
-                                                log.data(), &log_size, &m_group),
-                        "hartProgramGroupCreate")) {
-            log.back() = '\0';
-            m_err.errorfmt("HART entry '{}': {}", entry, log.data());
-            return false;
+        std::array<OptixProgramGroupDesc, 3> desc { };
+        desc[0].kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+        desc[0].raygen.module            = m_modules[0];
+        desc[0].raygen.entryFunctionName = entry.c_str();
+        m_group_count                    = inputs.size() == 2 ? 3 : 1;
+        const char* callable_names[] = { "__direct_callable__testshade_init",
+                                         "__direct_callable__testshade_entry" };
+        for (unsigned int i = 1; i < m_group_count; ++i) {
+            desc[i].kind               = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
+            desc[i].callables.moduleDC = m_modules[1];
+            desc[i].callables.entryFunctionNameDC = callable_names[i - 1];
+        }
+        for (unsigned int i = 0; i < m_group_count; ++i) {
+            size_t log_size = log.size();
+            if (!hart_check(optixProgramGroupCreate(m_context, &desc[i], 1,
+                                                    nullptr, log.data(),
+                                                    &log_size, &m_groups[i]),
+                            "hartProgramGroupCreate")) {
+                log.back() = '\0';
+                m_err.errorfmt("HART entry '{}': {}",
+                               i == 0 ? entry.c_str() : callable_names[i - 1],
+                               log.data());
+                return false;
+            }
         }
 
         OptixPipelineLinkOptions link_options { };
         link_options.maxTraceDepth = 0;
-        log_size                   = log.size();
+        size_t log_size            = log.size();
         if (m_verbose)
             m_err.infofmt("Compiling HART pipeline");
         if (!hart_check(optixPipelineCreate(m_context, &compile_options,
-                                            &link_options, &m_group, 1,
-                                            log.data(), &log_size, &m_pipeline),
+                                            &link_options, m_groups.data(),
+                                            m_group_count, log.data(),
+                                            &log_size, &m_pipeline),
                         "hartPipelineCreate")) {
             log.back() = '\0';
             m_err.errorfmt("HART pipeline for entry '{}': {}", entry,
@@ -194,14 +260,16 @@ public:
             return false;
         }
 
-        alignas(OPTIX_SBT_RECORD_ALIGNMENT)
-            std::array<unsigned char, OPTIX_SBT_RECORD_HEADER_SIZE>
-                record { };
-        return hart_check(optixSbtRecordPackHeader(m_group, record.data()),
-                          "hartSbtRecordPackHeader")
-               && hip_check(hipMalloc(&m_record, record.size()),
-                            "hipMalloc SBT")
-               && hip_check(hipMemcpy(m_record, record.data(), record.size(),
+        std::array<HartSbtRecord, 3> records { };
+        for (unsigned int i = 0; i < m_group_count; ++i) {
+            if (!hart_check(optixSbtRecordPackHeader(m_groups[i],
+                                                     records[i].header.data()),
+                            "hartSbtRecordPackHeader"))
+                return false;
+        }
+        const size_t bytes = m_group_count * sizeof(HartSbtRecord);
+        return hip_check(hipMalloc(&m_record, bytes), "hipMalloc SBT")
+               && hip_check(hipMemcpy(m_record, records.data(), bytes,
                                       hipMemcpyHostToDevice),
                             "hipMemcpy SBT");
     }
@@ -225,7 +293,13 @@ public:
 
         OptixShaderBindingTable sbt { };
         sbt.raygenRecord = m_record;
-        auto launch      = [&]() {
+        if (m_group_count > 1) {
+            sbt.callablesRecordBase          = static_cast<char*>(m_record)
+                                               + sizeof(HartSbtRecord);
+            sbt.callablesRecordStrideInBytes = sizeof(HartSbtRecord);
+            sbt.callablesRecordCount         = m_group_count - 1;
+        }
+        auto launch = [&]() {
             if (m_verbose)
                 m_err.infofmt("Launching HART grid {} x {}", width, height);
             if (!hart_check(optixLaunch(m_pipeline, m_stream, m_params,
@@ -266,16 +340,20 @@ public:
                          && ok;
             m_pipeline = nullptr;
         }
-        if (m_group) {
-            ok      = hart_check(optixProgramGroupDestroy(m_group),
-                                 "hartProgramGroupDestroy")
-                      && ok;
-            m_group = nullptr;
+        for (auto& group : m_groups) {
+            if (group) {
+                ok    = hart_check(optixProgramGroupDestroy(group),
+                                   "hartProgramGroupDestroy")
+                        && ok;
+                group = nullptr;
+            }
         }
-        if (m_module) {
-            ok = hart_check(optixModuleDestroy(m_module), "hartModuleDestroy")
-                 && ok;
-            m_module = nullptr;
+        for (auto& module : m_modules) {
+            if (module) {
+                ok = hart_check(optixModuleDestroy(module), "hartModuleDestroy")
+                     && ok;
+                module = nullptr;
+            }
         }
         if (m_context) {
             ok        = hart_check(optixDeviceContextDestroy(m_context),
@@ -326,12 +404,13 @@ private:
     bool m_verbose               = false;
     hipStream_t m_stream         = nullptr;
     OptixDeviceContext m_context = nullptr;
-    OptixModule m_module         = nullptr;
-    OptixProgramGroup m_group    = nullptr;
-    OptixPipeline m_pipeline     = nullptr;
-    void* m_record               = nullptr;
-    void* m_params               = nullptr;
-    void* m_output               = nullptr;
+    std::array<OptixModule, 2> m_modules { };
+    std::array<OptixProgramGroup, 3> m_groups { };
+    unsigned int m_group_count = 0;
+    OptixPipeline m_pipeline   = nullptr;
+    void* m_record             = nullptr;
+    void* m_params             = nullptr;
+    void* m_output             = nullptr;
 };
 
 }  // namespace
@@ -342,20 +421,28 @@ int
 testshade_hart(int argc, const char* argv[])
 {
     ErrorHandler err;
-    std::string module, entry = "__raygen__testshade";
+    std::array<HartModuleInput, 2> inputs;
+    std::string entry = "__raygen__testshade";
     std::vector<std::string> output_names, output_files;
     int device = 0, width = 1, height = 1, iterations = 1;
     bool enabled = false, print_pixels = false, verbose = false, warmup = false;
-    bool has_shader = false;
+    bool has_shader    = false;
+    bool has_callables = false, no_cache = false;
     OIIO::ArgParse ap;
     ap.exit_on_error(false);
     ap.intro("testshade --hart: external AMDGPU bitcode grid runner");
     ap.usage("testshade --hart --hart-module FILE.bc [options]");
     // clang-format off
     ap.arg("--hart", &enabled);
-    ap.arg("--hart-module %s:FILE", &module);
+    ap.arg("--hart-module %s:FILE", &inputs[0].filename);
+    ap.arg("--hart-callable-module %s:FILE")
+      .action([&](cspan<const char*> args) {
+          inputs[1].filename = args[1];
+          has_callables = true;
+      });
     ap.arg("--hart-entry %s:NAME", &entry);
     ap.arg("--hart-device %d:INDEX", &device);
+    ap.arg("--hart-no-cache", &no_cache);
     ap.arg("--res %d:WIDTH %d:HEIGHT", &width, &height);
     ap.arg("-g %d:WIDTH %d:HEIGHT", &width, &height);
     ap.arg("--iters %d:COUNT", &iterations);
@@ -376,9 +463,13 @@ testshade_hart(int argc, const char* argv[])
                      "use --hart-module FILE.bc");
         return EXIT_FAILURE;
     }
-    if (module.empty() || entry.empty()) {
+    if (inputs[0].filename.empty() || entry.empty()) {
         err.errorfmt("HART mode requires --hart-module FILE.bc and a nonempty "
                      "entry name");
+        return EXIT_FAILURE;
+    }
+    if (has_callables && inputs[1].filename.empty()) {
+        err.errorfmt("--hart-callable-module requires a nonempty filename");
         return EXIT_FAILURE;
     }
     if (device < 0 || width <= 0 || height <= 0 || iterations <= 0) {
@@ -397,38 +488,23 @@ testshade_hart(int argc, const char* argv[])
             "HART grid dimensions exceed the output buffer size limit");
         return EXIT_FAILURE;
     }
-
-    const auto size = OIIO::Filesystem::file_size(module);
-    if (!size || size > std::string().max_size()) {
-        err.errorfmt("Cannot read HART bitcode file '{}' (missing, empty, or "
-                     "too large)",
-                     module);
-        return EXIT_FAILURE;
-    }
-    std::string bitcode(size_t(size), '\0');
-    if (OIIO::Filesystem::read_bytes(module, bitcode.data(), bitcode.size())
-        != bitcode.size()) {
-        err.errorfmt("Cannot read complete HART bitcode file '{}'", module);
-        return EXIT_FAILURE;
-    }
-    if (bitcode.compare(0, 4, "BC\xc0\xde", 4) != 0
-        && bitcode.compare(0, 4, "\xde\xc0\x17\x0b", 4) != 0) {
-        err.errorfmt("'{}' is not LLVM bitcode. Assemble textual LLVM IR with "
-                     "llvm-as first; PTX and HIP code objects are not HART "
-                     "module inputs.",
-                     module);
+    if (has_callables
+        && size_t(width)
+               > size_t(std::numeric_limits<int>::max()) / size_t(height)) {
+        err.errorfmt("HART callable grid exceeds the int shade-index range");
         return EXIT_FAILURE;
     }
 
     if (verbose)
         err.verbosity(ErrorHandler::VERBOSE);
-    std::string module_arch;
-    if (!read_module_architecture({ bitcode.data(), bitcode.size() }, module,
-                                  module_arch, err))
-        return EXIT_FAILURE;
+    span<HartModuleInput> modules(inputs.data(), has_callables ? 2 : 1);
+    for (auto& input : modules) {
+        if (!read_module(input, err))
+            return EXIT_FAILURE;
+    }
     HartGridRenderer renderer(err);
-    if (!renderer.initialize(device, verbose, module_arch, module)
-        || !renderer.load({ bitcode.data(), bitcode.size() }, entry))
+    if (!renderer.initialize(device, verbose, modules, no_cache)
+        || !renderer.load(modules, entry))
         return EXIT_FAILURE;
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
     const bool rendered = renderer.render(width, height, iterations, warmup,
