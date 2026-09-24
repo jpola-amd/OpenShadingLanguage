@@ -202,12 +202,12 @@ ColorSystem::set_colorspace(ustringhash colorspace)
         clamp_zero(rgb);
         rgb                  = colpow(rgb, 1.0f / BB_TABLE_YPOWER);
         m_blackbody_table[i] = rgb;
-#if !defined(__CUDACC__)
+#if !OSL_GPU_COMPILER
         //std::cout << "Table[" << i << "; T=" << T << "] = " << rgb << "\n";
 #endif
     }
 
-#if 0 && !defined(__CUDACC__)
+#if 0 && !OSL_GPU_COMPILER
     std::cout << "Made " << m_blackbody_table.size() << " table entries for blackbody\n";
 
     // Sanity checks
@@ -225,7 +225,7 @@ ColorSystem::ocio_transform(ustringhash fromspace, ustringhash tospace,
                             ExecContextPtr ec) const
 {
 // Currently CPU only supports ocio by going through ShadingContext
-#if !defined(__CUDA_ARCH__) && !defined(OSL_COMPILING_TO_BITCODE)
+#if !OSL_GPU_DEVICE && !defined(OSL_COMPILING_TO_BITCODE)
     Color Cout;
 
     assert(ctx);
@@ -244,7 +244,7 @@ ColorSystem::ocio_transform(ustringhash fromspace, ustringhash tospace,
         OSL::errorfmt(ec, "Unknown color space transformation \"{}\" -> \"{}\"",
                       fromspace, tospace);
     }
-#endif  // !define(__CUDA_ARCH__) && !defined(OSL_COMPILING_TO_BITCODE)
+#endif  // !OSL_GPU_DEVICE && !defined(OSL_COMPILING_TO_BITCODE)
 
     return C;
 }
@@ -400,8 +400,8 @@ ColorSystem::transformc(ustringhash fromspace, ustringhash tospace,
 }  // namespace pvt
 
 
-// For Optix, this will be defined by the renderer. Otherwise inline a getter.
-#ifdef __CUDACC__
+// On GPUs, this will be defined by the renderer. Otherwise inline a getter.
+#if OSL_GPU_COMPILER
 extern "C" __device__ int
 rend_get_userdata(ustringhash name, void* data, int data_size,
                   const OSL::TypeDesc& type, int index);

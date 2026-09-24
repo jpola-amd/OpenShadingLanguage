@@ -203,13 +203,7 @@ if (USE_LLVM_BITCODE)
 
     EMBED_LLVM_BITCODE_IN_CPP ( "${rs_dependent_ops_srcs}" "_host_rs" "osl_llvm_compiled_rs_dependent_ops" lib_src "" "${include_dirs}")
 
-    if (CUDA_FOUND)
-        add_compile_definitions (OSL_LLVM_CUDA_BITCODE)
-
-        # The shadeops are compiled to both LLVM bitcode and PTX, and embedded
-        # in liboslexec in binary format. The bitcode is used to seed the LLVM
-        # module for each shader, and the PTX can be retrieved by the renderer
-        # through the shading system.
+    if (CUDA_FOUND OR OSL_USE_HART)
         set (liboslexec_shadeops_srcs
             ${CMAKE_SOURCE_DIR}/src/liboslexec/llvm_ops.cpp
             ${CMAKE_SOURCE_DIR}/src/liboslexec/opnoise.cpp
@@ -222,7 +216,15 @@ if (USE_LLVM_BITCODE)
             ${CMAKE_SOURCE_DIR}/src/liboslnoise/gabornoise.cpp
             ${CMAKE_SOURCE_DIR}/src/liboslnoise/simplexnoise.cpp
         )
+    endif ()
 
+    if (CUDA_FOUND)
+        add_compile_definitions (OSL_LLVM_CUDA_BITCODE)
+
+        # The shadeops are compiled to both LLVM bitcode and PTX, and embedded
+        # in liboslexec in binary format. The bitcode is used to seed the LLVM
+        # module for each shader, and the PTX can be retrieved by the renderer
+        # through the shading system.
         CUDA_SHADEOPS_COMPILE ( "shadeops_cuda"
             shadeops_cuda_bc
             shadeops_cuda_ptx
@@ -246,6 +248,19 @@ if (USE_LLVM_BITCODE)
         install (FILES ${shadeops_cuda_ptx}
             DESTINATION ${OSL_PTX_INSTALL_DIR})
 
+    endif ()
+    if (OSL_USE_HART)
+        HART_SHADEOPS_COMPILE ("shadeops_hart" shadeops_hart_bc
+            "${liboslexec_shadeops_srcs}" "${exec_headers}" "${include_dirs}")
+        add_custom_target (osl_hart_bitcode ALL DEPENDS ${shadeops_hart_bc})
+        if (BUILD_TESTING)
+            add_test (NAME hart-shadeops-bitcode
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DBITCODE_DIR=${CMAKE_CURRENT_BINARY_DIR}/hart"
+                    "-DHART_TARGET_ARCHITECTURES=${HART_TARGET_ARCHITECTURES}"
+                    "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}"
+                    -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-bitcode.cmake")
+        endif ()
     endif ()
     # Also compile llvm_ops.cpp as a native object so that generated shader
     # DSOs (cpp backend, debug_output_cpp >= 2) can link osl_* symbols from

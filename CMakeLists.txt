@@ -138,7 +138,7 @@ set (OSL_PTX_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/ptx"
 set (CMAKE_DEBUG_POSTFIX "" CACHE STRING "Library naming postfix for Debug builds (e.g., '_debug')")
 option (OSL_USTRINGREP_IS_HASH "Always use ustringhash for strings" OFF)
 
-option (OSL_USE_HART "Discover dependencies for the experimental HART backend" OFF)
+option (OSL_USE_HART "Enable experimental HART build infrastructure" OFF)
 set (HART_TARGET_ARCHITECTURES "gfx1201;gfx1100;gfx1151" CACHE STRING
      "AMD GPU architectures for HART device code (semicolon-separated list)")
 message(STATUS "OSL_USE_HART: ${OSL_USE_HART}")

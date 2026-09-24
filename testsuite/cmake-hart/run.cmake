@@ -10,7 +10,7 @@ function (check_discovery name expected_error)
             -S "${OSL_SOURCE_DIR}/testsuite/cmake-hart"
             -B "${TEST_BINARY_DIR}/${name}"
             -U hip_DIR -U amd.hart_DIR -U amd.shader_compiler_DIR
-            -U ROCM_CLANG_EXECUTABLE
+            -U ROCM_CLANG_EXECUTABLE -U ROCM_DEVICE_LIB_PATH
             "-DOSL_SOURCE_DIR=${OSL_SOURCE_DIR}" "-DTEST_CASE=${name}"
         RESULT_VARIABLE result
         OUTPUT_VARIABLE output ERROR_VARIABLE error)
@@ -40,3 +40,15 @@ check_discovery (missing-clang "Cannot query ROCm clang")
 check_discovery (no-clang "Cannot find ROCm clang")
 check_discovery (wrong-platform "requires the AMD HIP platform")
 check_discovery (missing-target "must provide amd::hart and hip::host")
+check_discovery (device-lib-override "")
+check_discovery (device-lib-environment "")
+check_discovery (device-lib-layout "")
+check_discovery (missing-device-libs "Missing ROCm device library hip.bc")
+check_discovery (incomplete-device-libs "Missing ROCm device library ockl.bc")
+check_discovery (missing-isa-library "Missing ROCm device library for gfx1151")
+check_discovery (precise-math "requires USE_FAST_MATH=ON")
+check_discovery (matching-tools "")
+check_discovery (mismatched-tools "LLVM_BC_GENERATOR must match OSL LLVM")
+check_discovery (bitcode-output-names "")
+check_discovery (bitcode-reordered-sources "")
+check_discovery (bitcode-duplicate-basename "HART shadeops sources must have unique basenames")

@@ -18,13 +18,25 @@
 
 #pragma once
 
+#if defined(__CUDACC__) || defined(__HIP__)
+#    define OSL_GPU_COMPILER 1
+#else
+#    define OSL_GPU_COMPILER 0
+#endif
+
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#    define OSL_GPU_DEVICE 1
+#else
+#    define OSL_GPU_DEVICE 0
+#endif
+
 #include <cstring>
 #include <memory>
 #include <cstdint>
 
 #include <OSL/oslversion.h>
 
-#if defined(__x86_64__) && !defined(__CUDA_ARCH__)
+#if defined(__x86_64__) && !OSL_GPU_DEVICE
 #   include <x86intrin.h>
 #endif
 
@@ -44,6 +56,8 @@
 //                when using nvcc or clang with ptx target."
 //   __CUDA_ARCH__  is only defined when doing the device pass. "Do this only
 //                for code that will actually run on the GPU."
+//   OSL_GPU_COMPILER covers CUDA and HIP, including their host passes.
+//   OSL_GPU_DEVICE is true only during their device passes.
 
 // Define OSL_GNUC_VERSION to hold an encoded gcc version (e.g. 40802 for
 // 4.8.2), or 0 if not a GCC release. N.B.: This will be 0 for clang.
@@ -328,7 +342,7 @@
 // ordinary inline.
 #if OSL_DEBUG
 #    define OSL_FORCEINLINE inline
-#elif defined(__CUDACC__)
+#elif OSL_GPU_COMPILER
 #    define OSL_FORCEINLINE __inline__
 #elif defined(__GNUC__) || defined(__clang__) || __has_attribute(always_inline)
 #    define OSL_FORCEINLINE inline __attribute__((always_inline))
@@ -397,7 +411,7 @@
 
 
 #ifndef OSL_HOSTDEVICE
-#  ifdef __CUDACC__
+#  if OSL_GPU_COMPILER
 #    define OSL_HOSTDEVICE __host__ __device__
 #  else
 #    define OSL_HOSTDEVICE
@@ -405,7 +419,7 @@
 #endif
 
 #ifndef OSL_DEVICE
-#  ifdef __CUDACC__
+#  if OSL_GPU_COMPILER
 #    define OSL_DEVICE __device__
 #  else
 #    define OSL_DEVICE
@@ -413,7 +427,7 @@
 #endif
 
 #ifndef OSL_CONSTANT_DATA
-#  ifdef __CUDACC__
+#  if OSL_GPU_COMPILER
 #    define OSL_CONSTANT_DATA __constant__
 #  else
 #    define OSL_CONSTANT_DATA
@@ -491,7 +505,7 @@
 ///
 /// OSL_ASSERT_MSG(condition,msg,...) lets you add formatted output (a la
 /// printf) to the failure message.
-#ifndef __CUDA_ARCH__
+#if !OSL_GPU_DEVICE
 #    define OSL_ASSERT_PRINT(...) (std::fprintf(stderr, __VA_ARGS__))
 #else
 #    define OSL_ASSERT_PRINT(...) (printf(__VA_ARGS__))
@@ -522,7 +536,7 @@
 /// These macros are no-ops when compiling for CUDA because they were found
 /// to cause strange issues in device code (e.g., function bodies being
 /// eliminated when OSL_DASSERT is used).
-#if !defined(NDEBUG) && !defined(__CUDACC__)
+#if !defined(NDEBUG) && !OSL_GPU_COMPILER
 #    define OSL_DASSERT OSL_ASSERT
 #    define OSL_DASSERT_MSG OSL_ASSERT_MSG
 #else
@@ -563,7 +577,7 @@ OSL_FORCEINLINE OSL_HOSTDEVICE To bitcast(const From& src) noexcept {
     return dst;
 }
 
-#if defined(__x86_64__) && !defined(__CUDA_ARCH__) && \
+#if defined(__x86_64__) && !OSL_GPU_COMPILER && \
     (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER) \
      || OSL_CLANG_VERSION >= 100000 || OSL_APPLE_CLANG_VERSION >= 130000)
 // On x86/x86_64 for certain compilers we can use Intel CPU intrinsics for
