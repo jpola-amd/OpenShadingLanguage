@@ -12,6 +12,10 @@ if (OSL_BUILD_BATCHED)
         batched_simplerend.cpp)
 endif()
 
+if (OSL_USE_HART)
+    list (APPEND testshade_srcs hartgridrender.cpp)
+endif ()
+
 if (OSL_USE_OPTIX)
     list (APPEND testshade_srcs optixgridrender.cpp)
     set ( testshade_cuda_srcs
@@ -82,6 +86,42 @@ target_include_directories (testshade BEFORE PRIVATE ${OpenImageIO_INCLUDES})
 target_link_libraries (testshade
                        PRIVATE
                            oslexec oslquery oslcomp)
+target_compile_definitions (testshade PRIVATE OSL_TESTSHADE_HART=$<BOOL:${OSL_USE_HART}>)
+osl_hart_target (testshade)
+if (OSL_USE_HART)
+    target_link_libraries (testshade PRIVATE
+        ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+endif ()
+if (OSL_USE_HART AND WIN32)
+    find_package (hiprtc CONFIG REQUIRED
+                  PATHS "${HIP_PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
+    find_package (rocm-kpack CONFIG QUIET
+                  PATHS "${HIP_PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
+    # System32 precedes PATH and may contain incompatible display-driver copies.
+    set (hart_comgr_dll "${HIP_PACKAGE_PREFIX_DIR}/bin/amd_comgr.dll")
+    if (NOT EXISTS "${hart_comgr_dll}")
+        message (FATAL_ERROR "Cannot deploy the selected ROCm COMGR: ${hart_comgr_dll}")
+    endif ()
+    set (hart_runtime_files
+        "$<TARGET_FILE:amd::hart>"
+        "$<TARGET_FILE:amd::shader_compiler>"
+        "$<TARGET_FILE:amd::shader_stack_runtime>"
+        "$<TARGET_FILE_DIR:amd::hart>/hart-native-codegen.exe"
+        "$<TARGET_FILE:hip::amdhip64>"
+        "$<TARGET_FILE:hiprtc::hiprtc>"
+        "${hart_comgr_dll}")
+    file (GLOB hart_hiprtc_builtins CONFIGURE_DEPENDS
+          "${HIP_PACKAGE_PREFIX_DIR}/bin/hiprtc-builtins*.dll")
+    list (APPEND hart_runtime_files ${hart_hiprtc_builtins})
+    if (TARGET rocm::rocm_kpack)
+        list (APPEND hart_runtime_files "$<TARGET_FILE:rocm::rocm_kpack>")
+    endif ()
+    add_custom_command (TARGET testshade POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            ${hart_runtime_files} "$<TARGET_FILE_DIR:testshade>"
+        COMMAND_EXPAND_LISTS VERBATIM)
+    install (FILES ${hart_runtime_files} DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif ()
 if (OSL_USE_OPTIX)
     add_dependencies(testshade testshade_ptx)
 endif ()
@@ -120,6 +160,12 @@ if (NOT CODECOV)
     target_link_libraries (libtestshade
                            PRIVATE
                                oslexec oslquery oslcomp)
+    target_compile_definitions (libtestshade PRIVATE OSL_TESTSHADE_HART=$<BOOL:${OSL_USE_HART}>)
+    osl_hart_target (libtestshade)
+    if (OSL_USE_HART)
+        target_link_libraries (libtestshade PRIVATE
+            ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+    endif ()
     target_include_directories (libtestshade BEFORE PRIVATE ${OpenImageIO_INCLUDES})
     set_target_properties (libtestshade PROPERTIES PREFIX "")
 
@@ -134,4 +180,43 @@ if (NOT CODECOV)
                                ${CMAKE_DL_LIBS} )
     install (TARGETS testshade_dso RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} )
     osl_optix_target(libtestshade)
+endif ()
+
+if (OSL_USE_HART AND USE_LLVM_BITCODE)
+    get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
+    list (APPEND hart_include_dirs "${CMAKE_CURRENT_SOURCE_DIR}")
+    set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartgridparams.h")
+    set (hart_grid_bitcode)
+    set (hart_grid_architectures ${HART_TARGET_ARCHITECTURES})
+    list (REMOVE_DUPLICATES hart_grid_architectures)
+    foreach (arch IN LISTS hart_grid_architectures)
+        MAKE_HART_BITCODE ("hart/grid_smoke.hip" "_hart_${arch}" "${arch}"
+                          grid_bc "" "${hart_include_dirs}")
+        list (APPEND hart_grid_bitcode "${grid_bc}")
+    endforeach ()
+    add_custom_target (testshade_hart_bitcode ALL DEPENDS ${hart_grid_bitcode})
+    add_dependencies (testshade testshade_hart_bitcode)
+    if (BUILD_TESTING)
+        add_test (NAME hart-grid-bitcode
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}"
+                "-DBITCODE_FILES=${hart_grid_bitcode}"
+                -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid-bitcode.cmake")
+        if ("$ENV{TESTSUITE_HART}")
+            list (GET hart_grid_bitcode 0 hart_grid_test_module)
+            add_test (NAME hart-grid-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"
+                    "$<TARGET_FILE:testshade>" --module "${hart_grid_test_module}"
+                    --llvm-opt "${LLVM_OPT_TOOL}")
+            set_tests_properties (hart-grid-runtime PROPERTIES LABELS "hart;gpu")
+        endif ()
+    endif ()
+endif ()
+
+if (BUILD_TESTING AND OSL_USE_HART)
+    add_test (NAME hart-grid-cli
+        COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"
+            "$<TARGET_FILE:testshade>" --llvm-opt "${LLVM_OPT_TOOL}")
 endif ()

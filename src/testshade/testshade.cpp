@@ -36,6 +36,9 @@
 #if OSL_USE_OPTIX
 #    include "optixgridrender.h"
 #endif
+#if OSL_TESTSHADE_HART
+#    include "hartgridrender.h"
+#endif
 
 #include "render_state.h"
 #include "simplerend.h"
@@ -89,6 +92,8 @@ static bool print_outputs        = false;
 static bool output_placement     = true;
 static bool use_optix            = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_OPTIX"));
+static bool use_hart                    = false;
+static bool hart_options                = false;
 static bool optix_no_inline             = false;
 static bool optix_no_inline_layer_funcs = false;
 static bool optix_no_merge_layer_funcs  = false;
@@ -705,6 +710,8 @@ getargs(int argc, const char* argv[])
     // they can be later processed in full.
     shader_setup_args.clear();
     shader_setup_args.push_back("testshade");  // seed with 'program'
+    use_hart     = false;
+    hart_options = false;
 
     // clang-format off
     OIIO::ArgParse ap;
@@ -719,6 +726,17 @@ getargs(int argc, const char* argv[])
       .help("Set thread count (default = 0: auto-detect #cores)");
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
+    ap.arg("--hart", &use_hart)
+      .help("Run external AMDGPU bitcode through HART (no OSL compilation yet)");
+    ap.arg("--hart-module %s:FILE")
+      .help("HART grid module: raw LLVM bitcode")
+      .action([&](cspan<const char*>) { hart_options = true; });
+    ap.arg("--hart-entry %s:NAME")
+      .help("HART raygen entry (default: __raygen__testshade)")
+      .action([&](cspan<const char*>) { hart_options = true; });
+    ap.arg("--hart-device %d:INDEX")
+      .help("HIP device ordinal (default: 0)")
+      .action([&](cspan<const char*>) { hart_options = true; });
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
     ap.arg("--debug2", &debug2)
@@ -1940,6 +1958,26 @@ test_shade(int argc, const char* argv[])
     // Get the command line arguments.  Those that set up the shader
     // instances are queued up in shader_setup_args for later handling.
     getargs(argc, argv);
+
+    if (use_hart) {
+        if (use_optix) {
+            ErrorHandler::default_handler().errorfmt(
+                "--hart and OptiX execution are mutually exclusive");
+            return EXIT_FAILURE;
+        }
+#if OSL_TESTSHADE_HART
+        return testshade_hart(argc, argv);
+#else
+        ErrorHandler::default_handler().errorfmt(
+            "HART support is not enabled in this build");
+        return EXIT_FAILURE;
+#endif
+    }
+    if (hart_options) {
+        ErrorHandler::default_handler().errorfmt(
+            "--hart-module, --hart-entry, and --hart-device require --hart");
+        return EXIT_FAILURE;
+    }
 
     // For testing purposes, allow user to set global locale
     if (localename.size()) {
