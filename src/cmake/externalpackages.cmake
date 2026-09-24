@@ -169,7 +169,9 @@ if (OSL_USE_OPTIX)
         endif ()
         # Is it really a good idea to completely reset CUDA_LIBRARIES here?
         set(CUDA_LIBRARIES ${cudart_lib})
-        set(CUDA_EXTRA_LIBS ${CUDA_EXTRA_LIBS} dl rt)
+        if (NOT WIN32)
+            set(CUDA_EXTRA_LIBS ${CUDA_EXTRA_LIBS} dl rt)
+        endif ()
         set (CMAKE_FIND_LIBRARY_SUFFIXES ${save_lib_path})
         unset (save_lib_path)
     endif()
@@ -195,6 +197,11 @@ else ()
     function (osl_optix_target TARGET)
     endfunction()
 endif ()
+
+
+# HART/ROCm setup (independent of CUDA/OptiX).
+include (hart_macros)
+osl_find_hart ()
 
 
 ###########################################################################

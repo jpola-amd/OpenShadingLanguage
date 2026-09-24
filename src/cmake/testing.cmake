@@ -19,6 +19,14 @@ add_custom_target ( CopyFiles ALL DEPENDS "${CMAKE_BINARY_DIR}/testsuite/runtest
 
 set (OSL_TEST_BIG_TIMEOUT 800 CACHE STRING "Timeout for tests that take a long time")
 
+if (BUILD_TESTING)
+    add_test (NAME cmake-hart-discovery
+        COMMAND "${CMAKE_COMMAND}"
+            "-DOSL_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            "-DTEST_BINARY_DIR=${CMAKE_BINARY_DIR}/testsuite/cmake-hart"
+            -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/run.cmake")
+endif ()
+
 
 # Build a single "PYTHONPATH=..." entry suitable for a CTest ENVIRONMENT
 # property, putting prefix_dir first.
