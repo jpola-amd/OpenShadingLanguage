@@ -1640,8 +1640,10 @@ LLVM_Util::make_jit_execengine(std::string* err, TargetISA requestedISA,
         OSL_ASSERT(m_llvm_module != nullptr);
         OSL_DEV_ONLY(std::cout << "debugging symbols" << std::endl);
 
-        module()->addModuleFlag(llvm::Module::Error, "Debug Info Version",
-                                llvm::DEBUG_METADATA_VERSION);
+        // Clang may already emit this flag in the shadeops bitcode.
+        if (!module()->getModuleFlag("Debug Info Version"))
+            module()->addModuleFlag(llvm::Module::Error, "Debug Info Version",
+                                    llvm::DEBUG_METADATA_VERSION);
 
         OSL_MAYBE_UNUSED unsigned int modulesDebugInfoVersion = 0;
         if (auto* Val = llvm::mdconst::dyn_extract_or_null<llvm::ConstantInt>(

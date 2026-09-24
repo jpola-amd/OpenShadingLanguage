@@ -25,6 +25,10 @@ if (BUILD_TESTING)
             "-DOSL_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
             "-DTEST_BINARY_DIR=${CMAKE_BINARY_DIR}/testsuite/cmake-hart"
             -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/run.cmake")
+    if (OSL_USE_OPTIX AND USE_LLVM_BITCODE)
+        add_subdirectory ("${PROJECT_SOURCE_DIR}/testsuite/cuda-bitcode-link"
+                          "${CMAKE_BINARY_DIR}/testsuite/cuda-bitcode-link")
+    endif ()
 endif ()
 
 
