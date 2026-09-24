@@ -1,0 +1,30 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#include "hart_bitcode.h"
+
+@hart_bitcode_declarations@
+
+OSL_NAMESPACE_BEGIN
+namespace pvt {
+
+cspan<unsigned char>
+hart_shadeops_bitcode(string_view arch, ErrorHandler& errhandler)
+{
+    struct Entry {
+        string_view arch;
+        cspan<unsigned char> bitcode;
+    };
+    static const Entry entries[] = {
+@hart_bitcode_entries@    };
+    for (const auto& entry : entries) {
+        if (entry.arch == arch)
+            return entry.bitcode;
+    }
+    errhandler.errorfmt("No embedded HART shadeops for architecture '{}'", arch);
+    return {};
+}
+
+}  // namespace pvt
+OSL_NAMESPACE_END

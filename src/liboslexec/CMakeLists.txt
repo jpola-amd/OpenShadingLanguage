@@ -253,6 +253,26 @@ if (USE_LLVM_BITCODE)
         HART_SHADEOPS_COMPILE ("shadeops_hart" shadeops_hart_bc
             "${liboslexec_shadeops_srcs}" "${exec_headers}" "${include_dirs}")
         add_custom_target (osl_hart_bitcode ALL DEPENDS ${shadeops_hart_bc})
+
+        set (hart_bitcode_declarations "")
+        set (hart_bitcode_entries "")
+        foreach (bc IN LISTS shadeops_hart_bc)
+            get_filename_component (arch_dir "${bc}" DIRECTORY)
+            get_filename_component (arch "${arch_dir}" NAME)
+            set (symbol "shadeops_hart_${arch}_llvm_compiled_ops")
+            MAKE_EMBEDDED_CPP ("${symbol}" "${bc}.cpp" "${bc}")
+            list (APPEND lib_src "${bc}.cpp")
+            string (APPEND hart_bitcode_declarations
+                "extern unsigned char ${symbol}_block[];\n"
+                "extern int ${symbol}_size;\n")
+            string (APPEND hart_bitcode_entries
+                "        { \"${arch}\",\n"
+                "          { ${symbol}_block,\n"
+                "            static_cast<size_t>(${symbol}_size) } },\n")
+        endforeach ()
+        configure_file (hart_bitcode.cpp.in hart_bitcode.cpp @ONLY)
+        list (APPEND lib_src "${CMAKE_CURRENT_BINARY_DIR}/hart_bitcode.cpp")
+
         if (BUILD_TESTING)
             add_test (NAME hart-shadeops-bitcode
                 COMMAND "${CMAKE_COMMAND}"
@@ -561,6 +581,7 @@ target_include_directories (${local_lib}
         ${CMAKE_INSTALL_FULL_INCLUDEDIR}
         ${IMATH_INCLUDES}
     PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_SOURCE_DIR}/src/liboslcomp"
         ${ROBINMAP_INCLUDES}
     )
@@ -684,4 +705,20 @@ if (OSL_BUILD_TESTS AND BUILD_TESTING)
     target_include_directories (llvmutil_test  BEFORE PRIVATE ${OpenImageIO_INCLUDES})
     set_target_properties (llvmutil_test PROPERTIES FOLDER "Unit Tests")
     add_test (unit_llvmutil ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/llvmutil_test)
+
+    if (OSL_USE_HART AND USE_LLVM_BITCODE)
+        add_executable (hart_bitcode_test hart_bitcode_test.cpp)
+        target_link_libraries (hart_bitcode_test PRIVATE oslexec)
+        set_target_properties (hart_bitcode_test PROPERTIES FOLDER "Unit Tests")
+        foreach (arch gfx1201 gfx1100 gfx1151)
+            if (arch IN_LIST HART_TARGET_ARCHITECTURES)
+                add_test (NAME hart-embedded-bitcode-${arch}
+                    COMMAND hart_bitcode_test "${arch}"
+                        "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/shadeops_hart.bc")
+            else ()
+                add_test (NAME hart-embedded-bitcode-unavailable-${arch}
+                    COMMAND hart_bitcode_test "${arch}")
+            endif ()
+        endforeach ()
+    endif ()
 endif ()
