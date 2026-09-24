@@ -1129,6 +1129,7 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_max_local_mem_KB(2048)
     , m_compile_report(0)
     , m_use_optix(renderer->supports("OptiX"))
+    , m_use_hart(renderer->supports("HART"))
     , m_use_optix_cache(m_use_optix && renderer->supports("optix_ptx_cache"))
     , m_max_optix_groupdata_alloc(0)
     , m_buffer_printf(true)
@@ -1620,6 +1621,17 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     }
 
     lock_guard guard(m_mutex);  // Thread safety
+    if (name == "hart_arch" && type == TypeDesc::STRING) {
+        const std::string arch = *(const char* const*)val;
+        if (!use_hart() || arch.empty()
+            || (!m_hart_arch.empty() && arch != m_hart_arch)) {
+            errorfmt("hart_arch requires a HART renderer and a nonempty "
+                     "architecture that cannot change after selection");
+            return false;
+        }
+        m_hart_arch = arch;
+        return true;
+    }
     ATTR_SET("statistics:level", int, m_statslevel);
     ATTR_SET("stat:rank_groups", int, m_stat_rank_groups);
     ATTR_SET("debug", int, m_debug);
@@ -1908,6 +1920,7 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
     ATTR_DECODE("llvm_jit_fma", int, m_llvm_jit_fma);
     ATTR_DECODE("llvm_jit_aggressive", int, m_llvm_jit_aggressive);
     ATTR_DECODE_STRING("llvm_jit_target", m_llvm_jit_target);
+    ATTR_DECODE_STRING("hart_arch", m_hart_arch);
     ATTR_DECODE("vector_width", int, m_vector_width);
     ATTR_DECODE("opt_passes", int, m_opt_passes);
     ATTR_DECODE("optimize_nondebug", int, m_optimize_nondebug);
@@ -2267,6 +2280,20 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         bool exists        = !group->m_llvm_ptx_compiled_version.empty();
         *(std::string*)val = exists ? group->m_llvm_ptx_compiled_version : "";
         return true;
+    }
+    if (name == "hart_bitcode" && type == TypeDesc::PTR) {
+        *(const void**)val = group->m_hart_bitcode.empty()
+                                 ? nullptr
+                                 : group->m_hart_bitcode.data();
+        return !group->m_hart_bitcode.empty();
+    }
+    if (name == "hart_bitcode_size" && type == TypeUInt64) {
+        *(uint64_t*)val = group->m_hart_bitcode.size();
+        return !group->m_hart_bitcode.empty();
+    }
+    if (name == "llvm_groupdata_alignment" && type == TypeInt) {
+        *(int*)val = group->m_llvm_groupdata_alignment;
+        return group->jitted();
     }
     if (name == "interactive_params" && type.basetype == TypeDesc::PTR) {
         *(void**)val = group->m_interactive_arena.get();
@@ -3899,6 +3926,42 @@ ShadingSystemImpl::group_post_jit_cleanup(ShaderGroup& group)
 
 
 
+bool
+ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
+{
+#if !OSL_USE_HART || defined(OSL_LLVM_NO_BITCODE)
+    errorfmt("HART shader generation requires a build with HART bitcode");
+    return false;
+#else
+    if (use_optix() || hart_arch().empty()) {
+        errorfmt("HART requires an exclusive HART renderer and hart_arch "
+                 "selected before shader compilation");
+        return false;
+    }
+    if (group.nlayers() != 1 || group.num_entry_layers() != 0) {
+        errorfmt("HART currently supports one shader layer with its default "
+                 "entry point");
+        return false;
+    }
+    if (debug_nan() || debug_uninit() || llvm_debug_layers() || llvm_debug_ops()
+        || countlayerexecs() || m_profile || llvm_debugging_symbols()
+        || llvm_profiling_events() || debug_output_cpp()
+        || !m_rs_bitcode.empty() || !m_lib_bitcode.empty()
+        || !m_only_groupname.empty()) {
+        errorfmt("HART does not support CPU instrumentation, C++ execution, "
+                 "renderer bitcode, or selective group compilation");
+        return false;
+    }
+    if (group.m_interactive_arena_size) {
+        errorfmt("HART does not yet support interactive shader parameters");
+        return false;
+    }
+    return group[0]->validate_hart();
+#endif
+}
+
+
+
 void
 ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                                   bool do_jit)
@@ -3925,6 +3988,9 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         m_stat_opt_locking_time += t;
         return;
     }
+
+    if (use_hart() && !validate_hart_group(group))
+        return;
 
     if (!m_only_groupname.empty() && m_only_groupname != group.name()) {
         // For debugging purposes, we are requested to compile only one
@@ -4066,6 +4132,13 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                 lljitter.set_layout_only(true);
             }
             lljitter.run();
+            if (use_hart() && group.m_hart_bitcode.empty()) {
+                if (ctx_allocated) {
+                    release_context(ctx);
+                    destroy_thread_info(thread_info);
+                }
+                return;
+            }
 
             // NOTE: it is now possible to optimize and not JIT
             // which would leave the cleanup to happen

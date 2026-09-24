@@ -21,6 +21,13 @@
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
 
+#if OSL_USE_HART
+#    include "hart_bitcode.h"
+#    include <llvm/Bitcode/BitcodeWriter.h>
+#    include <llvm/IR/Verifier.h>
+#    include <llvm/Support/Error.h>
+#endif
+
 #if OSL_USE_OPTIX
 #    include <llvm/Linker/Linker.h>
 #endif
@@ -200,8 +207,10 @@ std::string
 layer_function_name(const ShaderGroup& group, const ShaderInstance& inst,
                     bool api)
 {
-    bool use_optix     = inst.shadingsys().use_optix();
-    const char* prefix = use_optix && api ? "__direct_callable__" : "";
+    const auto& ss     = inst.shadingsys();
+    const char* prefix = (ss.use_hart() || (ss.use_optix() && api))
+                             ? "__direct_callable__"
+                             : "";
     return fmtformat("{}osl_layer_group_{}_name_{}", prefix, group.name(),
                      inst.layername());
 }
@@ -210,8 +219,10 @@ std::string
 init_function_name(const ShadingSystemImpl& shadingsys,
                    const ShaderGroup& group, bool api)
 {
-    bool use_optix     = shadingsys.use_optix();
-    const char* prefix = use_optix && api ? "__direct_callable__" : "";
+    const char* prefix = (shadingsys.use_hart()
+                          || (shadingsys.use_optix() && api))
+                             ? "__direct_callable__"
+                             : "";
 
     return fmtformat("{}osl_init_group_{}", prefix, group.name());
 }
@@ -409,6 +420,22 @@ BackendLLVM::llvm_type_groupdata()
 
     m_llvm_type_groupdata = ll.type_struct(fields, "Groupdata");
     OSL_ASSERT(fields.size() == m_groupdata_field_names.size());
+    if (use_hart()) {
+        const auto& layout    = ll.module()->getDataLayout();
+        const auto* structure = layout.getStructLayout(
+            llvm::cast<llvm::StructType>(m_llvm_type_groupdata));
+        group().llvm_groupdata_size(structure->getSizeInBytes());
+        group().m_llvm_groupdata_alignment = int(
+            layout.getABITypeAlign(m_llvm_type_groupdata).value());
+        for (int layer = 0; layer < group().nlayers(); ++layer) {
+            for (auto& sym : group()[layer]->symbols()) {
+                const auto param = m_param_order_map.find(&sym);
+                if (param != m_param_order_map.end())
+                    sym.dataoffset(
+                        int(structure->getElementOffset(param->second)));
+            }
+        }
+    }
 
     return m_llvm_type_groupdata;
 }
@@ -904,7 +931,7 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
                     // *userdata_initialized = status;
                     ll.op_store(ll.op_int_to_int8(status),
                                 userdata_initializedPtr);
-                    if (!use_optix() && shadingsys().m_statslevel != 0) {
+                    if (!use_gpu() && shadingsys().m_statslevel != 0) {
                         // sg->context->incr_get_userdata_calls();
                         ll.call_function("osl_incr_get_userdata_calls",
                                          sg_void_ptr());
@@ -1884,8 +1911,7 @@ BackendLLVM::initialize_llvm_group()
     // Set up optimization passes. Don't target the host if we're building
     // for OptiX.
     ll.setup_optimization_passes(shadingsys().llvm_optimize(),
-                                 shadingsys().llvm_target_host()
-                                     && !use_optix());
+                                 shadingsys().llvm_target_host() && !use_gpu());
 
     // Clear the shaderglobals and groupdata types -- they will be
     // created on demand.
@@ -1899,7 +1925,7 @@ BackendLLVM::initialize_llvm_group()
     initialize_llvm_helper_function_map();
 
     // Skipping this in the non-JIT OptiX case suppresses an LLVM warning
-    if (!use_optix())
+    if (!use_gpu())
         ll.InstallLazyFunctionCreator(helper_function_lookup);
 
     for (HelperFuncMap::iterator i = llvm_helper_function_map.begin(),
@@ -1934,7 +1960,7 @@ BackendLLVM::initialize_llvm_group()
                                              varargs);
 
         // Skipping this in the non-JIT OptiX case suppresses an LLVM warning
-        if (!use_optix())
+        if (!use_gpu())
             ll.add_function_mapping(f, (void*)i->second.function);
     }
 
@@ -2082,7 +2108,7 @@ empty_group_func(void*, void*)
 void
 BackendLLVM::run()
 {
-    if (group().does_nothing()) {
+    if (group().does_nothing() && !use_hart()) {
         group().llvm_compiled_init((RunLLVMGroupFunc)empty_group_func);
         group().llvm_compiled_version((RunLLVMGroupFunc)empty_group_func);
         return;
@@ -2092,6 +2118,7 @@ BackendLLVM::run()
     // of ShadingSystemImpl::optimize_group.
     OIIO::Timer timer;
     std::string err;
+    std::unique_ptr<llvm::Module> hart_module;
 
     {
 #ifdef OSL_LLVM_NO_BITCODE
@@ -2124,7 +2151,35 @@ BackendLLVM::run()
         }
 #    endif
 #else
-        if (!use_optix()) {
+        if (use_hart()) {
+#    if OSL_USE_HART
+            if (!group().m_userdata_names.empty()) {
+                shadingcontext()->errorfmt(
+                    "HART does not yet support interpolated userdata");
+                return;
+            }
+            const auto bitcode
+                = hart_shadeops_bitcode(shadingsys().hart_arch(),
+                                        shadingsys().errhandler());
+            if (bitcode.empty())
+                return;
+            hart_module.reset(ll.module_from_bitcode(
+                reinterpret_cast<const char*>(bitcode.data()), bitcode.size(),
+                "hart_shader_group", &err));
+            if (!hart_module) {
+                shadingcontext()->errorfmt("Cannot read HART shadeops: {}",
+                                           err);
+                return;
+            }
+            if (auto error = hart_module->materializeAll()) {
+                shadingcontext()->errorfmt(
+                    "Cannot materialize HART shadeops: {}",
+                    llvm::toString(std::move(error)));
+                return;
+            }
+            ll.module(hart_module.get());
+#    endif
+        } else if (!use_optix()) {
             if (use_rs_bitcode()) {
                 ll.module(ll.module_from_bitcode(
                     (char*)osl_llvm_compiled_rs_dependent_ops_block,
@@ -2277,7 +2332,9 @@ BackendLLVM::run()
         // Create the ExecutionEngine. We don't create an ExecutionEngine in the
         // OptiX case, because we are using the NVPTX backend and not MCJIT. However,
         // it's still useful to set the target ISA to facilitate PTX-specific codegen.
-        if (use_optix()) {
+        if (use_hart()) {
+            // HART owns final AMDGPU code generation; no host ExecutionEngine.
+        } else if (use_optix()) {
             ll.set_target_isa(TargetISA::NVPTX);
         } else if (!ll.make_jit_execengine(
                        &err,
@@ -2320,6 +2377,25 @@ BackendLLVM::run()
 
     initialize_llvm_group();
 
+#if OSL_USE_HART
+    if (use_hart()) {
+        std::vector<unsigned int> offsets;
+        build_offsets_of_ShaderGlobals(offsets);
+        auto* sg_type      = llvm::cast<llvm::StructType>(llvm_type_sg());
+        const auto* layout = ll.module()->getDataLayout().getStructLayout(
+            sg_type);
+        bool matches = layout->getSizeInBytes() == sizeof(ShaderGlobals)
+                       && sg_type->getNumElements() == offsets.size();
+        for (size_t i = 0; matches && i < offsets.size(); ++i)
+            matches = layout->getElementOffset(i) == offsets[i];
+        if (!matches) {
+            shadingcontext()->errorfmt("HART ShaderGlobals layout mismatch");
+            ll.module(nullptr);
+            return;
+        }
+    }
+#endif
+
     if (m_layout_only) {
         // BackendCpp (debug_output_cpp==3) path: force the groupdata layout
         // so sym.dataoffset() and group().llvm_groupdata_size() are
@@ -2344,6 +2420,32 @@ BackendLLVM::run()
             funcs[layer]         = build_llvm_instance(is_single_entry);
         }
     }
+
+#if OSL_USE_HART
+    if (use_hart()) {
+        const llvm::Function* seed = ll.module()->getFunction("osl_sin_ff");
+        if (!seed || !seed->getFnAttribute("target-cpu").isStringAttribute()
+            || seed->getFnAttribute("target-cpu").getValueAsString()
+                   != shadingsys().hart_arch()) {
+            shadingcontext()->errorfmt("HART shadeops are missing the selected "
+                                       "architecture's function attributes");
+            ll.module(nullptr);
+            return;
+        }
+        for (auto* function : { init_func, funcs.back() }) {
+            function->setLinkage(llvm::GlobalValue::ExternalLinkage);
+            for (const auto* name :
+                 { "target-cpu", "target-features", "denormal-fp-math",
+                   "denormal-fp-math-f32" }) {
+                const auto attr = seed->getFnAttribute(name);
+                if (attr.isStringAttribute())
+                    function->addFnAttr(attr);
+            }
+            function->removeFnAttr("prefer-vector-width");
+            function->removeFnAttr("min-legal-vector-width");
+        }
+    }
+#endif
 
     std::vector<llvm::Function*> optix_externals;
     if (use_optix())
@@ -2510,7 +2612,7 @@ BackendLLVM::run()
         }
     } else
 #endif
-    {
+        if (!use_hart()) {
         // Force the JIT to happen now and retrieve the JITed function pointers
         // for the initialization and all public entry points.
         group().llvm_compiled_init(
@@ -2527,6 +2629,47 @@ BackendLLVM::run()
             group().llvm_compiled_version(
                 group().llvm_compiled_layer(nlayers - 1));
     }
+
+#if OSL_USE_HART
+    if (use_hart()) {
+        std::string diagnostics;
+        llvm::raw_string_ostream errors(diagnostics);
+        if (llvm::verifyModule(*ll.module(), &errors)) {
+            errors.flush();
+            shadingcontext()->errorfmt("Invalid generated HART bitcode: {}",
+                                       diagnostics);
+            ll.module(nullptr);
+            return;
+        }
+        for (const auto& name :
+             { init_function_name(shadingsys(), group(), true),
+               layer_function_name(group(), *group()[0], true) }) {
+            const auto* function = ll.module()->getFunction(name);
+            bool valid           = function && !function->isDeclaration()
+                                   && function->hasExternalLinkage()
+                                   && !function->isVarArg()
+                                   && function->getReturnType()->isVoidTy()
+                                   && function->arg_size() == 6;
+            if (valid)
+                for (const auto& arg : function->args())
+                    valid &= arg.getArgNo() == 4
+                                 ? arg.getType()->isIntegerTy(32)
+                                 : (arg.getType()->isPointerTy()
+                                    && arg.getType()->getPointerAddressSpace()
+                                           == 0);
+            if (!valid) {
+                shadingcontext()->errorfmt("HART callable '{}' was lost or "
+                                           "changed during optimization",
+                                           name);
+                ll.module(nullptr);
+                return;
+            }
+        }
+        llvm::raw_string_ostream output(group().m_hart_bitcode);
+        llvm::WriteBitcodeToFile(*ll.module(), output);
+        output.flush();
+    }
+#endif
 
     if (shadingsys().use_optix_cache()) {
         std::string cache_key = group().optix_cache_key();

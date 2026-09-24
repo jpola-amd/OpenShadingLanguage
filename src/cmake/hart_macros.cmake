@@ -152,8 +152,7 @@ macro (osl_find_hart)
         message (STATUS "OSL LLVM ${LLVM_VERSION}: ${LLVM_DIRECTORY}")
         message (STATUS "ROCm clang ${ROCM_CLANG_VERSION}: ${ROCM_CLANG_EXECUTABLE}")
         message (STATUS
-            "HART build infrastructure enabled; runtime shader execution "
-            "is not implemented yet.")
+            "HART external-module and experimental OSL shader execution enabled.")
         message (WARNING
             "OSL LLVM and ROCm clang are separate toolchains. Discovery does not "
             "establish LLVM bitcode or C++ ABI compatibility. Do not link ROCm "

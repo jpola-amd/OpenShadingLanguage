@@ -3,6 +3,7 @@
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 import argparse
+from contextlib import contextmanager
 import math
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import re
 import shutil
 import struct
 import subprocess
-import tempfile
+import uuid
 
 
 parser = argparse.ArgumentParser()
@@ -83,7 +84,17 @@ def read_image(path):
         return struct.unpack(("<" if scale < 0 else ">") + "12f", stream.read())
 
 
-with tempfile.TemporaryDirectory(prefix="osl-hart-grid-") as directory:
+@contextmanager
+def fixture_directory():
+    directory = Path.cwd() / ("hart-grid-check-" + uuid.uuid4().hex)
+    directory.mkdir()
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory)
+
+
+with fixture_directory() as directory:
     root = Path(directory)
     missing = str(root / "missing.bc")
     empty = root / "empty.bc"

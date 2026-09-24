@@ -531,6 +531,8 @@ public:
 
     /// Return whether or not we are compiling for an OptiX-based renderer.
     bool use_optix() { return m_use_optix; }
+    bool use_hart() const { return shadingsys().use_hart(); }
+    bool use_gpu() const { return shadingsys().use_gpu(); }
     bool use_optix_cache() { return shadingsys().use_optix_cache(); }
 
     /// Return if we should compile against free function versions of Renderer Service.

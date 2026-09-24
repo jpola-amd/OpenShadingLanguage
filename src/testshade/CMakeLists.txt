@@ -77,11 +77,44 @@ list(APPEND include_dirs ${CMAKE_BINARY_DIR}/include)
 list(APPEND include_dirs ${IMATH_INCLUDES})
 list(APPEND include_dirs ${OpenImageIO_INCLUDES})
 
+if (OSL_USE_HART)
+    set (hart_generated_declarations "")
+    set (hart_generated_entries "")
+    set (hart_generated_grids)
+    if (USE_LLVM_BITCODE)
+        get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
+        list (APPEND hart_include_dirs ${include_dirs})
+        list (REMOVE_DUPLICATES hart_include_dirs)
+        set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartgeneratedparams.h")
+        set (hart_grid_architectures ${HART_TARGET_ARCHITECTURES})
+        list (REMOVE_DUPLICATES hart_grid_architectures)
+        foreach (arch IN LISTS hart_grid_architectures)
+            MAKE_HART_BITCODE ("hart/generated_grid.hip" "_hart_${arch}" "${arch}"
+                              generated_grid_bc "" "${hart_include_dirs}")
+            set (symbol "testshade_hart_raygen_${arch}")
+            set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/generated_grid.bc.cpp")
+            MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${generated_grid_bc}")
+            list (APPEND testshade_srcs "${embedded}")
+            list (APPEND hart_generated_grids "${generated_grid_bc}")
+            string (APPEND hart_generated_declarations
+                "extern unsigned char ${symbol}_block[];\nextern int ${symbol}_size;\n")
+            string (APPEND hart_generated_entries
+                "    { \"${arch}\", ${symbol}_block, &${symbol}_size },\n")
+        endforeach ()
+    endif ()
+    file (WRITE "${CMAKE_CURRENT_BINARY_DIR}/hart_generated_bitcode.h"
+        "${hart_generated_declarations}"
+        "struct HartEmbeddedRaygen { const char* arch; const unsigned char* data; const int* size; };\n"
+        "static const HartEmbeddedRaygen hart_generated_raygens[] = {\n"
+        "${hart_generated_entries}    { nullptr, nullptr, nullptr }\n};\n")
+endif ()
+
 EMBED_LLVM_BITCODE_IN_CPP ( "${rs_srcs}" "_host" "testshade_llvm_compiled_rs" testshade_srcs "-DOSL_HOST_RS_BITCODE=1" "${include_dirs}")
 
 add_executable ( testshade ${testshade_srcs} testshademain.cpp )
 
 target_include_directories (testshade BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+target_include_directories (testshade PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_link_libraries (testshade
                        PRIVATE
@@ -167,6 +200,7 @@ if (NOT CODECOV)
             ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
     endif ()
     target_include_directories (libtestshade BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+    target_include_directories (libtestshade PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     set_target_properties (libtestshade PROPERTIES PREFIX "")
 
     install_targets ( libtestshade )
@@ -221,6 +255,7 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
             COMMAND "${CMAKE_COMMAND}"
                 "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}"
                 "-DBITCODE_FILES=${hart_grid_bitcode};${hart_callable_grids}"
+                "-DGENERATED_GRID_FILES=${hart_generated_grids}"
                 "-DCALLABLE_FILES=${hart_callable_bitcode}"
                 -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid-bitcode.cmake")
         if ("$ENV{TESTSUITE_HART}")
@@ -235,6 +270,11 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     --callable-module "${hart_callable_test_module}"
                     --llvm-opt "${LLVM_OPT_TOOL}")
             set_tests_properties (hart-grid-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-generated-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-generated-runtime PROPERTIES LABELS "hart;gpu")
         endif ()
     endif ()
 endif ()
@@ -244,4 +284,8 @@ if (BUILD_TESTING AND OSL_USE_HART)
         COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"
             "$<TARGET_FILE:testshade>" --llvm-opt "${LLVM_OPT_TOOL}")
+    add_test (NAME hart-generated-cli
+        COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+            "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
 endif ()

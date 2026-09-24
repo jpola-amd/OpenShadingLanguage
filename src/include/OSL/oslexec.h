@@ -207,6 +207,9 @@ public:
     /// 2. Attributes that should be set by applications/renderers that
     /// incorporate OSL:
     ///    string commonspace     Name of "common" coord system ("world")
+    ///    string hart_arch       AMDGPU architecture for a renderer supporting
+    ///                              "HART". Set before group optimization.
+    ///                              Cannot change after selection. ("")
     ///    string[] raytypes      Array of ray type names
     ///    string[] renderer_outputs
     ///                           Array of names of renderer outputs (AOVs)
@@ -555,6 +558,14 @@ public:
     ///   string pickle              Retrieves a serialized representation
     ///                                 of the shader group declaration.
     ///   int llvm_groupdata_size    Size of the GroupData struct.
+    ///   int llvm_groupdata_alignment
+    ///                             Required HART GroupData alignment in bytes.
+    ///                             Available after successful compilation.
+    ///   ptr hart_bitcode          Borrowed const void* to compiled HART LLVM
+    ///                             bitcode; valid for the group's lifetime.
+    ///   uint64 hart_bitcode_size  Byte count of hart_bitcode, including zeros.
+    ///                             Both HART queries return false before
+    ///                             successful compilation. No CPU fallback.
     ///   ptr interactive_params     Pointer to the memory block containing
     ///                                 host-side interactive parameter values
     ///                                 for this shader group.

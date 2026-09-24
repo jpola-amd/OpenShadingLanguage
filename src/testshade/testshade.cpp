@@ -36,9 +36,7 @@
 #if OSL_USE_OPTIX
 #    include "optixgridrender.h"
 #endif
-#if OSL_TESTSHADE_HART
-#    include "hartgridrender.h"
-#endif
+#include "hartgridrender.h"
 
 #include "render_state.h"
 #include "simplerend.h"
@@ -94,6 +92,7 @@ static bool use_optix            = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_OPTIX"));
 static bool use_hart                    = false;
 static bool hart_options                = false;
+static HartOptions hart;
 static bool optix_no_inline             = false;
 static bool optix_no_inline_layer_funcs = false;
 static bool optix_no_merge_layer_funcs  = false;
@@ -201,11 +200,10 @@ set_shadingsys_options()
     // not actually write to those values.
     OSL_DEV_ONLY(shadingsys->attribute("clearmemory", 1));
 
-    // Always generate llvm debugging info
-    shadingsys->attribute("llvm_debugging_symbols", 1);
+    // Host debugging/profiling instrumentation is not supported by HART.
+    shadingsys->attribute("llvm_debugging_symbols", int(!use_hart));
 
-    // Always emit llvm Intel profiling events
-    shadingsys->attribute("llvm_profiling_events", 1);
+    shadingsys->attribute("llvm_profiling_events", int(!use_hart));
 
     OSL_DEV_ONLY(llvm_debug = true);
     shadingsys->attribute("llvm_debug", (llvm_debug ? 2 : 0));
@@ -712,6 +710,7 @@ getargs(int argc, const char* argv[])
     shader_setup_args.push_back("testshade");  // seed with 'program'
     use_hart     = false;
     hart_options = false;
+    hart         = HartOptions {};
 
     // clang-format off
     OIIO::ArgParse ap;
@@ -727,22 +726,22 @@ getargs(int argc, const char* argv[])
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
     ap.arg("--hart", &use_hart)
-      .help("Run external AMDGPU bitcode through HART (no OSL compilation yet)");
-    ap.arg("--hart-module %s:FILE")
+      .help("Run a simple OSL shader or external AMDGPU bitcode through HART");
+    ap.arg("--hart-module %s:FILE", &hart.module)
       .help("HART grid module: raw LLVM bitcode")
-      .action([&](cspan<const char*>) { hart_options = true; });
-    ap.arg("--hart-callable-module %s:FILE")
+      .action([&](cspan<const char*> args) { hart.module = args[1]; hart.has_module = hart_options = true; });
+    ap.arg("--hart-callable-module %s:FILE", &hart.callable_module)
       .help("Optional HART bitcode with testshade init/entry callables")
-      .action([&](cspan<const char*>) { hart_options = true; });
-    ap.arg("--hart-entry %s:NAME")
+      .action([&](cspan<const char*> args) { hart.callable_module = args[1]; hart.has_callables = hart_options = true; });
+    ap.arg("--hart-entry %s:NAME", &hart.entry)
       .help("HART raygen entry (default: __raygen__testshade)")
-      .action([&](cspan<const char*>) { hart_options = true; });
-    ap.arg("--hart-device %d:INDEX")
+      .action([&](cspan<const char*> args) { hart.entry = args[1]; hart.has_entry = hart_options = true; });
+    ap.arg("--hart-device %d:INDEX", &hart.device)
       .help("HIP device ordinal (default: 0)")
-      .action([&](cspan<const char*>) { hart_options = true; });
-    ap.arg("--hart-no-cache")
+      .action([&](cspan<const char*> args) { hart.device = OIIO::Strutil::stoi(args[1]); hart_options = true; });
+    ap.arg("--hart-no-cache", &hart.no_cache)
       .help("Disable the HART pipeline cache for this run")
-      .action([&](cspan<const char*>) { hart_options = true; });
+      .action([&](cspan<const char*>) { hart.no_cache = hart_options = true; });
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
     ap.arg("--debug2", &debug2)
@@ -1972,14 +1971,18 @@ test_shade(int argc, const char* argv[])
             return EXIT_FAILURE;
         }
 #if OSL_TESTSHADE_HART
-        return testshade_hart(argc, argv);
+        if (hart.has_module || shader_setup_args.size() == 1)
+            return testshade_hart(argc, argv);
+        if (!testshade_hart_validate_generated(argc, argv, hart, xres, yres,
+                                               iters))
+            return EXIT_FAILURE;
 #else
         ErrorHandler::default_handler().errorfmt(
             "HART support is not enabled in this build");
         return EXIT_FAILURE;
 #endif
     }
-    if (hart_options) {
+    if (hart_options && !use_hart) {
         ErrorHandler::default_handler().errorfmt(
             "HART-specific options require --hart");
         return EXIT_FAILURE;
@@ -1994,8 +1997,16 @@ test_shade(int argc, const char* argv[])
     }
 
     std::unique_ptr<SimpleRenderer> rend;
+    std::string hart_arch;
+#if OSL_TESTSHADE_HART
+    if (use_hart) {
+        rend = testshade_hart_renderer(hart.device, hart_arch);
+        if (!rend)
+            return EXIT_FAILURE;
+    } else
+#endif
 #if OSL_USE_OPTIX
-    if (use_optix)
+        if (use_optix)
         rend.reset(new OptixGridRenderer);
     else
 #endif
@@ -2031,6 +2042,15 @@ test_shade(int argc, const char* argv[])
     // make its own TS), and an error handler.
     shadingsys = new ShadingSystem(rend.get(), texturesys, &rend->errhandler());
     rend->init_shadingsys(shadingsys);
+#if OSL_TESTSHADE_HART
+    if (use_hart && !shadingsys->attribute("hart_arch", hart_arch)) {
+        rend->errhandler().errorfmt("Cannot select HART architecture '{}'",
+                                    hart_arch);
+        delete shadingsys;
+        shadingsys = nullptr;
+        return EXIT_FAILURE;
+    }
+#endif
 
     // Register the layout of all closures known to this renderer
     // Any closure used by the shader which is not registered, or
@@ -2122,6 +2142,21 @@ test_shade(int argc, const char* argv[])
 
     // End the group
     shadingsys->ShaderGroupEnd(*shadergroup);
+
+#if OSL_TESTSHADE_HART
+    if (use_hart) {
+        const bool ok = testshade_hart_generated(
+            *rend, *shadingsys, *shadergroup, hart, hart_arch, xres, yres,
+            iters, warmup, verbose || debug1,
+            shadingsys->raytype_bit(ustring(raytype_name)), print_outputs,
+            outputfiles.empty() ? string_view("null") : outputfiles[0],
+            dataformatname);
+        shadergroup.reset();
+        delete shadingsys;
+        shadingsys = nullptr;
+        return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+#endif
 
     if (verbose || do_oslquery) {
         std::string pickle;

@@ -250,8 +250,11 @@ if (USE_LLVM_BITCODE)
 
     endif ()
     if (OSL_USE_HART)
+        get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
+        list (APPEND hart_include_dirs ${include_dirs})
         HART_SHADEOPS_COMPILE ("shadeops_hart" shadeops_hart_bc
-            "${liboslexec_shadeops_srcs}" "${exec_headers}" "${include_dirs}")
+            "${liboslexec_shadeops_srcs};hart_support.hip" "${exec_headers}"
+            "${hart_include_dirs}")
         add_custom_target (osl_hart_bitcode ALL DEPENDS ${shadeops_hart_bc})
 
         set (hart_bitcode_declarations "")
@@ -623,6 +626,7 @@ list(JOIN _cpp_inc_flags " " _cpp_inc_flags_str)
 target_compile_definitions (${local_lib}
     PRIVATE
         OSL_EXPORTS
+        OSL_USE_HART=$<BOOL:${OSL_USE_HART}>
         CUDA_TARGET_ARCH="${CUDA_TARGET_ARCH}"
         OSL_CUDA_VERSION="${CUDA_VERSION}"
         OSL_OPTIX_VERSION="${OPTIX_VERSION}"
@@ -707,6 +711,16 @@ if (OSL_BUILD_TESTS AND BUILD_TESTING)
     add_test (unit_llvmutil ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/llvmutil_test)
 
     if (OSL_USE_HART AND USE_LLVM_BITCODE)
+        add_executable (hart_codegen_test hart_codegen_test.cpp)
+        target_link_libraries (hart_codegen_test PRIVATE oslexec oslcomp
+            ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+        target_include_directories (hart_codegen_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+        set_target_properties (hart_codegen_test PROPERTIES FOLDER "Unit Tests")
+        foreach (arch IN LISTS HART_TARGET_ARCHITECTURES)
+            add_test (NAME hart-codegen-${arch}
+                COMMAND hart_codegen_test "${arch}"
+                    "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")
+        endforeach ()
         add_executable (hart_bitcode_test hart_bitcode_test.cpp)
         target_link_libraries (hart_bitcode_test PRIVATE oslexec)
         set_target_properties (hart_bitcode_test PROPERTIES FOLDER "Unit Tests")

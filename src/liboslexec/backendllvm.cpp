@@ -28,7 +28,7 @@ BackendLLVM::BackendLLVM(ShadingSystemImpl& shadingsys, ShaderGroup& group,
     , m_stat_llvm_jit_time(0)
 {
     m_use_optix      = shadingsys.use_optix();
-    m_use_rs_bitcode = !shadingsys.m_rs_bitcode.empty();
+    m_use_rs_bitcode = !use_hart() && !shadingsys.m_rs_bitcode.empty();
     m_name_llvm_syms = shadingsys.m_llvm_output_bitcode;
 
     // Select the appropriate ustring representation

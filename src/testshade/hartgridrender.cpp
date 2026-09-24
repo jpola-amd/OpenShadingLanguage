@@ -10,6 +10,7 @@
 #define HART_OPTIX_COMPAT_DEFINE_FUNCTION_TABLE
 #include <amd/hart/hart_optix_compat.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <limits>
@@ -19,10 +20,16 @@
 #include <OpenImageIO/argparse.h>
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/imagebuf.h>
+#include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/strutil.h>
 
+#include <OSL/oslquery.h>
+
+#include "hart_generated_bitcode.h"
+#include "hartgeneratedparams.h"
 #include "hartgridparams.h"
 #include "hartgridrender.h"
+#include "simplerend.h"
 
 OSL_PRAGMA_WARNING_PUSH
 #include <llvm/Bitcode/BitcodeReader.h>
@@ -61,24 +68,12 @@ struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HartSbtRecord {
 
 
 bool
-read_module(HartModuleInput& input, ErrorHandler& err)
+validate_module(HartModuleInput& input, ErrorHandler& err,
+                cspan<std::string> callables = { })
 {
     const auto& filename = input.filename;
     auto& bitcode        = input.bitcode;
     auto& arch           = input.arch;
-    const auto size      = OIIO::Filesystem::file_size(filename);
-    if (!size || size > bitcode.max_size()) {
-        err.errorfmt("Cannot read HART bitcode file '{}' (missing, empty, or "
-                     "too large)",
-                     filename);
-        return false;
-    }
-    bitcode.resize(size_t(size));
-    if (OIIO::Filesystem::read_bytes(filename, bitcode.data(), bitcode.size())
-        != bitcode.size()) {
-        err.errorfmt("Cannot read complete HART bitcode file '{}'", filename);
-        return false;
-    }
     if (bitcode.compare(0, 4, "BC\xc0\xde", 4) != 0
         && bitcode.compare(0, 4, "\xde\xc0\x17\x0b", 4) != 0) {
         err.errorfmt("'{}' is not LLVM bitcode. Assemble textual LLVM IR with "
@@ -127,7 +122,73 @@ read_module(HartModuleInput& input, ErrorHandler& err)
         }
         arch = target;
     }
+    for (const auto& name : callables) {
+        const auto* function = module.getFunction(name);
+        bool valid = function && !function->isDeclaration()
+                     && function->hasExternalLinkage()
+                     && function->getReturnType()->isVoidTy()
+                     && !function->isVarArg() && function->arg_size() == 6
+                     && function->getCallingConv() == llvm::CallingConv::C
+                     && OIIO::Strutil::starts_with(name, "__direct_callable__");
+        if (valid) {
+            unsigned int index = 0;
+            for (const auto& arg : function->args()) {
+                const auto* pointer = llvm::dyn_cast<llvm::PointerType>(
+                    arg.getType());
+                valid &= index == 4
+                             ? arg.getType()->isIntegerTy(32)
+                             : pointer && pointer->getAddressSpace() == 0;
+                ++index;
+            }
+        }
+        if (!valid) {
+            err.errorfmt("Generated HART callable '{}' must define the "
+                         "six-argument OSL callable ABI in '{}'",
+                         name, filename);
+            return false;
+        }
+    }
+    if (!callables.empty()) {
+        if (arch.empty()) {
+            err.errorfmt("Generated HART bitcode '{}' has no target-cpu",
+                         filename);
+            return false;
+        }
+        for (const auto& function : module) {
+            if (function.isDeclaration() && !function.use_empty()
+                && OIIO::Strutil::starts_with(function.getName().str(),
+                                              "osl_")) {
+                err.errorfmt("Generated HART bitcode has an undefined "
+                             "shadeop '{}'",
+                             function.getName().str());
+                return false;
+            }
+        }
+    }
     return true;
+}
+
+
+
+bool
+read_module(HartModuleInput& input, ErrorHandler& err)
+{
+    const auto size = OIIO::Filesystem::file_size(input.filename);
+    if (!size || size > input.bitcode.max_size()) {
+        err.errorfmt("Cannot read HART bitcode file '{}' (missing, empty, or "
+                     "too large)",
+                     input.filename);
+        return false;
+    }
+    input.bitcode.resize(size_t(size));
+    if (OIIO::Filesystem::read_bytes(input.filename, input.bitcode.data(),
+                                     input.bitcode.size())
+        != input.bitcode.size()) {
+        err.errorfmt("Cannot read complete HART bitcode file '{}'",
+                     input.filename);
+        return false;
+    }
+    return validate_module(input, err);
 }
 
 
@@ -192,7 +253,8 @@ public:
         return hip_check(hipStreamCreate(&m_stream), "hipStreamCreate");
     }
 
-    bool load(cspan<HartModuleInput> inputs, const std::string& entry)
+    bool load(cspan<HartModuleInput> inputs, const std::string& entry,
+              cspan<std::string> callable_names = { })
     {
         OptixModuleCompileOptions module_options { };
         OptixPipelineCompileOptions compile_options { };
@@ -223,12 +285,17 @@ public:
         desc[0].raygen.module            = m_modules[0];
         desc[0].raygen.entryFunctionName = entry.c_str();
         m_group_count                    = inputs.size() == 2 ? 3 : 1;
-        const char* callable_names[] = { "__direct_callable__testshade_init",
-                                         "__direct_callable__testshade_entry" };
+        const std::array<std::string, 2> external_names {
+            "__direct_callable__testshade_init",
+            "__direct_callable__testshade_entry"
+        };
+        if (callable_names.empty())
+            callable_names = external_names;
         for (unsigned int i = 1; i < m_group_count; ++i) {
             desc[i].kind               = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
             desc[i].callables.moduleDC = m_modules[1];
-            desc[i].callables.entryFunctionNameDC = callable_names[i - 1];
+            desc[i].callables.entryFunctionNameDC
+                = callable_names[i - 1].c_str();
         }
         for (unsigned int i = 0; i < m_group_count; ++i) {
             size_t log_size = log.size();
@@ -238,7 +305,7 @@ public:
                             "hartProgramGroupCreate")) {
                 log.back() = '\0';
                 m_err.errorfmt("HART entry '{}': {}",
-                               i == 0 ? entry.c_str() : callable_names[i - 1],
+                               i == 0 ? entry : callable_names[i - 1],
                                log.data());
                 return false;
             }
@@ -275,20 +342,60 @@ public:
     }
 
     bool render(int width, int height, int iterations, bool warmup,
-                span<float> pixels)
+                span<float> pixels, size_t group_size = 0,
+                size_t group_alignment = 0, int raytype = 0)
     {
-        const size_t bytes = pixels.size() * sizeof(float);
+        const size_t bytes       = pixels.size() * sizeof(float);
+        const size_t params_size = group_alignment
+                                       ? sizeof(testshade::HartGeneratedParams)
+                                       : sizeof(testshade::HartGridParams);
         if (!hip_check(hipMalloc(&m_output, bytes), "hipMalloc output")
-            || !hip_check(hipMalloc(&m_params,
-                                    sizeof(testshade::HartGridParams)),
+            || !hip_check(hipMalloc(&m_params, params_size),
                           "hipMalloc parameters"))
             return false;
         const testshade::HartGridParams params { static_cast<float*>(m_output) };
-        // Unwritten pixels remain NaNs rather than looking like valid black.
-        if (!hip_check(hipMemset(m_output, 0xff, bytes), "hipMemset output")
-            || !hip_check(hipMemcpy(m_params, &params, sizeof(params),
-                                    hipMemcpyHostToDevice),
-                          "hipMemcpy parameters"))
+        testshade::HartGeneratedParams generated { };
+        if (group_alignment) {
+            const size_t limit = std::numeric_limits<size_t>::max();
+            const size_t count = pixels.size() / 3;
+            if ((group_alignment & (group_alignment - 1))
+                || std::max(size_t(1), group_size) > limit - group_alignment
+                || count == 0) {
+                m_err.errorfmt("Invalid generated HART group storage layout");
+                return false;
+            }
+            const size_t stride = (std::max(size_t(1), group_size)
+                                   + group_alignment - 1)
+                                  & ~(group_alignment - 1);
+            if (count > (limit - group_alignment + 1) / stride) {
+                m_err.errorfmt(
+                    "HART grid exceeds the group storage size limit");
+                return false;
+            }
+            const size_t scratch_bytes = count * stride;
+            if (!hip_check(hipMalloc(&m_scratch,
+                                     scratch_bytes + group_alignment - 1),
+                           "hipMalloc group storage")
+                || !hip_check(hipMemset(m_scratch, 0,
+                                        scratch_bytes + group_alignment - 1),
+                              "hipMemset group storage"))
+                return false;
+            const uintptr_t aligned = (reinterpret_cast<uintptr_t>(m_scratch)
+                                       + group_alignment - 1)
+                                      & ~(uintptr_t(group_alignment) - 1);
+            generated = { static_cast<float*>(m_output),
+                          reinterpret_cast<unsigned char*>(aligned),
+                          stride,
+                          scratch_bytes,
+                          count,
+                          raytype };
+        }
+        if (!hip_check(hipMemcpy(m_params,
+                                 group_alignment
+                                     ? static_cast<const void*>(&generated)
+                                     : static_cast<const void*>(&params),
+                                 params_size, hipMemcpyHostToDevice),
+                       "hipMemcpy parameters"))
             return false;
 
         OptixShaderBindingTable sbt { };
@@ -300,10 +407,14 @@ public:
             sbt.callablesRecordCount         = m_group_count - 1;
         }
         auto launch = [&]() {
+            // Reset every launch so warmup cannot conceal unwritten output.
+            if (!hip_check(hipMemsetAsync(m_output, 0xff, bytes, m_stream),
+                           "hipMemsetAsync output"))
+                return false;
             if (m_verbose)
                 m_err.infofmt("Launching HART grid {} x {}", width, height);
             if (!hart_check(optixLaunch(m_pipeline, m_stream, m_params,
-                                        sizeof(params), &sbt, width, height, 1),
+                                        params_size, &sbt, width, height, 1),
                             "hartLaunch"))
                 return false;
             if (m_verbose)
@@ -328,7 +439,7 @@ public:
             ok = hip_check(hipStreamSynchronize(m_stream),
                            "hipStreamSynchronize during cleanup")
                  && ok;
-        for (void** buffer : { &m_params, &m_output, &m_record }) {
+        for (void** buffer : { &m_params, &m_output, &m_record, &m_scratch }) {
             if (*buffer) {
                 ok      = hip_check(hipFree(*buffer), "hipFree") && ok;
                 *buffer = nullptr;
@@ -411,9 +522,294 @@ private:
     void* m_record             = nullptr;
     void* m_params             = nullptr;
     void* m_output             = nullptr;
+    void* m_scratch            = nullptr;
 };
 
 }  // namespace
+
+
+
+bool
+testshade_hart_validate_generated(int argc, const char* argv[],
+                                  const HartOptions& options, int width,
+                                  int height, int iterations)
+{
+    ErrorHandler err;
+    if (options.has_callables || options.has_entry) {
+        err.errorfmt("--hart-callable-module and --hart-entry require "
+                     "--hart-module; they cannot be mixed with an OSL shader");
+        return false;
+    }
+    // Parse the supported subset separately, rather than silently ignoring
+    // CPU-only switches accepted by the shared frontend.
+    OIIO::ArgParse ap;
+    ap.exit_on_error(false);
+    std::string device = "0";
+    std::vector<std::string> names, files;
+    std::string format;
+    bool parameter_hints = false, has_shader = false;
+    // clang-format off
+    ap.arg("filename")
+      .action([&](cspan<const char*>) { has_shader = true; });
+    ap.arg("--hart");
+    ap.arg("--hart-device %s:INDEX", &device);
+    ap.arg("--hart-no-cache");
+    ap.arg("--res %d:WIDTH %d:HEIGHT");
+    ap.arg("-g %d:WIDTH %d:HEIGHT");
+    ap.arg("--iters %d:COUNT");
+    ap.arg("--warmup");
+    ap.arg("--print");
+    ap.arg("-v");
+    ap.arg("--debug");
+    ap.arg("-o %L:VARIABLE %L:FILE", &names, &files);
+    ap.arg("-d %s:FORMAT", &format);
+    ap.arg("--groupname %s:NAME");
+    ap.arg("--layer %s:NAME");
+    ap.arg("--shader %s:SHADER %s:LAYER")
+      .action([&](cspan<const char*>) { has_shader = true; });
+    ap.arg("--param %s:NAME %s:VALUE")
+      .action([&](cspan<const char*> args) {
+          const string_view option(args[0]);
+          parameter_hints |= option.find("interpolated=") != string_view::npos
+                             || option.find("interactive=") != string_view::npos;
+      });
+    ap.arg("-O0");
+    ap.arg("-O1");
+    ap.arg("-O2");
+    // clang-format on
+    if (ap.parse_args(argc, argv) < 0) {
+        err.errorfmt("Generated HART mode: unsupported option or argument: {}",
+                     ap.geterror());
+        return false;
+    }
+    char* device_end        = nullptr;
+    const auto device_index = std::strtoll(device.c_str(), &device_end, 10);
+    if (device.empty() || device_end != device.c_str() + device.size()
+        || device_index < std::numeric_limits<int>::min()
+        || device_index > std::numeric_limits<int>::max()) {
+        err.errorfmt("Invalid HART device index '{}'", device);
+        return false;
+    }
+    if (parameter_hints) {
+        err.errorfmt("Generated HART mode does not support interpolated or "
+                     "interactive parameters");
+        return false;
+    }
+    if (!has_shader) {
+        err.errorfmt("Generated HART mode requires an OSL shader; "
+                     "use --hart-module for external bitcode");
+        return false;
+    }
+    const char* batched = std::getenv("TESTSHADE_BATCHED");
+    if (batched && OIIO::Strutil::stoi(batched)) {
+        err.errorfmt("Generated HART mode does not support TESTSHADE_BATCHED");
+        return false;
+    }
+    const char* rs_bitcode = std::getenv("TESTSHADE_RS_BITCODE");
+    if (rs_bitcode && OIIO::Strutil::stoi(rs_bitcode)) {
+        err.errorfmt("Generated HART mode does not support "
+                     "TESTSHADE_RS_BITCODE");
+        return false;
+    }
+    if (options.device < 0 || width <= 0 || height <= 0 || iterations <= 0) {
+        err.errorfmt("HART device must be nonnegative; grid dimensions and "
+                     "iteration count must be positive");
+        return false;
+    }
+    if (names.size() > 1 || (!names.empty() && names[0] != "Cout")) {
+        err.errorfmt("Generated HART mode supports one RGB output: Cout");
+        return false;
+    }
+    if (!format.empty() && format != "float" && format != "half"
+        && format != "uint8") {
+        err.errorfmt("Unsupported HART output format '{}'", format);
+        return false;
+    }
+    if (size_t(width) > std::vector<float>().max_size() / 3 / size_t(height)) {
+        err.errorfmt(
+            "HART grid dimensions exceed the output buffer size limit");
+        return false;
+    }
+    if (size_t(width)
+        > size_t(std::numeric_limits<int>::max()) / size_t(height)) {
+        err.errorfmt("HART callable grid exceeds the int shade-index range");
+        return false;
+    }
+    return true;
+}
+
+
+
+std::unique_ptr<SimpleRenderer>
+testshade_hart_renderer(int device, std::string& arch)
+{
+    class GeneratedRenderer final : public SimpleRenderer {
+    public:
+        int supports(string_view feature) const override
+        { return feature == "HART"; }
+    };
+    auto renderer = std::make_unique<GeneratedRenderer>();
+    hipDeviceProp_t properties { };
+    hipError_t status = hipSetDevice(device);
+    if (status == hipSuccess)
+        status = hipGetDeviceProperties(&properties, device);
+    if (status != hipSuccess) {
+        renderer->errhandler().errorfmt("Cannot select HIP device {}: {}",
+                                        device, hipGetErrorString(status));
+        return { };
+    }
+    const string_view target(properties.gcnArchName);
+    arch = std::string(target.substr(0, target.find(':')));
+    for (const auto& embedded : hart_generated_raygens)
+        if (embedded.arch && arch == embedded.arch)
+            return renderer;
+    renderer->errhandler().errorfmt(
+        "No embedded HART raygen for HIP architecture '{}'; configure "
+        "USE_LLVM_BITCODE=ON and include it in HART_TARGET_ARCHITECTURES",
+        arch);
+    return { };
+}
+
+
+
+bool
+testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
+                         ShaderGroup& group, const HartOptions& options,
+                         string_view arch, int width, int height,
+                         int iterations, bool warmup, bool verbose, int raytype,
+                         bool print_pixels, string_view output_file,
+                         string_view dataformat)
+{
+    auto& err  = renderer.errhandler();
+    int layers = 0;
+    if (!shadingsys.getattribute(&group, "num_layers", layers) || layers != 1) {
+        err.errorfmt("Generated HART mode supports exactly one shader layer");
+        return false;
+    }
+    OSLQuery query = shadingsys.oslquery(group, 0);
+    int outputs    = 0;
+    bool has_cout  = false;
+    for (const auto& parameter : query) {
+        if (parameter.isoutput) {
+            ++outputs;
+            has_cout |= parameter.name == "Cout" && parameter.type == TypeColor
+                        && !parameter.isclosure;
+        }
+        if (parameter.isclosure || parameter.isstruct || parameter.varlenarray
+            || parameter.type.basetype == TypeDesc::STRING) {
+            err.errorfmt("Generated HART mode does not support parameter '{}' "
+                         "of type '{}'",
+                         parameter.name, parameter.type_name());
+            return false;
+        }
+        for (const auto& metadata : parameter.metadata) {
+            if ((metadata.name == "interpolated"
+                 || metadata.name == "interactive")
+                && !metadata.idefault.empty() && metadata.idefault[0]) {
+                err.errorfmt("Generated HART mode does not support {} "
+                             "parameter '{}'",
+                             metadata.name, parameter.name);
+                return false;
+            }
+        }
+    }
+    if (!has_cout || outputs != 1) {
+        err.errorfmt("Generated HART mode requires exactly one RGB color "
+                     "output parameter: Cout");
+        return false;
+    }
+    const SymLocationDesc output("Cout", TypeColor, false, SymArena::Outputs, 0,
+                                 3 * sizeof(float));
+    shadingsys.add_symlocs(&group, { &output, 1 });
+    shadingsys.optimize_group(&group, nullptr);
+
+    const void* data = nullptr;
+    uint64_t bytes   = 0;
+    int group_size = -1, group_alignment = 0;
+    std::array<std::string, 2> callables;
+    if (!shadingsys.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &data)
+        || !shadingsys.getattribute(&group, "hart_bitcode_size", TypeUInt64,
+                                    &bytes)
+        || !data || !bytes || bytes > std::string().max_size()
+        || !shadingsys.getattribute(&group, "llvm_groupdata_size", group_size)
+        || !shadingsys.getattribute(&group, "llvm_groupdata_alignment",
+                                    group_alignment)
+        || group_size < 0 || group_alignment <= 0
+        || !shadingsys.getattribute(&group, "group_init_name", callables[0])
+        || !shadingsys.getattribute(&group, "group_entry_name", callables[1])) {
+        err.errorfmt("Cannot retrieve a compiled HART shader group; "
+                     "CPU fallback is not supported");
+        return false;
+    }
+    const auto* symbol = shadingsys.find_symbol(group, ustring("Cout"));
+    if (!symbol || shadingsys.symbol_typedesc(symbol) != TypeColor) {
+        err.errorfmt("Compiled HART group has no RGB color Cout symbol");
+        return false;
+    }
+
+    std::array<HartModuleInput, 2> modules;
+    modules[1].filename = "OSL-generated shader group";
+    modules[1].bitcode.assign(static_cast<const char*>(data), size_t(bytes));
+    for (const auto& embedded : hart_generated_raygens) {
+        if (embedded.arch && arch == embedded.arch) {
+            modules[0].filename = "embedded HART raygen " + std::string(arch);
+            modules[0].bitcode.assign(reinterpret_cast<const char*>(
+                                          embedded.data),
+                                      *embedded.size);
+            break;
+        }
+    }
+    if (modules[0].bitcode.empty()) {
+        err.errorfmt("No embedded HART raygen for architecture '{}'", arch);
+        return false;
+    }
+    if (!validate_module(modules[0], err)
+        || !validate_module(modules[1], err, callables))
+        return false;
+    HartGridRenderer runtime(err);
+    if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
+        || !runtime.load(modules, "__raygen__testshade_generated", callables))
+        return false;
+    std::vector<float> pixels(size_t(width) * size_t(height) * 3);
+    const bool rendered = runtime.render(width, height, iterations, warmup,
+                                         pixels, size_t(group_size),
+                                         size_t(group_alignment), raytype);
+    const bool cleared  = runtime.clear();
+    if (!rendered || !cleared)
+        return false;
+    if (print_pixels) {
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                const size_t offset = (size_t(y) * width + x) * 3;
+                print("Pixel ({}, {}): Cout = {:.9g} {:.9g} {:.9g}\n", x, y,
+                      pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+            }
+    } else if (output_file != "null") {
+        OIIO::ImageBuf image(
+            OIIO::ImageSpec(width, height, 3, TypeDesc::FLOAT));
+#if OIIO_VERSION_GREATER_EQUAL(3, 1, 0)
+        bool copied = image.set_pixels(OIIO::ROI::All(),
+                                       OIIO::make_cspan(pixels));
+#else
+        bool copied = image.set_pixels(OIIO::ROI::All(), TypeDesc::FLOAT,
+                                       pixels.data());
+#endif
+        if (OIIO::Strutil::iends_with(output_file, ".jpg")
+            || OIIO::Strutil::iends_with(output_file, ".jpeg")
+            || OIIO::Strutil::iends_with(output_file, ".gif")
+            || OIIO::Strutil::iends_with(output_file, ".png"))
+            image = OIIO::ImageBufAlgo::colorconvert(image, "linear", "sRGB");
+        const TypeDesc format = dataformat == "half"    ? TypeDesc::HALF
+                                : dataformat == "uint8" ? TypeDesc::UINT8
+                                                        : TypeDesc::FLOAT;
+        if (!copied || image.has_error() || !image.write(output_file, format)) {
+            err.errorfmt("Cannot write HART output '{}': {}", output_file,
+                         image.geterror());
+            return false;
+        }
+    }
+    return true;
+}
 
 
 

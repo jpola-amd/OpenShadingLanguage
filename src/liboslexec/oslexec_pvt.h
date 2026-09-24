@@ -667,6 +667,10 @@ public:
     TextureSystem* texturesys() const { return m_texturesys; }
 
     bool use_optix() const { return m_use_optix; }
+    bool use_hart() const { return m_use_hart; }
+    bool use_gpu() const { return use_optix() || use_hart(); }
+    const std::string& hart_arch() const { return m_hart_arch; }
+    bool validate_hart_group(const ShaderGroup& group);
     bool use_optix_cache() const { return m_use_optix_cache; }
     bool debug_nan() const { return m_debugnan; }
     bool debug_uninit() const { return m_debug_uninit; }
@@ -1015,6 +1019,8 @@ private:
     int m_max_local_mem_KB;  ///< Local storage can a shader use
     int m_compile_report;    ///< Print compilation report?
     bool m_use_optix;        ///< This is an OptiX-based renderer
+    bool m_use_hart;         ///< This is a HART-based renderer
+    std::string m_hart_arch;
     bool m_use_optix_cache;  ///< Renderer-enabled caching for OptiX ptx
     int m_max_optix_groupdata_alloc;  ///< Maximum OptiX groupdata buffer allocation
     bool m_buffer_printf;             ///< Buffer/batch printf output?
@@ -1511,6 +1517,7 @@ public:
 
     /// Make our own version of the code and args from the master.
     void copy_code_from_master(ShaderGroup& group);
+    bool validate_hart() const;
 
     /// Check the params to re-assess writes_globals and userdata_params.
     /// Sorry, can't think of a short name that isn't too cryptic.
@@ -2090,6 +2097,7 @@ private:
     volatile int m_batch_jitted
         = 0;  ///< Is it already jitted for batch execution?
     size_t m_llvm_groupdata_size = 0;  ///< Heap size needed for its groupdata
+    int m_llvm_groupdata_alignment = 1;
     size_t m_llvm_groupdata_wide_size
         = 0;                     ///< Heap size needed for its wide groupdata
     int m_id;                    ///< Unique ID for the group
@@ -2143,6 +2151,7 @@ private:
 
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
+    std::string m_hart_bitcode;
 
     ParamValueList m_pending_params;          // Pending Parameter() values
     std::vector<ParamHints> m_pending_hints;  // ParamHints of pending params

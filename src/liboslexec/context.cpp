@@ -97,6 +97,11 @@ ShadingContext::execute_init(ShaderGroup& sgroup, int threadindex,
 {
     if (m_group)
         execute_cleanup();
+    if (run && shadingsys().use_hart()) {
+        errorfmt("HART shader groups must be launched through a HART pipeline, "
+                 "not CPU execute");
+        return false;
+    }
     batch_size_executed = 0;
     m_group             = &sgroup;
     m_ticks             = 0;
@@ -175,6 +180,11 @@ ShadingContext::execute_layer(int threadindex, int shadeindex,
                               ShaderGlobals& ssg, void* userdata_base_ptr,
                               void* output_base_ptr, int layernumber)
 {
+    if (shadingsys().use_hart()) {
+        errorfmt("HART shader groups must be launched through a HART pipeline, "
+                 "not CPU execute_layer");
+        return false;
+    }
     if (!group() || group()->nlayers() == 0 || group()->does_nothing())
         return false;
     OSL_DASSERT(ssg.context == this && ssg.renderer == renderer());

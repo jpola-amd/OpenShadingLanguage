@@ -125,7 +125,7 @@ RuntimeOptimizer::RuntimeOptimizer(ShadingSystemImpl& shadingsys,
     // aren't yet set up to support use of debugging symbols for PTX.
     // FIXME: some day, we are going to want debugging symbols for PTX, and
     // will need some refactoring of the debugging symbol code.
-    if (shadingsys.renderer()->supports("OptiX"))
+    if (shadingsys.use_gpu())
         m_keep_no_return_function_calls = false;
 }
 

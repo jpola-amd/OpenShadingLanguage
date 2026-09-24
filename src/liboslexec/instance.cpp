@@ -366,6 +366,54 @@ ShaderInstance::parameters(const ParamValueList& params,
 
 
 
+bool
+ShaderInstance::validate_hart() const
+{
+    // Check the original code before constant folding can execute host-only
+    // operations or hide unsupported paths in a particular specialization.
+    static const ustring supported[] = {
+        ustring("nop"),        ustring("end"), ustring("useparam"),
+        ustring("assign"),     ustring("add"), ustring("sub"),
+        ustring("mul"),        ustring("div"), ustring("neg"),
+        ustring("color"),      ustring("sin"), ustring("compref"),
+        ustring("compassign"),
+    };
+    for (const Opcode& op : m_master->m_ops) {
+        if (std::find(std::begin(supported), std::end(supported), op.opname())
+            == std::end(supported)) {
+            shadingsys().errorfmt("HART: unsupported operation '{}' in shader "
+                                  "'{}' ({}:{})",
+                                  op.opname(), shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        }
+        for (int a = 0; a < op.nargs(); ++a) {
+            const Symbol& sym
+                = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+            const TypeSpec& type = sym.typespec();
+            if (type.is_array() || type.is_structure()
+                || type.is_closure_based()
+                || (!type.is_float_based() && !type.is_int_based())) {
+                shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
+                                      "in shader '{}'",
+                                      type.c_str(), sym.name(), shadername());
+                return false;
+            }
+            if (sym.symtype() == SymTypeGlobal
+                && ((sym.name() != ustring("u") && sym.name() != ustring("v"))
+                    || op.argwrite(a))) {
+                shadingsys().errorfmt("HART: only reads of shader globals u "
+                                      "and v are supported (shader '{}', '{}')",
+                                      shadername(), sym.name());
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+
+
 void
 ShaderInstance::make_symbol_room(size_t moresyms)
 {
