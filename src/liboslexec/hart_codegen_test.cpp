@@ -23,6 +23,8 @@
 
 #include <OpenImageIO/unittest.h>
 
+#include <initializer_list>
+
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Config/llvm-config.h>
@@ -97,7 +99,11 @@ check_rejected_group(ShadingSystem& ss, ShaderGroup& group,
         !ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
     OIIO_CHECK_ASSERT(bytes == nullptr && size == 0);
     OIIO_CHECK_ASSERT(errors.errors > 0);
-    OIIO_CHECK_ASSERT(OIIO::Strutil::contains(errors.last_error, expected));
+    const bool matched = OIIO::Strutil::contains(errors.last_error, expected);
+    if (!matched)
+        print(stderr, "Expected diagnostic '{}', got '{}'\n", expected,
+              errors.last_error);
+    OIIO_CHECK_ASSERT(matched);
 }
 
 
@@ -124,8 +130,9 @@ make_connected_group(ShadingSystem& ss, string_view producer,
 
 void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
-             string_view sine_function, int optimize, bool connected = false,
-             bool branching = false, bool looping = false)
+             std::initializer_list<string_view> shadeops, int optimize,
+             bool connected = false, bool branching = false,
+             bool looping = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -307,11 +314,14 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             OIIO_CHECK_ASSERT(calls_producer);
         }
     }
-    if (!sine_function.empty() && optimize == 10) {
-        const auto* shadeop = module.getFunction(std::string(sine_function));
+    for (const auto name : shadeops) {
+        if (name.empty() || optimize != 10)
+            continue;
+        const auto* shadeop = module.getFunction(std::string(name));
         OIIO_CHECK_ASSERT(shadeop && !shadeop->isDeclaration()
                           && !shadeop->use_empty());
-        if (connected && sine_function == "osl_sin_dfdf") {
+        if (connected
+            && (name == "osl_sin_dfdf" || name == "osl_normalize_dvdv")) {
             const auto* storage = llvm::StructType::getTypeByName(context,
                                                                   "Groupdata");
             OIIO_CHECK_ASSERT(storage);
@@ -319,9 +329,20 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             if (storage)
                 for (const auto* field : storage->elements())
                     if (const auto* array = llvm::dyn_cast<llvm::ArrayType>(
-                            field))
+                            field)) {
+                        const auto* element = array->getElementType();
+                        const auto* triple  = llvm::dyn_cast<llvm::StructType>(
+                            element);
+                        const bool vector
+                            = triple && triple->getNumElements() == 3
+                              && triple->getElementType(0)->isFloatTy()
+                              && triple->getElementType(1)->isFloatTy()
+                              && triple->getElementType(2)->isFloatTy();
                         dual_storage |= array->getNumElements() == 3
-                                        && array->getElementType()->isFloatTy();
+                                        && (name == "osl_sin_dfdf"
+                                                ? element->isFloatTy()
+                                                : vector);
+                    }
             OIIO_CHECK_ASSERT(dual_storage);
         }
     }
@@ -398,6 +419,27 @@ main(int argc, char* argv[])
         "shader hart_deriv_dz(output color Cout=0) { Cout=color(Dz(u)); }",
         "shader hart_deriv_filterwidth(output color Cout=0) { Cout=color(filterwidth(u)); }",
         "shader hart_deriv_arithmetic(output color Cout=0) { float value=-(u*v+u-v)/(v+1); Cout=color(value,Dx(value),Dy(value)); }",
+        "shader hart_surface_globals(output color Cout=0) { "
+        "Cout=color(P+Dx(P)+Dy(P)+N+Ng+dPdu+dPdv+Dx(N)+Dy(Ng)+Dx(dPdu)+Dy(dPdv)); }",
+        "shader hart_surface_values(int planar=0, output color Cout=0) { "
+        "vector q=vector(P); if(planar) q[2]=0; vector n=normalize(q); "
+        "Cout=color(dot(q,N),length(q),n[0]); }",
+        "shader hart_surface_producer(int planar=0, output vector value=0) { "
+        "float z=P[2]+P[0]*P[1]; if(planar) z=0; "
+        "point p=point(P[0],2*P[1],z); normal n=normal(p[0],p[1],p[2]); "
+        "value=vector(n[0],n[1],n[2]); }",
+        "shader hart_surface_consumer(vector value=0, int operation=-1, output color Cout=0) { "
+        "int selected=operation; if(selected<0) selected=(u>0.5)+2*(v>0.5); float result=0; "
+        "if(selected==0) { vector n=normalize(value); result=n[0]+2*n[1]+3*n[2]; } "
+        "else if(selected==1) result=length(value); "
+        "else if(selected==2) result=dot(value,value); "
+        "else if(selected==3) result=dot(value,N); else result=dot(Ng,value); "
+        "Cout=color(result,Dx(result),Dy(result)); }",
+        "shader hart_surface_incident(output color Cout=0) { Cout=color(I); }",
+        "shader hart_surface_write_normal(int enable=0, output color Cout=0) { "
+        "if(enable) N=normal(u,v,1); Cout=color(u,v,0); }",
+        "shader hart_surface_write_position(output color Cout=0) { P[0]=u; Cout=color(P); }",
+        "shader hart_surface_transform(output color Cout=0) { Cout=color(transform(\"object\",P)); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -407,7 +449,7 @@ main(int argc, char* argv[])
     }
     // OSL level 10 skips passes; even O0 inlines alwaysinline HIP shadeops.
     for (int optimize : { 10, 3 }) {
-        for (int i : { 0, 1, 12, 13, 16, 17, 23, 25, 27, 30 }) {
+        for (int i : { 0, 1, 4, 12, 13, 16, 17, 23, 25, 27, 30, 31, 32, 34 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -423,8 +465,14 @@ main(int argc, char* argv[])
                                               : i == 27 ? "osl_sin_dvdv"
                                               : i == 1 || looping ? "osl_sin_ff"
                                                                   : "";
-            check_module(ss, *group, arch, sine_function, optimize, false,
-                         i == 12, looping);
+            if (i == 32)
+                check_module(ss, *group, arch,
+                             { "osl_dot_fvv", "osl_length_fv",
+                               "osl_normalize_vv" },
+                             optimize);
+            else
+                check_module(ss, *group, arch, { sine_function }, optimize,
+                             false, i == 12, looping);
             auto* thread = ss.create_thread_info();
             auto* ctx    = ss.get_context(thread);
             ShaderGlobals globals { };
@@ -448,7 +496,7 @@ main(int argc, char* argv[])
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
-            check_module(ss, *group, arch, "osl_sin_ff", optimize, true,
+            check_module(ss, *group, arch, { "osl_sin_ff" }, optimize, true,
                          consumer == 12, consumer == 13 || consumer == 17);
         }
         for (int producer : { 24, 26 }) {
@@ -462,7 +510,23 @@ main(int argc, char* argv[])
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
-            check_module(ss, *group, arch, "osl_sin_dfdf", optimize, true);
+            check_module(ss, *group, arch, { "osl_sin_dfdf" }, optimize, true);
+        }
+        {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            ss.attribute("llvm_optimize", optimize);
+            auto group = make_connected_group(ss, oso[33], oso[34]);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "{}\n", errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch,
+                         { "osl_normalize_dvdv", "osl_length_dfdv",
+                           "osl_dot_dfdvdv", "osl_dot_dfdvv", "osl_dot_dfvdv" },
+                         optimize, true);
         }
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
@@ -470,7 +534,6 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[0], "instrumentation", 1, true);
     check_rejection(arch, oso[2], "unsupported operation 'printf'");
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
-    check_rejection(arch, oso[4], "shader globals u and v");
     check_rejection(arch, oso[11], "unsupported type");
     check_rejection(arch, oso[14], "unsupported operation 'printf'");
     check_rejection(arch, oso[15], "unsupported operation 'texture'");
@@ -481,6 +544,24 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
     check_rejection(arch, oso[28], "unsupported operation 'Dz'");
     check_rejection(arch, oso[29], "unsupported operation 'filterwidth'");
+    check_rejection(arch, oso[35], "unsupported shader global 'I'");
+    check_rejection(arch, oso[36], "writing shader global 'N'");
+    check_rejection(arch, oso[37], "writing shader global 'P'");
+    // The two-argument transform is a stdosl wrapper.
+    check_rejection(arch, oso[38], "unsupported operation 'functioncall'");
+    for (string_view type : { "point", "vector", "normal" }) {
+        for (string_view space : { "object", "common" }) {
+            OSLCompiler compiler;
+            std::string bytecode;
+            const auto source
+                = fmtformat("shader hart_space(output color Cout=0) {{ "
+                            "Cout=color({}(\"{}\",u,v,1)); }}",
+                            type, space);
+            if (!compiler.compile_buffer(source, bytecode, { }, argv[2]))
+                return 1;
+            check_rejection(arch, bytecode, "unsupported type 'string'");
+        }
+    }
     for (bool userdata : { false, true }) {
         for (int unsupported_layer = 0; unsupported_layer < 2;
              ++unsupported_layer) {

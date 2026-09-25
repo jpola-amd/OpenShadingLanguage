@@ -393,12 +393,28 @@ can read `Dx(value)` and `Dy(value)`; OSL propagates derivative requirements
 upstream and copies value/dx/dy through group storage. Constant and uniform
 parameter derivatives are zero. No new callable or launch ABI is needed.
 
+Read-only surface geometry is also available: `P`, `N`, `Ng`, `dPdu`, and
+`dPdv`, in addition to `u` and `v`. The test grid is still a synthetic flat
+patch, not a ray-traced scene. It supplies `P=(u,v,1)`, `N=Ng=(0,0,1)`,
+`dPdu=(1,0,0)`, and `dPdv=(0,1,0)`. Position derivatives are
+`Dx(P)=(dudx,0,0)` and `Dy(P)=(0,dvdy,0)`.
+
+Unqualified `point`, `vector`, and `normal` constructors work in common
+space, together with `dot`, `length`, and `normalize`. Construction does
+not transform coordinate spaces or normalize a normal automatically.
+Vector values and their derivatives can cross layer connections, using the
+existing OSL storage and shadeops. For example, a producer can construct
+`vector(P[0], 2*P[1], P[2]+P[0]*P[1])`; its consumer can compute `length(value)`
+and extract the result's `Dx` and `Dy`. Normalizing a zero vector returns
+zero, including zero derivatives, following ordinary OSL behavior.
+
 Its numeric instruction subset is assignment, addition, subtraction,
-multiplication, division, negation, color construction, `sin`, component
+multiplication, division, negation, color/point/vector/normal construction,
+`sin`, `dot`, `length`, `normalize`, component
 reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
 `for`/`while`, `Dx`, and `Dy`
-(plus internal structural operations). Only reads of the `u`
-and `v` shader globals are supported. Other instructions are rejected before
+(plus internal structural operations). Only reads of the listed shader
+globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
 The supported command-line subset is `--hart-device`, `--hart-no-cache`,
 `--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
@@ -416,7 +432,9 @@ Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
 `Dz`, `filterwidth`, `break`, `continue`, `do`/`while`, textures, closures,
-tracing, shader printing,
+tracing, shader printing, writes to shader globals, other globals such as
+`I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
+coordinate transforms,
 strings, arrays, interpolated or interactive parameters, renderer-service
 callbacks, batched execution, instrumentation, more than two layers, explicit
 entry layers, multiple final outputs, and unlisted frontend options are
@@ -434,8 +452,9 @@ two-layer groups
 against CPU execution
 on `1x1`, `3x2`, and `37x5` grids. It checks numerical and image output,
 cold-cache compilation, warmup, and repeated launches. Absolute tolerances
-are `2e-6` for GPU/image values and `5e-6` for comparison with CPU text's
-six-significant-digit formatting (relative tolerance `1e-6`).
+are `2e-6` for GPU/image values and `6e-6` for comparison with CPU text's
+six-significant-digit formatting plus float rounding (relative tolerance
+`1e-6`). The CPU text margin does not relax full-precision image checks.
 The two-layer tests cover LLVM levels 10 and 3 and an overridden producer
 parameter. Control-flow checks cover mixed/all-true/all-false outcomes,
 equality boundaries, signed integer and float comparisons, and reuse of a
@@ -465,11 +484,24 @@ verify linked scalar/color derivative-aware sine calls and derivative-sized
 connected storage at level 10, and reject the still-unsupported `Dz` and
 `filterwidth` operations.
 
+`hart-surface-runtime` checks all supported geometry globals, position
+derivatives, and value-only and derivative-aware vector math. A connected
+producer exercises point/normal/vector construction and a consumer selects
+normalization, length, or dot products, including mixed derivative/non-derivative
+operands. It compares analytical and CPU/GPU results at LLVM levels 10 and 3,
+with connected groups on `1x1`, `3x2`, and `37x5` grids. Additional cases
+check each global and operation, uniform vector parameters, zero-length
+vectors with nonzero input derivatives, and rejection of global writes,
+unsupported globals and named spaces. It uses the same image, cache and
+repeated-launch checks. The compiler tests verify the linked shadeop variants,
+vector value/dx/dy storage and unchanged callable ABI on every configured
+architecture.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(codegen-.*|derivatives-runtime)$" --output-on-failure
+  -R "^hart-(codegen-.*|surface-runtime)$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

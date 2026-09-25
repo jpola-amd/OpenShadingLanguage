@@ -395,14 +395,20 @@ ShaderInstance::validate_hart() const
         }
     }
     static const ustring supported[] = {
-        ustring("nop"),        ustring("end"), ustring("useparam"),
-        ustring("assign"),     ustring("add"), ustring("sub"),
-        ustring("mul"),        ustring("div"), ustring("neg"),
-        ustring("color"),      ustring("sin"), ustring("compref"),
-        ustring("compassign"), ustring("if"),  ustring("lt"),
-        ustring("le"),         ustring("eq"),  ustring("ge"),
-        ustring("gt"),         ustring("neq"), ustring("for"),
-        ustring("while"),      ustring("Dx"),  ustring("Dy"),
+        ustring("nop"),        ustring("end"),    ustring("useparam"),
+        ustring("assign"),     ustring("add"),    ustring("sub"),
+        ustring("mul"),        ustring("div"),    ustring("neg"),
+        ustring("color"),      ustring("sin"),    ustring("compref"),
+        ustring("compassign"), ustring("if"),     ustring("lt"),
+        ustring("le"),         ustring("eq"),     ustring("ge"),
+        ustring("gt"),         ustring("neq"),    ustring("for"),
+        ustring("while"),      ustring("Dx"),     ustring("Dy"),
+        ustring("point"),      ustring("vector"), ustring("normal"),
+        ustring("dot"),        ustring("length"), ustring("normalize"),
+    };
+    static const ustring readable_globals[] = {
+        ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
+        ustring("Ng"), ustring("dPdu"), ustring("dPdv"),
     };
     for (const Opcode& op : m_master->m_ops) {
         if (std::find(std::begin(supported), std::end(supported), op.opname())
@@ -418,13 +424,21 @@ ShaderInstance::validate_hart() const
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
             if (!validate_type(sym))
                 return false;
-            if (sym.symtype() == SymTypeGlobal
-                && ((sym.name() != ustring("u") && sym.name() != ustring("v"))
-                    || op.argwrite(a))) {
-                shadingsys().errorfmt("HART: only reads of shader globals u "
-                                      "and v are supported (shader '{}', '{}')",
-                                      shadername(), sym.name());
-                return false;
+            if (sym.symtype() == SymTypeGlobal) {
+                if (op.argwrite(a)) {
+                    shadingsys().errorfmt("HART: writing shader global '{}' is "
+                                          "unsupported in shader '{}'",
+                                          sym.name(), shadername());
+                    return false;
+                }
+                if (std::find(std::begin(readable_globals),
+                              std::end(readable_globals), sym.name())
+                    == std::end(readable_globals)) {
+                    shadingsys().errorfmt("HART: unsupported shader global '{}' "
+                                          "in shader '{}'",
+                                          sym.name(), shadername());
+                    return false;
+                }
             }
         }
     }

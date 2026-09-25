@@ -22,9 +22,11 @@ suites.add_argument("--loops", action="store_true",
                     help="Run loop runtime cases instead of the basic runtime cases")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
+suites.add_argument("--surface", action="store_true",
+                    help="Run surface globals and vector math runtime cases")
 args = parser.parse_args()
-if (args.loops or args.derivatives) and not args.gpu:
-    parser.error("--loops and --derivatives require --gpu")
+if (args.loops or args.derivatives or args.surface) and not args.gpu:
+    parser.error("--loops, --derivatives and --surface require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -100,8 +102,9 @@ def check_render(shader_args, width, height, expected):
     grid = ["-g", str(width), str(height)]
     cpu = pixels(run(["-t", "1"] + grid + ["--print"] + shader_args),
                  width, height)
-    # CPU testshade prints six significant digits.
-    compare(cpu, expected, 5e-6)
+    # CPU text rounds to six significant digits; allow a small float-computation
+    # margin beyond rounding. Full-precision images still use 2e-6 below.
+    compare(cpu, expected, 6e-6)
     for cache_options in (["--hart-no-cache"], []):
         flags = ["--hart", "-v", "--warmup", "--iters", "3"]
         flags += cache_options + grid
@@ -111,7 +114,7 @@ def check_render(shader_args, width, height, expected):
         assert output.count("Launching HART grid") == 4, output
         gpu = pixels(output, width, height)
         compare(gpu, expected, 2e-6)
-        compare(gpu, cpu, 5e-6)
+        compare(gpu, cpu, 6e-6)
 
         cpu_image, gpu_image = root / "cpu.pfm", root / "gpu.pfm"
         for image in (cpu_image, gpu_image):
@@ -154,6 +157,45 @@ def derivative_result(u, v, width, height, count=1):
     gradient = sum(math.cos(u * v + i) for i in range(count))
     return (value, gradient * v / max(1, width - 1),
             gradient * u / max(1, height - 1))
+
+
+def surface_globals(u, v, width, height, field=-1):
+    if field < 0:
+        field = int(u > 0.25) + 2 * int(v > 0.25) + 4 * int(u > v)
+    return ((u, v, 1), (1 / max(1, width - 1), 0, 0),
+            (0, 1 / max(1, height - 1), 0), (0, 0, 1), (0, 0, 1),
+            (1, 0, 0), (0, 1, 0), (0, 0, 0))[field]
+
+
+def surface_result(u, v, width, height, operation=-1, planar=False, value=None):
+    if operation < 0:
+        operation = int(u > 0.5) + 2 * int(v > 0.5)
+    du, dv = 1 / max(1, width - 1), 1 / max(1, height - 1)
+    if value is None:
+        value = (u, 2 * v, 0 if planar else 1 + u * v)
+        dx = (du, 0, 0 if planar else v * du)
+        dy = (0, 2 * dv, 0 if planar else u * dv)
+    else:
+        dx = dy = (0, 0, 0)
+    square = sum(x * x for x in value)
+    length = math.sqrt(square)
+    projections = [sum(x * d for x, d in zip(value, deriv)) for deriv in (dx, dy)]
+    if operation in (0, 1) and length == 0:
+        # OSL's zero-length normalize/length return zero derivatives.
+        return (0, 0, 0)
+    if operation == 0:
+        weighted = sum((i + 1) * x for i, x in enumerate(value))
+        derivatives = [
+            sum((i + 1) * d for i, d in enumerate(deriv)) / length
+            - weighted * projection / length**3
+            for deriv, projection in zip((dx, dy), projections)
+        ]
+        return (weighted / length, *derivatives)
+    if operation == 1:
+        return (length, *(p / length for p in projections))
+    if operation == 2:
+        return (square, *(2 * p for p in projections))
+    return (value[2], dx[2], dy[2])
 
 
 try:
@@ -227,9 +269,9 @@ try:
                     cpu = pixels(run(flags + loop_args), 3, 3)
                     gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
                                       "--iters", "3"] + flags + loop_args), 3, 3)
-                    compare(cpu, expected, 5e-6)
+                    compare(cpu, expected, 6e-6)
                     compare(gpu, expected, 2e-6)
-                    compare(gpu, cpu, 5e-6)
+                    compare(gpu, cpu, 6e-6)
 
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
@@ -268,11 +310,70 @@ try:
                     gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
                                       "--iters", "3"] + constant_flags + shader_args),
                                  3, 2)
-                    compare(cpu, expected, 5e-6)
+                    compare(cpu, expected, 6e-6)
                     compare(gpu, expected, 2e-6)
-                    compare(gpu, cpu, 5e-6)
+                    compare(gpu, cpu, 6e-6)
 
-    if args.gpu and not (args.loops or args.derivatives):
+    if args.surface:
+        for shader, error in (
+            ("hart_surface_incident", "unsupported shader global 'I'"),
+            ("hart_surface_write", "writing shader global 'N'"),
+            ("hart_surface_space", "unsupported type 'string'"),
+        ):
+            run(["--hart", "-v", shader], error)
+            run(["--hart", "-v", "--shader", shader, "producer",
+                 "--shader", "hart_first", "consumer"], error)
+        connected = connected_group("hart_surface_consumer",
+                                    producer="hart_surface_producer")
+        for optimize in ("10", "3"):
+            flags = ["--llvm_opt", optimize]
+            for width, height in ((1, 1), (3, 2), (37, 5)):
+                check_render(flags + connected, width, height,
+                             reference(width, height,
+                                       lambda u, v: surface_result(u, v, width, height)))
+            check_render(flags + ["hart_surface_globals"], 3, 2,
+                         reference(3, 2, lambda u, v: surface_globals(u, v, 3, 2)))
+            for planar in (0, 1):
+                def values(u, v):
+                    length = math.sqrt(u * u + v * v + (1 - planar))
+                    return (1 - planar, length, u / length if length else 0)
+                check_render(flags + ["--param", "planar", str(planar),
+                                      "hart_surface_values"], 3, 2, reference(3, 2, values))
+            for operation in (0, 1):
+                planar_group = ["--param", "planar", "1"] + connected_group(
+                    "hart_surface_consumer", ["--param", "operation", str(operation)],
+                    producer="hart_surface_producer")
+                check_render(flags + planar_group, 3, 2, reference(
+                    3, 2, lambda u, v: surface_result(u, v, 3, 2, operation, planar=True)))
+            cases = [
+                (["--param", "field", str(field), "hart_surface_globals"],
+                 lambda u, v, field=field: surface_globals(u, v, 3, 2, field))
+                for field in range(8)
+            ]
+            for operation in range(5):
+                parameters = ["--param", "operation", str(operation)]
+                cases.append((
+                    connected_group("hart_surface_consumer", parameters,
+                                    producer="hart_surface_producer"),
+                    lambda u, v, operation=operation: surface_result(u, v, 3, 2, operation),
+                ))
+                cases.append((
+                    ["--param:type=vector", "value", "1,2,3"] + parameters
+                    + ["hart_surface_consumer"],
+                    lambda u, v, operation=operation: surface_result(
+                        u, v, 3, 2, operation, value=(1, 2, 3)),
+                ))
+            for shader_args, evaluate in cases:
+                text_flags = flags + ["-O0", "-g", "3", "2", "--print"]
+                expected = reference(3, 2, evaluate)
+                cpu = pixels(run(text_flags + shader_args), 3, 2)
+                gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
+                                  "--iters", "3"] + text_flags + shader_args), 3, 2)
+                compare(cpu, expected, 6e-6)
+                compare(gpu, expected, 2e-6)
+                compare(gpu, cpu, 6e-6)
+
+    if args.gpu and not (args.loops or args.derivatives or args.surface):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -331,14 +432,14 @@ try:
                 cpu = pixels(run(flags + shader_args), 3, 3)
                 gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
                                   "--iters", "3"] + flags + shader_args), 3, 3)
-                compare(cpu, expected, 5e-6)
+                compare(cpu, expected, 6e-6)
                 compare(gpu, expected, 2e-6)
-                compare(gpu, cpu, 5e-6)
+                compare(gpu, cpu, 6e-6)
             parameter_group = ["--llvm_opt", optimize, "-O0",
                                "--param:type=float", "scale", "2"] + connected
             expected = [0.5, 0.5, math.sin(2)]
             compare(pixels(run(["--print"] + parameter_group), 1, 1),
-                    expected, 5e-6)
+                    expected, 6e-6)
             compare(pixels(run(["--hart", "--print", "--hart-no-cache",
                                 "--warmup", "--iters", "3"] + parameter_group),
                            1, 1), expected, 2e-6)
@@ -361,7 +462,8 @@ try:
 finally:
     shutil.rmtree(root)
 
-suite = "derivative" if args.derivatives else ("loop" if args.loops else "CLI")
+suite = ("surface" if args.surface else
+         ("derivative" if args.derivatives else ("loop" if args.loops else "CLI")))
 print("Generated HART " + suite + " checks passed"
       + ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
          if args.gpu else ""))
