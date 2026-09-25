@@ -4,5 +4,6 @@
 
 shader hart_surface_incident(output color Cout = 0)
 {
-    Cout = color(I);
+    // Keep rejecting an unsupported global now that I is readable.
+    Cout = color(Ps);
 }

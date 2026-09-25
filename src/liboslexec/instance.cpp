@@ -484,8 +484,9 @@ ShaderInstance::validate_hart() const
         ustring("getmatrix"),
     };
     static const ustring readable_globals[] = {
-        ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
-        ustring("Ng"), ustring("dPdu"), ustring("dPdv"),
+        ustring("u"),    ustring("v"),  ustring("P"),
+        ustring("N"),    ustring("Ng"), ustring("dPdu"),
+        ustring("dPdv"), ustring("I"),  ustring("time"),
     };
     for (const Opcode& op : m_master->m_ops) {
         if (std::find(std::begin(supported), std::end(supported), op.opname())

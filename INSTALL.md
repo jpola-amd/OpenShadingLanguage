@@ -452,11 +452,15 @@ Cout = color(w, Dx(w), Dy(w));
 Here the red channel is `abs(cos(u*v))*sqrt((v*dudx)^2+(u*dvdy)^2)`;
 green and blue are zero.
 
-Read-only surface geometry is also available: `P`, `N`, `Ng`, `dPdu`, and
-`dPdv`, in addition to `u` and `v`. The test grid is still a synthetic flat
-patch, not a ray-traced scene. It supplies `P=(u,v,1)`, `N=Ng=(0,0,1)`,
+Read-only surface geometry is also available: `P`, `N`, `Ng`, `dPdu`, `dPdv`,
+`I`, and `time`, in addition to `u` and `v`. The test grid is still a synthetic
+flat patch, not a ray-traced scene. It supplies `P=(u,v,1)`, `N=Ng=(0,0,1)`,
 `dPdu=(1,0,0)`, and `dPdv=(0,1,0)`. Position derivatives are
 `Dx(P)=(dudx,0,0)` and `Dy(P)=(0,dvdy,0)`.
+Like CPU testshade, this grid supplies `I=(0,0,0)` and `time=0`, with zero
+derivatives and filter widths. These are explicit synthetic-grid defaults,
+not camera-ray directions or animated sampling; no new camera or time
+controls are implied. All shader globals remain read-only.
 
 Unqualified `point`, `vector`, and `normal` constructors work in common
 space, together with `dot`, `length`, and `normalize`. Construction does
@@ -470,8 +474,8 @@ zero, including zero derivatives, following ordinary OSL behavior.
 Numeric, non-periodic Perlin noise is supported through `noise` (unsigned)
 and `snoise` (signed). The coordinate forms are `noise(x)`, `noise(x,y)`,
 `noise(p)`, and `noise(p,t)` for 1D through 4D, with the same forms for
-`snoise`. The third form uses a point; the fourth adds a numeric coordinate,
-not a dependency on the still-unsupported `time` global.
+`snoise`. The third form uses a point; the fourth adds a numeric coordinate
+that need not be the `time` global.
 Select float, color, or vector results with an explicitly typed temporary.
 For example:
 
@@ -615,7 +619,7 @@ options remain unsupported.
 
 `Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
 tracing, shader printing, writes to shader globals, other globals such as
-`I` and `time`, unlisted coordinate spaces and transforms,
+`Ps` and `dtime`, unlisted coordinate spaces and transforms,
 general strings, arrays, interpolated or interactive parameters, other
 renderer-service callbacks, batched execution, instrumentation, more than two
 layers, explicit entry layers, multiple final outputs, and unlisted frontend
@@ -665,7 +669,7 @@ verify linked scalar/color derivative-aware sine calls and derivative-sized
 connected storage at level 10, and reject the still-unsupported `Dz`
 operation.
 
-`hart-surface-runtime` checks all supported geometry globals, position
+`hart-surface-runtime` checks the original surface globals, position
 derivatives, and value-only and derivative-aware vector math. A connected
 producer exercises point/normal/vector construction and a consumer selects
 normalization, length, or dot products, including mixed derivative/non-derivative
@@ -754,6 +758,13 @@ matrix queries, values and derivatives against CPU and analytical references.
 matrices, checks the artifact remains unchanged, and requires matching pipeline
 cache hits while the rendered values and derivatives change and change back.
 
+`hart-geometry-runtime` checks read-only `I` and `time`, their derivatives and
+filter widths against the grid's exact-zero defaults. It also composes named
+transforms, procedural UVs and texture sampling in standalone and connected
+groups at LLVM levels 10 and 3, including disabled OSL optimization. Values
+and derivatives are compared with CPU execution and the sampler oracle.
+Unsupported globals and writes still fail before launch.
+
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
 cell/hash pattern, and an explicitly footprint-filtered transition.
@@ -767,7 +778,7 @@ bound, not a backend limit.
 
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|texture|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|texture|matrix|spaces|transform|geometry|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
   -R "^hart-(codegen-.*|texture-(resources|runtime))$" --output-on-failure
 ```

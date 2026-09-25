@@ -40,11 +40,13 @@ suites.add_argument("--matrices", action="store_true",
                     help="Run numeric matrix and matrix-transform runtime cases")
 suites.add_argument("--spaces", action="store_true",
                     help="Run literal common/object/shader space runtime cases")
+suites.add_argument("--geometry", action="store_true",
+                    help="Run read-only I/time and composed material runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
-        or args.spaces) and not args.gpu:
+        or args.spaces or args.geometry) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1260,6 +1262,107 @@ def check_space_suite():
             "'string'" if case == 2 else "HART: unsupported coordinate space")
 
 
+def geometry_globals_reference():
+    def evaluate(u, v):
+        field = min(int(12 * v), 11)
+        du = dv = 1 / 16
+        if field < 6:
+            return (0, 0, 0)
+        if field == 6:
+            return (u, v, u * v)
+        if field == 7:
+            return (du, 0, v * du)
+        if field == 8:
+            return (0, dv, u * dv)
+        if field == 9:
+            return (du, dv, math.hypot(v * du, u * dv))
+        if field == 10:
+            return (u + v, du, dv)
+        return (u * v, v * du, u * dv)
+    return reference(17, 17, evaluate)
+
+
+def geometry_material_reference(optimize, levels):
+    coordinates = [noise_cpu_image(["--llvm_opt", optimize, "--param", "report",
+                                    str(report), "hart_texture_uv"], 17, 9)
+                   for report in (1, 2)]
+    spaces = space_to_common()
+    matrix = matrix_product(spaces[2], matrix_inverse(spaces[1]))
+    images = [[], []]
+    for i in range(17 * 9):
+        s, dsdx, dsdy = coordinates[0][3 * i:3 * i + 3]
+        t, dtdx, dtdy = coordinates[1][3 * i:3 * i + 3]
+        # I, dIdx, dIdy and time contribute zero under CPU grid defaults.
+        p = (s, t, 0.5)
+        q = [sum(p[k] * matrix[k][j] for k in range(3)) + matrix[3][j]
+             for j in range(2)]
+        derivatives = [[0.375 * sum(d[k] * matrix[k][j] for k in range(3))
+                        for j in range(2)]
+                       for d in ((dsdx, dtdx, 0), (dsdy, dtdy, 0))]
+        gradients = (*derivatives[0], *derivatives[1])
+        assert max(math.hypot(8 * gradients[0], 4 * gradients[1]),
+                   math.hypot(8 * gradients[2], 4 * gradients[3])) < 1
+        sampled = texture_sample(levels, 0.875 + 0.375 * q[0],
+                                 0.875 + 0.375 * q[1], gradients,
+                                 True, ("clamp", "clamp"))
+        component = int(8 * ((i % 17) / 16)) % 3
+        images[0].extend(sampled[0])
+        images[1].extend(values[component] for values in sampled)
+    return images
+
+
+def geometry_material_arguments(optimize, connected, report, specialize="-O2"):
+    producer = ["--shader", "hart_texture_uv", "producer"] if connected else []
+    consumer = ["--param", "connected", str(int(connected)),
+                "--param", "report", str(report)]
+    if connected:
+        consumer += ["--shader", "hart_geometry_material", "consumer",
+                     "--connect", "producer", "Cout", "consumer", "value"]
+    else:
+        consumer += ["hart_geometry_material"]
+    return ["--llvm_opt", optimize, specialize] + producer + consumer
+
+
+def check_geometry_suite():
+    levels = prepare_texture_images()[0]
+    for optimize in ("10", "3"):
+        print("Checking HART geometry/materials at LLVM level " + optimize,
+              flush=True)
+        shader_args = ["--llvm_opt", optimize, "hart_geometry_globals"]
+        expected = geometry_globals_reference()
+        cpu = noise_cpu_image(shader_args, 17, 17)
+        compare(cpu, expected)
+        actual = check_texture_render(shader_args, 17, 17, expected)
+        for image in (cpu, actual):
+            # The first eight rows read only I/time, their derivatives or widths.
+            compare(image[:8 * 17 * 3], [0] * (8 * 17 * 3), 0)
+
+        expected = geometry_material_reference(optimize, levels)
+        cases = [(False, 1, "-O0" if optimize == "10" else "-O2"),
+                 (True, 1, "-O2"), (optimize == "3", 0, "-O2")]
+        packed = []
+        for connected, report, specialize in cases:
+            shader_args = geometry_material_arguments(optimize, connected, report,
+                                                      specialize)
+            cpu = noise_cpu_image(shader_args, 17, 9)
+            compare(cpu, expected[report])
+            actual = check_texture_render(shader_args, 17, 9, expected[report])
+            compare(actual, cpu)
+            if report:
+                assert max(abs(d) for d in actual[1::3]) > 1e-4
+                assert max(abs(d) for d in actual[2::3]) > 1e-4
+                packed.append(actual)
+        compare(packed[0], packed[1])
+
+    for case, global_name in enumerate(("I", "time")):
+        name = "hart_geometry_rejected_" + str(case)
+        compile_fixture(fixtures / "hart_geometry_rejected.osl", name,
+                        ("GEOMETRY_WRITE_TIME=" + str(case),))
+        run(["--hart", "-v", "--shader", name, "unused",
+             "--shader", "hart_first", "surface"],
+            "HART: writing shader global '" + global_name + "'")
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1373,7 +1476,7 @@ try:
 
     if args.surface:
         for shader, error in (
-            ("hart_surface_incident", "unsupported shader global 'I'"),
+            ("hart_surface_incident", "unsupported shader global 'Ps'"),
             ("hart_surface_write", "writing shader global 'N'"),
             ("hart_space_rejected", "HART: unsupported coordinate space"),
         ):
@@ -1524,9 +1627,13 @@ try:
     if args.spaces:
         check_space_suite()
 
+    if args.geometry:
+        check_geometry_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
-                         or args.procedural or args.textures or args.matrices or args.spaces):
+                         or args.procedural or args.textures or args.matrices
+                         or args.spaces or args.geometry):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

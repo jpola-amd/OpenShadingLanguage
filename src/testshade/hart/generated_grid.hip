@@ -36,6 +36,9 @@ __raygen__testshade_generated()
     sg.dPdy = OSL::Vec3(0.0f, sg.dvdy, 0.0f);
     sg.dPdu = OSL::Vec3(1.0f, 0.0f, 0.0f);
     sg.dPdv = OSL::Vec3(0.0f, 1.0f, 0.0f);
+    // Imath's default vector constructor does not initialize its components.
+    sg.I = sg.dIdx = sg.dIdy = OSL::Vec3(0.0f);
+    sg.time                  = 0.0f;
     sg.N = sg.Ng   = OSL::Vec3(0.0f, 0.0f, 1.0f);
     sg.surfacearea = 1.0f;
     sg.raytype     = params.raytype;

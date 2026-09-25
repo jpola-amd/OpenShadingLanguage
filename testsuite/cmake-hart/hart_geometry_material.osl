@@ -1,0 +1,34 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_geometry_material(color value = 0, int connected = 0, int report = 0,
+                              output color Cout = 0)
+{
+    float s = value[0], t = value[1];
+    if (!connected) {
+        // Match hart_texture_uv so one- and two-layer execution can agree.
+        float n = psnoise(2 * u - 1, 2 * v - 1, 2, 2);
+        s = 0.25 + 0.375 * u + 0.0625 * n;
+        t = 0.125 + 0.5 * v - 0.03125 * n;
+    }
+    point p = point(s, t, 0.5) + 0.125 * I;
+    p[0] += 0.0625 * (time + I[2]);
+    point q = transform(matrix("shader", "object"), p);
+    s = 0.875 + 0.375 * q[0];
+    t = 0.875 + 0.375 * q[1];
+    color sampled = texture("hart_texture_rgb.pfm", s, t,
+                            "interp", "linear", "wrap", "clamp");
+    if (report == 0)
+        Cout = sampled;
+    else {
+        int probe = int(8 * u);
+        int component = probe - 3 * (probe / 3);
+        float sample = sampled[0];
+        if (component == 1)
+            sample = sampled[1];
+        else if (component == 2)
+            sample = sampled[2];
+        Cout = color(sample, Dx(sample), Dy(sample));
+    }
+}

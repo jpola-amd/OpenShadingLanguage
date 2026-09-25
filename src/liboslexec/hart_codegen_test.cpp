@@ -600,7 +600,7 @@ check_noise_modules(string_view arch, string_view stdosl)
         { "pnoise(\"usimplex\",P,point(2))",
           "unsupported noise type 'usimplex'" },
         { "pnoise(\"gabor\",P,point(2))", "unsupported noise type 'gabor'" },
-        { "noise(I)", "unsupported shader global 'I'" },
+        { "noise(Ps)", "unsupported shader global 'Ps'" },
     };
     for (const auto& test : rejected) {
         const auto source = fmtformat(
@@ -836,6 +836,68 @@ check_space_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_geometry_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_geometry_producer(output vector value=0) { "
+        "value=I+vector(u+time,v-time,u*v)+Dx(I)+Dy(I); }",
+        "shader hart_geometry_consumer(vector value=0,output color Cout=0) { "
+        "point p=transform(\"common\",\"shader\",point(value)); "
+        "color c=texture(\"hart-test-texture.exr\",p[0],p[1],"
+        "\"interp\",\"linear\",\"wrap\",\"clamp\"); Cout=c+Dx(c)+Dy(c); }",
+        "shader hart_geometry_test(output color Cout=0) { "
+        "Cout=color(I+Dx(I)+Dy(I)+filterwidth(I))"
+        "+color(time+Dx(time)+Dy(time)+filterwidth(time)); }",
+    };
+    std::string bytecode[3];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+            return false;
+    }
+    for (int osl_optimize : { 0, 2 })
+        for (int optimize : { 10, 3 })
+            for (bool connected : { false, true }) {
+                HartServices renderer(true, true);
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                ss.attribute("hart_arch", arch);
+                ss.attribute("optimize", osl_optimize);
+                ss.attribute("llvm_optimize", optimize);
+                auto group = connected ? make_connected_group(ss, bytecode[0],
+                                                              bytecode[1])
+                                       : make_group(ss, bytecode[2]);
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr, "{}\n", errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                check_module(ss, *group, arch,
+                             connected
+                                 ? std::initializer_list<
+                                       string_view> { "osl_texture",
+                                                      "osl_transform_triple" }
+                                 : std::initializer_list<
+                                       string_view> { "osl_filterwidth_vdv" },
+                             optimize, connected);
+            }
+    for (string_view body :
+         { "if (enable) I=vector(u,v,1);", "if (enable) time=u;" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                fmtformat(
+                    "shader hart_geometry_write(int enable=0,output color Cout=0) {{ {} }}",
+                    body),
+                bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, "writing shader global");
+    }
+    return true;
+}
+
+
+
+bool
 check_texture_modules(string_view arch, string_view stdosl)
 {
     for (string_view type : { "float", "color" }) {
@@ -1051,7 +1113,7 @@ main(int argc, char* argv[])
         "else if(selected==2) result=dot(value,value); "
         "else if(selected==3) result=dot(value,N); else result=dot(Ng,value); "
         "Cout=color(result,Dx(result),Dy(result)); }",
-        "shader hart_surface_incident(output color Cout=0) { Cout=color(I); }",
+        "shader hart_surface_unsupported(output color Cout=0) { Cout=color(Ps); }",
         "shader hart_surface_write_normal(int enable=0, output color Cout=0) { "
         "if(enable) N=normal(u,v,1); Cout=color(u,v,0); }",
         "shader hart_surface_write_position(output color Cout=0) { P[0]=u; Cout=color(P); }",
@@ -1071,7 +1133,7 @@ main(int argc, char* argv[])
         "vector w=filterwidth(value); if(derivative==1) Cout=color(Dx(w)); "
         "else if(derivative==2) Cout=color(Dy(w)); else Cout=color(w); }",
         "shader hart_filterwidth_noise(output color Cout=0) { float value=noise(P); Cout=color(filterwidth(value)); }",
-        "shader hart_filterwidth_incident(output color Cout=0) { Cout=color(filterwidth(I)); }",
+        "shader hart_filterwidth_unsupported(output color Cout=0) { Cout=color(filterwidth(Ps)); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -1207,8 +1269,8 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[21], "unsupported operation 'printf'");
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
     check_rejection(arch, oso[28], "unsupported operation 'Dz'");
-    check_rejection(arch, oso[44], "unsupported shader global 'I'");
-    check_rejection(arch, oso[35], "unsupported shader global 'I'");
+    check_rejection(arch, oso[44], "unsupported shader global 'Ps'");
+    check_rejection(arch, oso[35], "unsupported shader global 'Ps'");
     check_rejection(arch, oso[36], "writing shader global 'N'");
     check_rejection(arch, oso[37], "writing shader global 'P'");
     {
@@ -1266,6 +1328,7 @@ main(int argc, char* argv[])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])
         || !check_space_modules(arch, argv[2])
+        || !check_geometry_modules(arch, argv[2])
         || !check_texture_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;
