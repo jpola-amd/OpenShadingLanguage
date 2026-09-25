@@ -413,6 +413,28 @@ values vary across the grid. Singular matrices and zero homogeneous
 denominators retain existing OSL behavior rather than introducing a new
 inverse or projection policy. Named spaces remain a separate capability.
 
+Literal `"common"`, `"object"` and `"shader"` coordinate spaces are supported
+by spatial constructors, `transform`, `matrix`, and `getmatrix`. For example:
+
+```osl
+point p = transform("object", "shader", P);
+normal n = normal("object", 0, 0, 1);
+matrix M = matrix("shader", "common");
+Cout = color(transform(M, p));
+```
+
+The test renderer uses the same static transforms as CPU testshade: shader
+space has a 45-degree Z rotation and translation `(1,0,0)`, and object space
+has a 90-degree Z rotation and translation `(0,1,0)`. Forward/inverse matrices
+are uploaded per render and referenced through `ShaderGlobals`; neither
+matrix values nor host addresses are baked into the compiled shader group.
+The generated launch parameters change, but the external-module ABI does not.
+Renderers must advertise `HARTTransforms` and supply the matrix callbacks.
+Dynamic names, other spaces (including `"world"`, `"camera"` and `"myspace"`),
+animated/nonlinear transforms, and color-space transforms remain unsupported.
+Unknown names fail before optimization, even for same-name identity transforms
+or unused code.
+
 `filterwidth` computes `sqrt(Dx(x)*Dx(x) + Dy(x)*Dy(x))` for a float input,
 or the same expression component-wise for a color, point, vector, or normal.
 It uses propagated derivatives, including those copied across layer
@@ -593,8 +615,7 @@ options remain unsupported.
 
 `Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
 tracing, shader printing, writes to shader globals, other globals such as
-`I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
-named coordinate transforms,
+`I` and `time`, unlisted coordinate spaces and transforms,
 general strings, arrays, interpolated or interactive parameters, other
 renderer-service callbacks, batched execution, instrumentation, more than two
 layers, explicit entry layers, multiple final outputs, and unlisted frontend
@@ -726,6 +747,12 @@ options in unused code, missing/UDIM resources, and nonfinite device inputs.
 GPU, including derivative propagation, non-uniform scale, shear, composition,
 inverse/transpose, projective points, and matrix-valued layer connections.
 It compares analytical cases and CPU results at LLVM levels 10 and 3.
+
+`hart-spaces-runtime` checks named point/vector/normal transforms, constructors,
+matrix queries, values and derivatives against CPU and analytical references.
+`hart-transform-rebind` uses one already optimized group with A-B-A runtime
+matrices, checks the artifact remains unchanged, and requires matching pipeline
+cache hits while the rendered values and derivatives change and change back.
 
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating

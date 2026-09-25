@@ -1,0 +1,24 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#ifndef SPACE_CASE
+#define SPACE_CASE 0
+#endif
+
+shader hart_space_rejected(
+#if SPACE_CASE == 2
+    string space = "object",
+#endif
+    int enabled = 0, output color Cout = 0)
+{
+#if SPACE_CASE == 0
+    // Even a CPU-registered space is outside HART's literal whitelist.
+    if (enabled)
+        Cout = color(point("myspace", u, v, 1));
+#elif SPACE_CASE == 1
+    Cout = color(transform("unknown", "unknown", P));
+#else
+    Cout = color(transform(space, "common", P));
+#endif
+}

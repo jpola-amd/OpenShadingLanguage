@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <OSL/oslconfig.h>
+
 #include <cstdint>
 
 namespace testshade {
@@ -19,9 +21,12 @@ struct HartGeneratedParams {
     uint64_t point_count;
     int raytype;
     const HartTextureState* textures;
+    const OSL::Matrix44* transforms;
 };
 
-static_assert(sizeof(void*) == 8 && sizeof(HartGeneratedParams) == 56,
+static_assert(sizeof(void*) == 8 && sizeof(HartGeneratedParams) == 64,
               "The generated HART grid ABI requires 64-bit pointers");
+static_assert(sizeof(OSL::Matrix44) == 16 * sizeof(float),
+              "The HART transform ABI requires packed 4x4 float matrices");
 
 }  // namespace testshade

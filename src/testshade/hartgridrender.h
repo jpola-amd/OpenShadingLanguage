@@ -41,6 +41,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          string_view arch, int width, int height,
                          int iterations, bool warmup, bool verbose, int raytype,
                          bool print_pixels, string_view output_file,
-                         string_view dataformat);
+                         string_view dataformat, const Matrix44& object2common,
+                         const Matrix44& shader2common);
 
 OSL_NAMESPACE_END

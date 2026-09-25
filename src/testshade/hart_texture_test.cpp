@@ -342,7 +342,7 @@ test_resources()
         return;
     OIIO_CHECK_EQUAL(state.count, uint64_t(6));
 
-    for (unsigned int bit : { 1u, 2u, 4u, 7u, 8u }) {
+    for (unsigned int bit : { 1u, 2u, 4u, 7u, 8u, 15u, 16u }) {
         const int before_errors = errors.errors;
         if (!hip_ok(hipMemcpy(state.errors, &bit, sizeof(bit),
                               hipMemcpyHostToDevice)))

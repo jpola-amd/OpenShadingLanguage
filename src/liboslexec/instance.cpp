@@ -481,6 +481,7 @@ ShaderInstance::validate_hart() const
         ustring("mxcompassign"), ustring("transpose"),
         ustring("determinant"),  ustring("transform"),
         ustring("transformv"),   ustring("transformn"),
+        ustring("getmatrix"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
@@ -518,6 +519,37 @@ ShaderInstance::validate_hart() const
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
             if (op.opname() == ustring("texture") && sym.typespec().is_string())
                 continue;
+            if (sym.typespec().is_string()
+                && (op.opname() == ustring("matrix")
+                    || op.opname() == ustring("getmatrix")
+                    || op.opname() == ustring("transform")
+                    || op.opname() == ustring("transformv")
+                    || op.opname() == ustring("transformn")
+                    || op.opname() == ustring("point")
+                    || op.opname() == ustring("vector")
+                    || op.opname() == ustring("normal"))) {
+                if (!sym.is_constant()) {
+                    shadingsys().errorfmt(
+                        "HART: coordinate spaces must be literal strings in shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+                const ustring space = sym.get_string();
+                if (space != ustring("common") && space != ustring("object")
+                    && space != ustring("shader")) {
+                    shadingsys().errorfmt(
+                        "HART: unsupported coordinate space '{}' in shader '{}' ({}:{})",
+                        space, shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+                if (!shadingsys().renderer()->supports("HARTTransforms")) {
+                    shadingsys().errorfmt(
+                        "HART: renderer lacks HARTTransforms in shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+                continue;
+            }
             // Inlined function markers carry a name, not a device string.
             // The body remains subject to the same per-operation checks.
             if (op.opname() == ustring("functioncall") && op.nargs() == 1

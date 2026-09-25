@@ -199,7 +199,10 @@ public:
     GeneratedRenderer() : m_textures(errhandler()) { }
 
     int supports(string_view feature) const override
-    { return feature == "HART" || feature == "HARTTextures"; }
+    {
+        return feature == "HART" || feature == "HARTTextures"
+               || feature == "HARTTransforms";
+    }
 
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -368,7 +371,8 @@ public:
     bool render(int width, int height, int iterations, bool warmup,
                 span<float> pixels, size_t group_size = 0,
                 size_t group_alignment = 0, int raytype = 0,
-                HartTextureStore* textures = nullptr)
+                HartTextureStore* textures = nullptr,
+                cspan<Matrix44> transforms = { })
     {
         const size_t bytes       = pixels.size() * sizeof(float);
         const size_t params_size = group_alignment
@@ -381,6 +385,18 @@ public:
         const testshade::HartGridParams params { static_cast<float*>(m_output) };
         testshade::HartGeneratedParams generated { };
         if (group_alignment) {
+            if (transforms.size() != 4) {
+                m_err.errorfmt(
+                    "Generated HART mode requires four transform matrices");
+                return false;
+            }
+            if (!hip_check(hipMalloc(&m_transforms, transforms.size_bytes()),
+                           "hipMalloc transforms")
+                || !hip_check(hipMemcpy(m_transforms, transforms.data(),
+                                        transforms.size_bytes(),
+                                        hipMemcpyHostToDevice),
+                              "hipMemcpy transforms"))
+                return false;
             const size_t limit = std::numeric_limits<size_t>::max();
             const size_t count = pixels.size() / 3;
             if ((group_alignment & (group_alignment - 1))
@@ -414,7 +430,8 @@ public:
                           scratch_bytes,
                           count,
                           raytype,
-                          textures ? textures->device_state() : nullptr };
+                          textures ? textures->device_state() : nullptr,
+                          static_cast<const Matrix44*>(m_transforms) };
         }
         if (!hip_check(hipMemcpy(m_params,
                                  group_alignment
@@ -468,7 +485,8 @@ public:
             ok = hip_check(hipStreamSynchronize(m_stream),
                            "hipStreamSynchronize during cleanup")
                  && ok;
-        for (void** buffer : { &m_params, &m_output, &m_record, &m_scratch }) {
+        for (void** buffer :
+             { &m_params, &m_output, &m_record, &m_scratch, &m_transforms }) {
             if (*buffer) {
                 ok      = hip_check(hipFree(*buffer), "hipFree") && ok;
                 *buffer = nullptr;
@@ -552,6 +570,7 @@ private:
     void* m_params             = nullptr;
     void* m_output             = nullptr;
     void* m_scratch            = nullptr;
+    void* m_transforms         = nullptr;
 };
 
 }  // namespace
@@ -704,7 +723,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          string_view arch, int width, int height,
                          int iterations, bool warmup, bool verbose, int raytype,
                          bool print_pixels, string_view output_file,
-                         string_view dataformat)
+                         string_view dataformat, const Matrix44& object2common,
+                         const Matrix44& shader2common)
 {
     auto& err  = renderer.errhandler();
     auto* generated = dynamic_cast<GeneratedRenderer*>(&renderer);
@@ -810,10 +830,12 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         || !runtime.load(modules, "__raygen__testshade_generated", callables))
         return false;
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
+    const Matrix44 transforms[] = { object2common, object2common.inverse(),
+                                    shader2common, shader2common.inverse() };
     const bool rendered = runtime.render(width, height, iterations, warmup,
                                          pixels, size_t(group_size),
                                          size_t(group_alignment), raytype,
-                                         &textures);
+                                         &textures, transforms);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

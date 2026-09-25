@@ -48,9 +48,15 @@ namespace {
 
 class HartServices final : public RendererServices {
 public:
-    explicit HartServices(bool textures = false) : m_textures(textures) { }
+    explicit HartServices(bool textures = false, bool transforms = false)
+        : m_textures(textures), m_transforms(transforms)
+    {
+    }
     int supports(string_view feature) const override
-    { return feature == "HART" || (m_textures && feature == "HARTTextures"); }
+    {
+        return feature == "HART" || (m_textures && feature == "HARTTextures")
+               || (m_transforms && feature == "HARTTransforms");
+    }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
     {
@@ -69,6 +75,7 @@ public:
 
 private:
     bool m_textures;
+    bool m_transforms;
 };
 
 
@@ -337,11 +344,14 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         if (name.empty() || optimize != 10)
             continue;
         const auto* shadeop = module.getFunction(std::string(name));
-        const bool linked   = shadeop && !shadeop->isDeclaration()
+        const bool callback = OIIO::Strutil::starts_with(name, "rs_");
+        const bool used     = shadeop && shadeop->isDeclaration() == callback
                               && !shadeop->use_empty();
-        if (!linked)
-            print(stderr, "Expected a linked, used shadeop '{}'\n", name);
-        OIIO_CHECK_ASSERT(linked);
+        if (!used)
+            print(stderr, "Expected a used {} '{}'\n",
+                  callback ? "renderer callback declaration" : "linked shadeop",
+                  name);
+        OIIO_CHECK_ASSERT(used);
         const bool scalar_derivs = name == "osl_sin_dfdf"
                                    || name == "osl_filterwidth_fdf"
                                    || OIIO::Strutil::contains(name, "noise_df");
@@ -744,6 +754,88 @@ check_matrix_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_space_modules(string_view arch, string_view stdosl)
+{
+    for (string_view type : { "point", "vector", "normal" }) {
+        const auto body = fmtformat(
+            "{0} p={0}(\"object\",u,v,1); "
+            "matrix a=matrix(\"shader\",\"common\"); "
+            "matrix b=matrix(\"shader\",1.0); "
+            "matrix c=matrix(\"object\",1,0,0,0,0,1,0,0,0,0,1,0,u,v,0,1); "
+            "matrix d=1; int ok=getmatrix(\"common\",\"object\",d); "
+            "value=transform(\"common\",\"shader\",p)"
+            "+transform(a*b*c*d,{0}(u,v,1))+{0}(ok);",
+            type);
+        const std::string sources[] = {
+            fmtformat("shader hart_space_test(output color Cout=0) {{ "
+                      "{} value=0; {} Cout=color(value+Dx(value)+Dy(value)); }}",
+                      type, body),
+            fmtformat("shader hart_space_producer(output {} value=0) {{ {} }}",
+                      type, body),
+            fmtformat(
+                "shader hart_space_consumer({0} value=0,output color Cout=0) {{ "
+                "Cout=color(value+Dx(value)+Dy(value)); }}",
+                type),
+        };
+        std::string bytecode[3];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+                return false;
+        }
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 })
+                for (bool connected : { false, true }) {
+                    HartServices renderer(false, true);
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("optimize", osl_optimize);
+                    ss.attribute("llvm_optimize", optimize);
+                    auto group = connected
+                                     ? make_connected_group(ss, bytecode[1],
+                                                            bytecode[2])
+                                     : make_group(ss, bytecode[0]);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "Spaces {}: {}\n", type,
+                              errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    check_module(ss, *group, arch,
+                                 { "osl_transform_triple",
+                                   "osl_get_from_to_matrix",
+                                   "osl_prepend_matrix_from",
+                                   "rs_get_matrix_space_time",
+                                   "rs_get_inverse_matrix_space_time" },
+                                 optimize, connected);
+                }
+    }
+    for (string_view body :
+         { "Cout=color(point(\"myspace\",u,v,1));",
+           "Cout=color(transform(\"bogus\",\"bogus\",P));",
+           "matrix m=matrix(\"camera\",\"common\"); Cout=color(m[0][0]);",
+           "if (u<0) Cout=color(vector(\"\",u,v,1));" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                fmtformat("shader hart_bad_space(output color Cout=0) {{ {} }}",
+                          body),
+                bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors,
+                             "unsupported coordinate space");
+    }
+    return true;
+}
+
+
+
+bool
 check_texture_modules(string_view arch, string_view stdosl)
 {
     for (string_view type : { "float", "color" }) {
@@ -1129,7 +1221,7 @@ main(int argc, char* argv[])
         check_rejected_group(ss, *group, errors, "instrumentation");
     }
     // The two-argument transform is a stdosl wrapper.
-    check_rejection(arch, oso[38], "unsupported type 'string'");
+    check_rejection(arch, oso[38], "renderer lacks HARTTransforms");
     for (string_view type : { "point", "vector", "normal" }) {
         for (string_view space : { "object", "common" }) {
             OSLCompiler compiler;
@@ -1140,7 +1232,7 @@ main(int argc, char* argv[])
                             type, space);
             if (!compiler.compile_buffer(source, bytecode, { }, argv[2]))
                 return 1;
-            check_rejection(arch, bytecode, "unsupported type 'string'");
+            check_rejection(arch, bytecode, "renderer lacks HARTTransforms");
         }
     }
     for (bool userdata : { false, true }) {
@@ -1173,6 +1265,7 @@ main(int argc, char* argv[])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])
+        || !check_space_modules(arch, argv[2])
         || !check_texture_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;

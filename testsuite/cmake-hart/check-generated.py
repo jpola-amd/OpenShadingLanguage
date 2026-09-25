@@ -38,10 +38,13 @@ suites.add_argument("--textures", action="store_true",
                     help="Run explicit HART texture sampler runtime cases")
 suites.add_argument("--matrices", action="store_true",
                     help="Run numeric matrix and matrix-transform runtime cases")
+suites.add_argument("--spaces", action="store_true",
+                    help="Run literal common/object/shader space runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
-        or args.procedural or args.textures or args.matrices) and not args.gpu:
+        or args.procedural or args.textures or args.matrices
+        or args.spaces) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1165,6 +1168,98 @@ def check_matrix_suite():
                     compare(image[2::3], [0] * (65 * 9), 0)
 
 
+def space_to_common():
+    c = math.sqrt(0.5)
+    # setup_transformations preserves these translations while rotating the
+    # basis: Imath's mutating rotate prepends the rotation to the translation.
+    return [
+        matrix_identity(),
+        [[0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 1]],
+        [[c, c, 0, 0], [-c, c, 0, 0], [0, 0, 1, 0], [1, 0, 0, 1]],
+    ]
+
+
+def space_reference(report):
+    spaces = space_to_common()
+    inverse = [matrix_inverse(matrix) for matrix in spaces]
+    result = []
+    for row in range(33):
+        v, kind = row / 32, row // 11
+        operation = (row % 11) // 2
+        for col in range(65):
+            u = col / 64
+            pair = min(int(9 * u), 8)
+            from_space, to_space = divmod(pair, 3)
+            gain = 0.5 + 0.25 * u - 0.125 * v
+            q = [0.25 + u + 0.25 * gain, 2 * v - 0.5 - 0.5 * gain,
+                 1 + u * v + 0.125 * gain]
+            dx = [1.0625 / 64, -0.125 / 64, (v + 0.03125) / 64]
+            dy = [-0.03125 / 32, 2.0625 / 32, (u - 0.015625) / 32]
+            numeric = matrix_identity()
+            if operation == 4:
+                numeric = matrix_identity(1 + gain)
+            elif operation == 5:
+                numeric = [[1 + gain, 0.25, 0, 0], [0, 2, 0, 0],
+                           [0, 0, 0.5, 0], [0.25, -0.125, 0.375, 1]]
+            matrix = matrix_product(matrix_product(spaces[from_space], numeric),
+                                    inverse[to_space])
+            if report == 2:
+                inspected = matrix_identity() if operation in (0, 3) else matrix
+                result.extend((1, matrix_determinant(inspected), inspected[3][0]))
+                continue
+            if kind == 2:
+                matrix = [list(row) for row in zip(*matrix_inverse(matrix))]
+            # All these maps are affine, or homogeneous uniform scalings.
+            # As in phase 1, matrix elements themselves have no derivatives.
+            w = matrix[3][3] if kind == 0 else 1
+            values = [(sum(q[i] * matrix[i][j] for i in range(3))
+                       + (matrix[3][j] if kind == 0 else 0)) / w for j in range(3)]
+            derivatives = [[sum(d[i] * matrix[i][j] for i in range(3)) / w
+                            for j in range(3)] for d in (dx, dy)]
+            component = col % 3
+            result.extend((values[component], derivatives[0][component],
+                           derivatives[1][component]) if report else values)
+    return result
+
+
+def space_arguments(optimize, report=0, specialize="-O2"):
+    return (["--llvm_opt", optimize, specialize]
+            + connected_group("hart_space_consumer", ["--param", "report", str(report)],
+                              producer="hart_space_producer")
+            + ["--connect", "producer", "gain", "consumer", "gain"])
+
+
+def check_space_suite():
+    for optimize in ("10", "3"):
+        print("Checking HART literal spaces at LLVM level " + optimize, flush=True)
+        cases = [(report, "-O2") for report in (0, 1, 2)] + [(1, "-O0")]
+        for report, specialize in cases:
+            shader_args = space_arguments(optimize, report, specialize)
+            expected = space_reference(report)
+            cpu = noise_cpu_image(shader_args, 65, 33)
+            compare(cpu, expected)
+            actual = check_texture_render(shader_args, 65, 33, expected)
+            compare(actual, cpu)
+            if report == 2:
+                compare(actual[0::3], [1] * (65 * 33), 0)
+
+    # This formerly rejected object-space constructor is now a positive case.
+    # Keep repeated cached execution on just this small representative.
+    expected = reference(17, 9, lambda u, v: (-v, u + 1, 1))
+    shader_args = ["--llvm_opt", "3", "hart_surface_space"]
+    compare(noise_cpu_image(shader_args, 17, 9), expected)
+    check_texture_render(shader_args, 17, 9, expected, repeat=True)
+
+    for case in range(3):
+        name = "hart_space_rejected_" + str(case)
+        compile_fixture(fixtures / "hart_space_rejected.osl", name,
+                        ("SPACE_CASE=" + str(case),))
+        shader_args = ([name] if case else
+                       ["--shader", name, "unused", "--shader", "hart_first", "surface"])
+        run(["--hart", "-v"] + shader_args,
+            "'string'" if case == 2 else "HART: unsupported coordinate space")
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1280,7 +1375,7 @@ try:
         for shader, error in (
             ("hart_surface_incident", "unsupported shader global 'I'"),
             ("hart_surface_write", "writing shader global 'N'"),
-            ("hart_surface_space", "unsupported type 'string'"),
+            ("hart_space_rejected", "HART: unsupported coordinate space"),
         ):
             run(["--hart", "-v", shader], error)
             run(["--hart", "-v", "--shader", shader, "producer",
@@ -1426,9 +1521,12 @@ try:
     if args.matrices:
         check_matrix_suite()
 
+    if args.spaces:
+        check_space_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
-                         or args.procedural or args.textures or args.matrices):
+                         or args.procedural or args.textures or args.matrices or args.spaces):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

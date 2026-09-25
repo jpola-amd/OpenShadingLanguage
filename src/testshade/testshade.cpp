@@ -2145,12 +2145,13 @@ test_shade(int argc, const char* argv[])
 
 #if OSL_TESTSHADE_HART
     if (use_hart) {
+        setup_transformations(*rend, Mshad, Mobj);
         const bool ok = testshade_hart_generated(
             *rend, *shadingsys, *shadergroup, hart, hart_arch, xres, yres,
             iters, warmup, verbose || debug1,
             shadingsys->raytype_bit(ustring(raytype_name)), print_outputs,
             outputfiles.empty() ? string_view("null") : outputfiles[0],
-            dataformatname);
+            dataformatname, Mobj, Mshad);
         shadergroup.reset();
         delete shadingsys;
         shadingsys = nullptr;

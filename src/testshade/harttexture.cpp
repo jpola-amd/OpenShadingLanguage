@@ -382,14 +382,17 @@ HartTextureStore::check_errors()
     if (!errors)
         return true;
     impl.err.errorfmt(
-        "HART texture sampling failed (error bits {}): {}{}{}{}", errors,
+        "HART device services failed (error bits {}): {}{}{}{}{}", errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
             ? "nonfinite coordinates/gradients; "
             : "",
         errors & testshade::HartTextureInvalidOptions ? "invalid options; "
                                                       : "",
-        errors & ~7u ? "unknown error; " : "");
+        errors & testshade::HartInvalidTransform
+            ? "invalid transform binding/space; "
+            : "",
+        errors & ~15u ? "unknown error; " : "");
     return false;
 }
 

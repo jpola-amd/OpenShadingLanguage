@@ -81,6 +81,7 @@ if (OSL_USE_HART)
     set (hart_generated_declarations "")
     set (hart_generated_entries "")
     set (hart_generated_grids)
+    set (hart_generated_grid_cpp)
     if (USE_LLVM_BITCODE)
         get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
         list (APPEND hart_include_dirs ${include_dirs})
@@ -95,6 +96,7 @@ if (OSL_USE_HART)
             set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/generated_grid.bc.cpp")
             MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${generated_grid_bc}")
             list (APPEND testshade_srcs "${embedded}")
+            list (APPEND hart_generated_grid_cpp "${embedded}")
             list (APPEND hart_generated_grids "${generated_grid_bc}")
             string (APPEND hart_generated_declarations
                 "extern unsigned char ${symbol}_block[];\nextern int ${symbol}_size;\n")
@@ -325,6 +327,11 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --matrices)
             set_tests_properties (hart-matrix-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-spaces-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --spaces)
+            set_tests_properties (hart-spaces-runtime PROPERTIES LABELS "hart;gpu")
         endif ()
     endif ()
 endif ()
@@ -336,6 +343,24 @@ if (BUILD_TESTING AND OSL_USE_HART)
         target_link_libraries (hart_texture_test PRIVATE OpenImageIO::OpenImageIO hip::host)
         add_dependencies (hart_texture_test testshade)
         set_target_properties (hart_texture_test PROPERTIES FOLDER "Unit Tests")
+        if (USE_LLVM_BITCODE)
+            add_executable (hart_transform_test hart_transform_test.cpp
+                hartgridrender.cpp harttexture.cpp simplerend.cpp ${hart_generated_grid_cpp})
+            target_include_directories (hart_transform_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+            target_include_directories (hart_transform_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+            target_link_libraries (hart_transform_test PRIVATE oslexec oslquery oslcomp
+                ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+            osl_hart_target (hart_transform_test)
+            add_dependencies (hart_transform_test testshade)
+            set_target_properties (hart_transform_test PROPERTIES FOLDER "Unit Tests")
+            if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+                add_test (NAME hart-transform-rebind COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                    "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")
+                set_tests_properties (hart-transform-rebind PROPERTIES
+                    LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+            endif ()
+        endif ()
         if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
             add_test (NAME hart-texture-resources COMMAND hart_texture_test)
             set_tests_properties (hart-texture-resources PROPERTIES

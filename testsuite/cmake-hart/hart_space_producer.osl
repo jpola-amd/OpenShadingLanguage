@@ -1,0 +1,9 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_space_producer(output color value = 0, output float gain = 0)
+{
+    value = color(0.25 + u, 2 * v - 0.5, 1 + u * v);
+    gain = 0.5 + 0.25 * u - 0.125 * v;
+}

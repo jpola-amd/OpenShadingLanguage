@@ -194,6 +194,22 @@ osl_get_inverse_matrix(OpaqueExecContextPtr oec, void* r, ustringhash_pod to_)
     }
     return ok;
 }
+#elif defined(__HIPCC__)
+OSL_SHADEOP OSL_HOSTDEVICE int
+osl_get_matrix(OpaqueExecContextPtr oec, void* r, ustringhash_pod from_)
+{
+    return rs_get_matrix_space_time(oec, MAT(r), ustringhash_from(from_),
+                                    get_time(oec));
+}
+
+
+
+OSL_SHADEOP OSL_HOSTDEVICE int
+osl_get_inverse_matrix(OpaqueExecContextPtr oec, void* r, ustringhash_pod to_)
+{
+    return rs_get_inverse_matrix_space_time(oec, MAT(r), ustringhash_from(to_),
+                                            get_time(oec));
+}
 #else
 // Implemented by the renderer
 #    define OSL_SHADEOP_EXPORT extern "C" OSL_DLL_EXPORT

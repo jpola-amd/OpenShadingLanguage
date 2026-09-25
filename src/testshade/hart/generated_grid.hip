@@ -5,6 +5,7 @@
 #include <amd/hart/hart_optix_compat.h>
 
 #include "texture.h"
+#include "transform.h"
 
 #include <OSL/oslconfig.h>
 #include <OSL/shaderglobals.h>
@@ -39,6 +40,8 @@ __raygen__testshade_generated()
     sg.surfacearea = 1.0f;
     sg.raytype     = params.raytype;
     sg.renderstate = const_cast<testshade::HartTextureState*>(params.textures);
+    sg.object2common = params.transforms;
+    sg.shader2common = params.transforms + 2;
     void* group    = params.scratch + shadeindex * params.group_stride;
     optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int, void*>(
         0u, &sg, group, nullptr, params.output, int(shadeindex), nullptr);
