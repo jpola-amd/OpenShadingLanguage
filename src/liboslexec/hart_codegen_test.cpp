@@ -1710,6 +1710,238 @@ check_texture_alpha_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_texture_firstchannel_modules(string_view arch, string_view stdosl)
+{
+    OSLCompiler consumer_compiler;
+    std::string consumer;
+    if (!consumer_compiler.compile_buffer(
+            "shader hart_channel_consumer(float value=0,output color Cout=0) { "
+            "Cout=color(value,Dx(value),Dy(value)); }",
+            consumer, { }, stdosl))
+        return false;
+    const struct {
+        int firstchannel;
+        bool reset;
+        bool connected;
+    } tests[] = {
+        { 0, false, false }, { 1, false, false }, { 2, false, false },
+        { 3, false, true },  { 4, false, false }, { 2147483647, false, true },
+        { 1, true, false },
+    };
+    for (const auto& test : tests) {
+        const int settings_per_call = test.reset ? 2
+                                                 : (test.firstchannel ? 1 : 0);
+        const auto options          = fmtformat(
+            "\"interp\",\"linear\",\"wrap\",\"periodic\",\"firstchannel\",{}{}",
+            test.firstchannel, test.reset ? ",\"firstchannel\",0" : "");
+        const auto body = fmtformat(
+            "float extra=0; "
+            "color c=texture(\"hart-test-texture.exr\",u,v,{0},\"alpha\",value); "
+            "float f=texture(\"hart-test-texture.exr\",v,u,0.25,0,0,0.5,"
+            "{0},\"alpha\",extra); "
+            "color plain_c=texture(\"hart-test-texture.exr\",0.5*u,v,{0}); "
+            "float plain_f=texture(\"hart-test-texture.exr\",u,0.5*v,{0}); "
+            "value+=extra+dot(vector(c+plain_c),vector(1))+f+plain_f; ",
+            options);
+        const auto source
+            = test.connected
+                  ? fmtformat("shader hart_channel_producer("
+                              "output float value=0) {{ {} }}",
+                              body)
+                  : fmtformat("shader hart_channel(output color Cout=0) {{ "
+                              "float value=0; {} "
+                              "Cout=color(value,Dx(value),Dy(value)); }}",
+                              body);
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 }) {
+                HartServices renderer(true);
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                ss.attribute("hart_arch", arch);
+                ss.attribute("optimize", osl_optimize);
+                ss.attribute("llvm_optimize", optimize);
+                auto group = test.connected
+                                 ? make_connected_group(ss, bytecode, consumer)
+                                 : make_group(ss, bytecode);
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr, "Texture firstchannel {}: {}\n",
+                          test.firstchannel, errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                OIIO_CHECK_ASSERT(renderer.texture_requests > 0);
+                check_module(ss, *group, arch,
+                             { "osl_texture",
+                               test.firstchannel
+                                   ? "osl_texture_set_firstchannel"
+                                   : "" },
+                             optimize, test.connected, false, false,
+                             test.connected ? 2 : 0);
+                if (optimize != 10)
+                    continue;
+                const void* bytes = nullptr;
+                uint64_t size     = 0;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                                  TypeDesc::PTR, &bytes));
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "hart_bitcode_size",
+                                                  TypeUInt64, &size));
+                if (!bytes || !size)
+                    continue;
+                llvm::LLVMContext context;
+                const llvm::StringRef data(static_cast<const char*>(bytes),
+                                           size);
+                auto parsed = llvm::parseBitcodeFile(
+                    llvm::MemoryBufferRef(data, "hart_firstchannel"), context);
+                if (!parsed) {
+                    print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+                    OIIO_CHECK_ASSERT(false);
+                    continue;
+                }
+                const auto* shader = (*parsed)->getFunction(
+                    test.connected
+                        ? "osl_layer_group_hart_test_group_name_producer"
+                        : "osl_layer_group_hart_test_group_name_layer0");
+                OIIO_CHECK_ASSERT(shader);
+                if (!shader)
+                    continue;
+                int calls = 0, alpha_calls = 0, scalar_calls = 0;
+                std::vector<int64_t> settings;
+                const llvm::Value* options_ptr = nullptr;
+                for (const auto& block : *shader)
+                    for (const auto& inst : block) {
+                        const auto* call = llvm::dyn_cast<llvm::CallInst>(
+                            &inst);
+                        const auto* callee = call ? call->getCalledFunction()
+                                                  : nullptr;
+                        if (!callee)
+                            continue;
+                        if (callee->getName()
+                            == "osl_texture_set_firstchannel") {
+                            OIIO_CHECK_ASSERT(!callee->isDeclaration());
+                            OIIO_CHECK_ASSERT(
+                                callee->getReturnType()->isVoidTy());
+                            OIIO_CHECK_EQUAL(call->arg_size(), 2);
+                            if (call->arg_size() != 2)
+                                continue;
+                            const auto* value
+                                = llvm::dyn_cast<llvm::ConstantInt>(
+                                    call->getArgOperand(1));
+                            OIIO_CHECK_ASSERT(value);
+                            if (value) {
+                                OIIO_CHECK_ASSERT(
+                                    value->getType()->isIntegerTy(32));
+                                settings.push_back(value->getSExtValue());
+                            }
+                            if (options_ptr)
+                                OIIO_CHECK_EQUAL(call->getArgOperand(0),
+                                                 options_ptr);
+                            options_ptr = call->getArgOperand(0);
+                        }
+                        if (callee->getName() != "osl_texture")
+                            continue;
+                        ++calls;
+                        OIIO_CHECK_EQUAL(call->arg_size(), 18);
+                        if (call->arg_size() != 18)
+                            continue;
+                        OIIO_CHECK_EQUAL(settings.size(),
+                                         size_t(settings_per_call));
+                        if (!settings.empty())
+                            OIIO_CHECK_EQUAL(settings[0], test.firstchannel);
+                        if (test.reset && settings.size() == 2)
+                            OIIO_CHECK_EQUAL(settings[1], 0);
+                        if (options_ptr)
+                            OIIO_CHECK_EQUAL(call->getArgOperand(3),
+                                             options_ptr);
+                        settings.clear();
+                        options_ptr = nullptr;
+                        const auto* channels = llvm::dyn_cast<llvm::ConstantInt>(
+                            call->getArgOperand(10));
+                        OIIO_CHECK_ASSERT(channels);
+                        if (channels) {
+                            OIIO_CHECK_ASSERT(channels->getZExtValue() == 1
+                                              || channels->getZExtValue() == 3);
+                            scalar_calls += channels->getZExtValue() == 1;
+                        }
+                        const bool alpha = !llvm::isa<llvm::ConstantPointerNull>(
+                            call->getArgOperand(14)->stripPointerCasts());
+                        alpha_calls += alpha;
+                        for (int arg = 11; arg <= 16; ++arg)
+                            OIIO_CHECK_EQUAL(
+                                llvm::isa<llvm::ConstantPointerNull>(
+                                    call->getArgOperand(arg)
+                                        ->stripPointerCasts()),
+                                arg >= 14 && !alpha);
+                    }
+                OIIO_CHECK_ASSERT(settings.empty());
+                OIIO_CHECK_EQUAL(calls, 4);
+                OIIO_CHECK_EQUAL(alpha_calls, 2);
+                OIIO_CHECK_EQUAL(scalar_calls, 2);
+            }
+    }
+    const struct {
+        string_view parameter;
+        string_view channel;
+        string_view error;
+    } rejected[] = {
+        { "", "-1", "firstchannel requires a literal nonnegative integer" },
+        { "", "channel", "firstchannel requires a literal nonnegative integer" },
+        { "", "int(4*u)",
+          "firstchannel requires a literal nonnegative integer" },
+        { "", "1.0", "firstchannel requires a literal nonnegative integer" },
+        { "", "color(1)",
+          "firstchannel requires a literal nonnegative integer" },
+        { "int channels[2]={1,2},", "channels", "unsupported type" },
+    };
+    // Rejection must precede folding default parameters or pruning layers.
+    for (const auto& test : rejected)
+        for (int mode : { 0, 1, 2 }) {
+            const auto source = fmtformat(
+                "shader hart_bad_channel(int channel=0,int enable=0,"
+                "{}output color Cout=0) {{ {} "
+                "Cout=texture(\"hart-test-texture.exr\",u,v,\"interp\",\"linear\","
+                "\"wrap\",\"clamp\",\"firstchannel\",{}); }}",
+                test.parameter, mode == 1 ? "if(enable)" : "", test.channel);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            HartServices renderer(true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", 2);
+            ShaderGroupRef group;
+            if (mode == 2) {
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_bad_channel", bytecode));
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_channel_consumer",
+                                                consumer));
+                group = ss.ShaderGroupBegin("hart_test_group");
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_bad_channel", "unused"));
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_channel_consumer", "consumer"));
+                OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+                const SymLocationDesc output("consumer.Cout", TypeColor, false,
+                                             SymArena::Outputs, 0,
+                                             3 * sizeof(float));
+                ss.add_symlocs(group.get(), { &output, 1 });
+            } else {
+                group = make_group(ss, bytecode);
+            }
+            check_rejected_group(ss, *group, errors, test.error);
+        }
+    return true;
+}
+
+
+
+bool
 check_texture_modules(string_view arch, string_view stdosl)
 {
     for (string_view type : { "float", "color" }) {
@@ -1818,7 +2050,8 @@ check_texture_modules(string_view arch, string_view stdosl)
         return false;
     check_rejection(arch, bytecode, "unsupported type 'string'", 1, false,
                     true);
-    return check_texture_alpha_modules(arch, stdosl);
+    return check_texture_alpha_modules(arch, stdosl)
+           && check_texture_firstchannel_modules(arch, stdosl);
 }
 
 

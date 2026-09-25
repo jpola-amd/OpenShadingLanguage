@@ -327,6 +327,11 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --texture-alpha)
             set_tests_properties (hart-texture-alpha-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-texture-channels-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --texture-channels)
+            set_tests_properties (hart-texture-channels-runtime PROPERTIES LABELS "hart;gpu")
             add_test (NAME hart-matrix-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"

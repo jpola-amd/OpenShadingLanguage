@@ -637,22 +637,27 @@ The filename must be a nonempty literal. An explicit literal `"interp"` of
 axes: `"wrap"` sets both, or use `"swrap"` and `"twrap"`. Each supports
 `"black"`, `"clamp"`, or `"periodic"`. The optional `"alpha", alpha` writes
 to a scalar float variable using the normal OSL texture shadeop.
+`"firstchannel", N` selects a literal nonnegative integer channel offset
+(default zero). Parameter-driven, varying, negative and non-integer offsets
+are rejected before optimization, including in unused code.
 The default OIIO smart-bicubic/anisotropic filtering is **not** approximated
 silently: omitted filtering/wrap options and unsupported options are errors,
 including in branches or layers that optimization could remove.
 
 The renderer loads raw numeric pixels from the first subimage of a non-deep
 2D image with one to four channels. It performs no colorspace conversion or
-alpha premultiplication. Float lookups read the first channel; color lookups
-read the first three, zero-filling missing channels rather than replicating
-grayscale. Full shifted image windows work; cropped/data-window mismatches
-are rejected. Stored mip levels are preserved, and missing levels are
+alpha premultiplication. Float lookups read one channel starting at
+`firstchannel`; color lookups read three consecutive channels. Any requested
+channel beyond the file's channel count returns zero with zero derivatives,
+even if the entire request is beyond the end. Missing channels are not filled
+by replicating grayscale. Full shifted image windows work; cropped/data-window
+mismatches are rejected. Stored mip levels are preserved, and missing levels are
 box-resized to `max(1, floor(size/2))` down to 1x1.
 
-Alpha is the next channel after the returned value: channel 1 for a float
-lookup or channel 3 for a color lookup (zero-based), not a search for a channel
-named "A". Missing alpha is zero, with zero derivatives; it is not implicitly
-opaque. Alpha's `Dx`/`Dy` follow the same reconstruction and coordinate-gradient
+Alpha is the next channel after the returned value: `firstchannel + 1` for a
+float lookup or `firstchannel + 3` for a color lookup (zero-based), not a search
+for a channel named "A". Missing alpha is zero, with zero derivatives; it is not
+implicitly opaque. Alpha's `Dx`/`Dy` follow the same reconstruction and coordinate-gradient
 chain rule as RGB, including across layer connections. Requesting alpha does
 not premultiply or otherwise change the returned color. This raw-channel
 contract does not emulate OIIO's optional grayscale-to-RGB expansion.
@@ -680,9 +685,9 @@ stable resource IDs, while each launch binds the current device descriptor
 table, keeping resource addresses out of cached shader code. Required images
 that cannot be loaded fail group compilation; nonfinite coordinates/gradients and invalid runtime
 bindings fail the launch rather than returning a successful black image.
-Dynamic filenames, UDIMs, texture3d/environment, first-channel
-selection, subimage selection, colorspace, width/blur, and error-message
-options remain unsupported.
+Dynamic filenames, UDIMs, texture3d/environment, dynamic channel selection,
+subimage selection, colorspace, width/blur, fill/missing-color overrides, and
+error-message options remain unsupported.
 
 `Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
 tracing, shader printing, writes to shader globals, other globals such as

@@ -415,6 +415,13 @@ ShaderInstance::validate_hart() const
                     return fail("texture alpha requires a float output");
                 continue;
             }
+            if (name == Strings::firstchannel) {
+                if (!value.is_constant() || !value.typespec().is_int()
+                    || value.get_int() < 0)
+                    return fail(
+                        "texture firstchannel requires a literal nonnegative integer");
+                continue;
+            }
             if (name != ustring("interp") && name != ustring("wrap")
                 && name != ustring("swrap") && name != ustring("twrap"))
                 return fail(fmtformat("unsupported texture option '{}'", name));

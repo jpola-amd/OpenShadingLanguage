@@ -40,6 +40,8 @@ suites.add_argument("--textures", action="store_true",
                     help="Run explicit HART texture sampler runtime cases")
 suites.add_argument("--texture-alpha", action="store_true",
                     help="Run HART texture alpha value and derivative cases")
+suites.add_argument("--texture-channels", action="store_true",
+                    help="Run literal HART texture channel-offset cases")
 suites.add_argument("--matrices", action="store_true",
                     help="Run numeric matrix and matrix-transform runtime cases")
 suites.add_argument("--spaces", action="store_true",
@@ -62,7 +64,8 @@ suites.add_argument("--fused-benchmark", action="store_true",
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
-        or args.procedural or args.textures or args.texture_alpha or args.matrices
+        or args.procedural or args.textures or args.texture_alpha
+        or args.texture_channels or args.matrices
         or args.spaces or args.geometry or args.groups
         or args.topology or args.materials or args.fused
         or args.fused_local or args.fused_benchmark) and not args.gpu:
@@ -768,7 +771,8 @@ def prepare_texture_images(scale=1):
     return [texture_mips(image) for image in images]
 
 
-def texture_sample(levels, s, t, gradients, linear, wraps, nchannels=3):
+def texture_sample(levels, s, t, gradients, linear, wraps, nchannels=3,
+                   firstchannel=0):
     height, width = len(levels[0]), len(levels[0][0])
     zeros = (0,) * nchannels
     dsdx, dtdx, dsdy, dtdy = gradients
@@ -787,7 +791,8 @@ def texture_sample(levels, s, t, gradients, linear, wraps, nchannels=3):
                     return zeros
                 indices.append(coordinate % size if wrap == "periodic"
                                else min(max(coordinate, 0), size - 1))
-            return (image[indices[1]][indices[0]] + zeros)[:nchannels]
+            pixel = image[indices[1]][indices[0]]
+            return (pixel[firstchannel:] + zeros)[:nchannels]
 
         if not linear:
             return fetch(math.floor(s * w), math.floor(t * h)), zeros, zeros
@@ -1063,13 +1068,16 @@ def prepare_texture_alpha_images():
     return images
 
 
-def texture_alpha_reference(levels, report=1):
+def texture_alpha_reference(levels, report=1, firstchannel=0):
     result = []
     for row in range(17):
         for column in range(65):
-            s, t, gradients, linear, wraps, scalar, _ = texture_probe(column, row)
-            sampled = texture_sample(levels, s, t, gradients, linear, wraps, 4)
-            if report:
+            s, t, gradients, linear, wraps, scalar, component = texture_probe(column, row)
+            sampled = texture_sample(levels, s, t, gradients, linear, wraps,
+                                     4, firstchannel)
+            if report == 2:
+                result.extend(values[0 if scalar else component] for values in sampled)
+            elif report:
                 # OSL's alpha is the channel after the requested return type.
                 result.extend(values[1 if scalar else 3] for values in sampled)
             else:
@@ -1180,6 +1188,83 @@ def check_texture_alpha_suite():
     shader_args += ["--hart-local-groupdata", "2147483647"]
     check_texture_render(shader_args, 65, 17, references[3],
                          repeat=True, callable_mode="fused")
+
+
+def check_texture_channel_oracle(images):
+    gradients = (0.125, 0.375, -0.125, 0.25)
+    for levels in images:
+        for wraps in (("black", "black"), ("clamp", "clamp"),
+                      ("periodic", "periodic"), ("clamp", "periodic")):
+            for s, t in ((0.37, 0.41), (-0.02, 0.37), (1.01, -0.04)):
+                base = texture_sample(levels, s, t, gradients, True, wraps, 4)
+                for firstchannel in (0, 1, 2, 3, 4, 2147483647):
+                    shifted = texture_sample(levels, s, t, gradients, True, wraps,
+                                              4, firstchannel)
+                    for actual, values in zip(shifted, base):
+                        compare(actual, (values[firstchannel:] + (0,) * 4)[:4], 0)
+
+
+def check_texture_channel_suite():
+    images = prepare_texture_alpha_images()
+    check_texture_alpha_oracle(images)
+    check_texture_channel_oracle(images)
+    # Two derivative-packed reports cover return channels and relative alpha.
+    # Smaller images exercise last-present/first-absent boundaries separately.
+    cases = [(4, firstchannel, report, False)
+             for firstchannel in (0, 1, 2, 3, 4, 2147483647) for report in (2, 1)]
+    for channels in (1, 2, 3):
+        cases += [(channels, channels - 1, 2, False), (channels, channels, 1, False)]
+    cases += [(4, 3, 2, True)]
+    compiled = set()
+    print("Checking HART literal texture channel offsets", flush=True)
+    for channels, firstchannel, report, reset in cases:
+        name = "hart_texture_alpha_channels_{}_{}{}".format(
+            channels, firstchannel, "_reset" if reset else "",
+        )
+        if name not in compiled:
+            defines = ["ALPHA_CHANNELS=" + str(channels),
+                       "FIRSTCHANNEL=" + str(firstchannel)]
+            if reset:
+                defines += ["FIRSTCHANNEL_RESET=1"]
+            compile_fixture(fixtures / "hart_texture_alpha.osl", name, defines)
+            compiled.add(name)
+        optimize = "10" if firstchannel in (1, 2147483647) and not reset else "3"
+        specialize = ("-O0" if (channels, firstchannel, report, reset)
+                      == (4, 1, 2, False) else "-O2")
+        shader_args = ["--llvm_opt", optimize, specialize,
+                       "--param", "report", str(report), name]
+        effective = 0 if reset else firstchannel
+        expected = texture_alpha_reference(images[channels - 1], report, effective)
+        # Do not feed INT_MAX to OIIO; the independent oracle checks that case.
+        if channels >= 3 and effective < channels:
+            check_texture_alpha_cpu(shader_args, expected, report)
+        if reset and report == 2:
+            shader_args += ["--hart-local-groupdata", "2147483647"]
+        actual = check_texture_render(
+            shader_args, 65, 17, expected, repeat=reset and report == 2,
+            callable_mode=("fused" if reset or (channels, firstchannel, report)
+                           == (4, 2, 1) else None),
+        )
+        for row in range(17):
+            for col in range(65):
+                _, _, _, linear, _, scalar, component = texture_probe(col, row)
+                selected = ((1 if scalar else 3) if report == 1
+                            else (0 if scalar else component))
+                offset = 3 * (row * 65 + col)
+                if effective >= channels or selected >= channels - effective:
+                    compare(actual[offset:offset + 3], (0, 0, 0), 0)
+                elif not linear or col // 8 in (2, 8):
+                    compare(actual[offset + 1:offset + 3], (0, 0), 0)
+
+    for case in range(4):
+        name = "hart_texture_alpha_rejected_" + str(case)
+        compile_fixture(fixtures / "hart_texture_alpha_rejected.osl", name,
+                        ("FIRSTCHANNEL_CASE=" + str(case),))
+        shader_args = ([name] if case >= 2 else
+                       (["--param", "enabled", "0", name] if case == 0 else
+                        ["--shader", name, "unused",
+                         "--shader", "hart_first", "surface"]))
+        run(["--hart", "-v"] + shader_args, "firstchannel")
 
 
 def matrix_identity(scale=1):
@@ -2326,6 +2411,9 @@ try:
     if args.texture_alpha:
         check_texture_alpha_suite()
 
+    if args.texture_channels:
+        check_texture_channel_suite()
+
     if args.matrices:
         check_matrix_suite()
 
@@ -2356,7 +2444,7 @@ try:
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.texture_alpha
-                         or args.matrices
+                         or args.texture_channels or args.matrices
                          or args.spaces or args.geometry or args.groups
                          or args.topology or args.materials or args.fused
                          or args.fused_local or args.fused_benchmark):
@@ -2451,7 +2539,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.texture_alpha:
+if args.texture_channels:
+    suite = "texture channels"
+elif args.texture_alpha:
     suite = "texture alpha"
 elif args.fused_benchmark:
     suite = "fused benchmark"

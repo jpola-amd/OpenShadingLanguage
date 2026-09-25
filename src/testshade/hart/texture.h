@@ -143,7 +143,7 @@ rs_texture(OSL::OpaqueExecContextPtr ec, OSL::ustringhash,
     if (!isfinite(s) || !isfinite(t) || !isfinite(dsdx) || !isfinite(dtdx)
         || !isfinite(dsdy) || !isfinite(dtdy))
         error |= testshade::HartTextureNonfiniteCoordinates;
-    if (nchannels < 1 || nchannels > 4
+    if (nchannels < 1 || nchannels > 4 || options.firstchannel < 0
         || (options.interpmode != OSL::TextureOpt::InterpClosest
             && options.interpmode != OSL::TextureOpt::InterpBilinear)
         || !texture_wrap_supported(options.swrap)
@@ -191,12 +191,16 @@ rs_texture(OSL::OpaqueExecContextPtr ec, OSL::ustringhash,
     }
     // Differentiate the reconstruction with a fixed footprint, not the LOD.
     // osl_texture applies the existing coordinate-to-screen chain rule.
+    const int available = texture.channels - options.firstchannel;
     for (int channel = 0; channel < nchannels; ++channel) {
-        result[channel] = sample.value[channel];
+        // Bound before adding so even firstchannel == INT_MAX is safe.
+        const bool present = channel < available;
+        const int source   = present ? options.firstchannel + channel : 0;
+        result[channel]    = present ? sample.value[source] : 0;
         if (dresultds)
-            dresultds[channel] = sample.ds[channel];
+            dresultds[channel] = present ? sample.ds[source] : 0;
         if (dresultdt)
-            dresultdt[channel] = sample.dt[channel];
+            dresultdt[channel] = present ? sample.dt[source] : 0;
     }
     return true;
 }

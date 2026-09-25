@@ -15,9 +15,21 @@
 #define ALPHA_FILE "hart_texture_alpha_4.exr"
 #endif
 
-#define IMPLICIT(...) texture(ALPHA_FILE, s, t, "alpha", alpha, __VA_ARGS__)
+#ifdef FIRSTCHANNEL
+#ifdef FIRSTCHANNEL_RESET
+#define CHANNEL_OPTIONS "firstchannel", FIRSTCHANNEL, "firstchannel", 0,
+#else
+#define CHANNEL_OPTIONS "firstchannel", FIRSTCHANNEL,
+#endif
+#else
+#define CHANNEL_OPTIONS
+#endif
+
+#define IMPLICIT(...) \
+    texture(ALPHA_FILE, s, t, CHANNEL_OPTIONS "alpha", alpha, __VA_ARGS__)
 #define EXPLICIT(...) \
-    texture(ALPHA_FILE, s, t, dsdx, dtdx, dsdy, dtdy, "alpha", alpha, __VA_ARGS__)
+    texture(ALPHA_FILE, s, t, dsdx, dtdx, dsdy, dtdy, \
+            CHANNEL_OPTIONS "alpha", alpha, __VA_ARGS__)
 #define SAMPLE_OPTIONS(function, result)                            \
     if (mode == 0)                                                 \
         result = function("interp", "closest", "wrap", "black");   \
@@ -95,6 +107,17 @@ shader hart_texture_alpha(int report = 1,
     value = alpha;
 #else
     // report=1 leaves the ordinary texture return dead after specialization.
-    Cout = report == 0 ? rgb : color(alpha, Dx(alpha), Dy(alpha));
+    if (report == 0)
+        Cout = rgb;
+    else if (report == 2) {
+        int component = probe - 3 * (probe / 3);
+        float sample = rgb[0];
+        if (component == 1)
+            sample = rgb[1];
+        else if (component == 2)
+            sample = rgb[2];
+        Cout = color(sample, Dx(sample), Dy(sample));
+    } else
+        Cout = color(alpha, Dx(alpha), Dy(alpha));
 #endif
 }
