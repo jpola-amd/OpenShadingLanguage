@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -262,7 +263,7 @@ artifact(ShadingSystem& ss, ShaderGroup& group, std::string& result,
 
 
 bool
-run(string_view stdosl, Diagnostics& diagnostics)
+run(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 {
     OutputFiles outputs;
     if (!outputs.create(diagnostics))
@@ -287,6 +288,9 @@ run(string_view stdosl, Diagnostics& diagnostics)
     if (!ss.attribute("hart_arch", arch)
         || !ss.attribute("llvm_debugging_symbols", 0)
         || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? std::numeric_limits<int>::max()
+                                               : 0)
         || !ss.attribute("llvm_optimize", 3) || !ss.attribute("optimize", 2)) {
         diagnostics.errorfmt("Cannot configure HART transform compilation");
         return false;
@@ -313,6 +317,12 @@ run(string_view stdosl, Diagnostics& diagnostics)
     const void* original_address = nullptr;
     if (!artifact(ss, *group, original_bitcode, original_address, diagnostics))
         return false;
+    int local_bytes = 0;
+    if (!ss.getattribute(group.get(), "hart_groupdata_alloc", local_bytes)
+        || (local_bytes > 0) != (mode == "fused-local")) {
+        diagnostics.errorfmt("Unexpected HART transform group storage mode");
+        return false;
+    }
 
     const Affine object_a { 2, 0.5, -0.25, 3, 0.75, 4, { 5, -2, 1.5 } };
     const Affine shader_a { 1.5, -0.75, 0.5, 2.5, -0.25, 0.5, { -3, 4, 2 } };
@@ -320,6 +330,7 @@ run(string_view stdosl, Diagnostics& diagnostics)
     const Affine shader_b { 0.5, 1.5, -0.75, -2, 0.25, 1.25, { 6, -3, -2 } };
     HartOptions options;
     options.no_cache = false;
+    options.fused    = mode != "split";
     std::array<std::vector<float>, 3> images;
     for (int pass = 0; pass < 3; ++pass) {
         const Affine& object = pass == 1 ? object_b : object_a;
@@ -362,12 +373,15 @@ run(string_view stdosl, Diagnostics& diagnostics)
 int
 main(int argc, char* argv[])
 {
-    if (argc != 2) {
-        print(stderr, "Usage: hart_transform_test stdosl.h\n");
+    const string_view mode(argc == 3 ? argv[2] : "split");
+    if ((argc != 2 && argc != 3)
+        || (mode != "split" && mode != "fused" && mode != "fused-local")) {
+        print(stderr,
+              "Usage: hart_transform_test stdosl.h [split|fused|fused-local]\n");
         return 1;
     }
     Diagnostics diagnostics;
-    OIIO_CHECK_ASSERT(run(argv[1], diagnostics));
+    OIIO_CHECK_ASSERT(run(argv[1], mode, diagnostics));
     OIIO_CHECK_EQUAL(diagnostics.errors, 0);
     OIIO_CHECK_EQUAL(diagnostics.warnings, 0);
     return unit_test_failures;

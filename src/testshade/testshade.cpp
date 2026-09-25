@@ -1980,6 +1980,7 @@ test_shade(int argc, const char* argv[])
             return EXIT_FAILURE;
         }
 #if OSL_TESTSHADE_HART
+        hart.runstats = runstats;
         if ((hart.fused || hart.has_local_groupdata)
             && (hart.has_module || shader_setup_args.size() == 1)) {
             ErrorHandler::default_handler().errorfmt(

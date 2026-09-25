@@ -22,6 +22,7 @@
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/strutil.h>
+#include <OpenImageIO/timer.h>
 
 #include <OSL/oslquery.h>
 
@@ -281,8 +282,9 @@ public:
     }
 
     bool load(cspan<HartModuleInput> inputs, const std::string& entry,
-              cspan<std::string> callable_names = { })
+              cspan<std::string> callable_names = { }, bool runstats = false)
     {
+        m_runstats = runstats;
         OptixModuleCompileOptions module_options { };
         OptixPipelineCompileOptions compile_options { };
         compile_options.pipelineLaunchParamsVariableName
@@ -347,6 +349,7 @@ public:
         size_t log_size            = log.size();
         if (m_verbose)
             m_err.infofmt("Compiling HART pipeline");
+        OIIO::Timer pipeline_timer;
         if (!hart_check(optixPipelineCreate(m_context, &compile_options,
                                             &link_options, m_groups.data(),
                                             m_group_count, log.data(),
@@ -356,6 +359,23 @@ public:
             m_err.errorfmt("HART pipeline for entry '{}': {}", entry,
                            log.data());
             return false;
+        }
+        if (m_runstats) {
+            print("HART pipeline creation: {:.3f} ms\n",
+                  pipeline_timer() * 1000.0);
+            unsigned int raygen_stack = 0, callable_stack = 0;
+            for (unsigned int i = 0; i < m_group_count; ++i) {
+                HartStackSizes sizes { };
+                if (!hart_check(hartProgramGroupGetStackSize(m_groups[i],
+                                                             &sizes, m_pipeline),
+                                "hartProgramGroupGetStackSize"))
+                    return false;
+                raygen_stack   = std::max(raygen_stack, sizes.cssRG);
+                callable_stack = std::max(callable_stack, sizes.dssDC);
+            }
+            print(
+                "HART stack estimates: raygen {} bytes, direct callable max {} bytes\n",
+                raygen_stack, callable_stack);
         }
 
         std::array<HartSbtRecord, 3> records { };
@@ -463,7 +483,9 @@ public:
             sbt.callablesRecordStrideInBytes = sizeof(HartSbtRecord);
             sbt.callablesRecordCount         = m_group_count - 1;
         }
-        auto launch = [&]() {
+        // Measure launch and wait latency, excluding clears and error readback.
+        OIIO::Timer launch_timer(false);
+        auto launch = [&](bool measure) {
             if (textures && !textures->reset_errors())
                 return false;
             // Reset every launch so warmup cannot conceal unwritten output.
@@ -472,21 +494,35 @@ public:
                 return false;
             if (m_verbose)
                 m_err.infofmt("Launching HART grid {} x {}", width, height);
+            if (measure) {
+                if (!hip_check(hipStreamSynchronize(m_stream),
+                               "hipStreamSynchronize before timing"))
+                    return false;
+                launch_timer.start();
+            }
             if (!hart_check(optixLaunch(m_pipeline, m_stream, m_params,
                                         params_size, &sbt, width, height, 1),
                             "hartLaunch"))
                 return false;
-            if (m_verbose)
+            if (m_verbose && !measure)
                 m_err.infofmt("Waiting for HART grid completion");
-            return hip_check(hipStreamSynchronize(m_stream),
-                             "hipStreamSynchronize")
-                   && (!textures || textures->check_errors());
+            if (!hip_check(hipStreamSynchronize(m_stream),
+                           "hipStreamSynchronize"))
+                return false;
+            if (measure)
+                launch_timer.stop();
+            return !textures || textures->check_errors();
         };
-        if (warmup && !launch())
+        if (warmup && !launch(false))
             return false;
         for (int i = 0; i < iterations; ++i)
-            if (!launch())
+            if (!launch(m_runstats))
                 return false;
+        if (m_runstats)
+            print(
+                "HART synchronized launches: {} iterations, {:.6f} ms total, {:.6f} ms mean\n",
+                iterations, launch_timer() * 1000.0,
+                launch_timer() * 1000.0 / iterations);
         return hip_check(hipMemcpy(pixels.data(), m_output, bytes,
                                    hipMemcpyDeviceToHost),
                          "hipMemcpy output");
@@ -574,6 +610,7 @@ private:
 
     ErrorHandler& m_err;
     bool m_verbose               = false;
+    bool m_runstats              = false;
     hipStream_t m_stream         = nullptr;
     OptixDeviceContext m_context = nullptr;
     std::array<OptixModule, 2> m_modules { };
@@ -618,6 +655,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--hart-no-cache");
     ap.arg("--hart-fused");
     ap.arg("--hart-local-groupdata %s:BYTES");
+    ap.arg("--runstats");
     ap.arg("--res %d:WIDTH %d:HEIGHT");
     ap.arg("-g %d:WIDTH %d:HEIGHT");
     ap.arg("--iters %d:COUNT");
@@ -870,7 +908,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         err.infofmt("HART callable mode: {}",
                     options.fused ? "fused" : "split");
     if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
-        || !runtime.load(modules, entry, callables))
+        || !runtime.load(modules, entry, callables, options.runstats))
         return false;
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
     const Matrix44 transforms[] = { object2common, object2common.inverse(),

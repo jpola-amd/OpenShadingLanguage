@@ -389,6 +389,14 @@ if (BUILD_TESTING AND OSL_USE_HART)
                     "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")
                 set_tests_properties (hart-transform-rebind PROPERTIES
                     LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                foreach (mode IN ITEMS fused fused-local)
+                    add_test (NAME hart-transform-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                        "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                        --mode ${mode})
+                    set_tests_properties (hart-transform-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                endforeach ()
             endif ()
         endif ()
         if ("$ENV{TESTSUITE_HART}" STREQUAL "1")

@@ -352,6 +352,37 @@ Only a renderer selecting that fused wrapper may omit its scratch buffer.
 Private storage may become registers or spill, so a larger budget is not
 necessarily faster.
 
+For generated groups, `--runstats` reports pipeline creation time separately
+from synchronized launch latency. Use `--warmup --iters N` to exclude one
+warmup launch and average the following N launches. The host timer includes
+HART submission and waiting for GPU completion, but excludes output clears,
+resource setup, compilation, error-buffer readback and image copies. This
+is not a pure GPU kernel time. The tested Windows ROCm SDK returned negative
+HIP event intervals even after event synchronization, so event timing is
+not used.
+
+The stack estimates come from HART's program-group stack query: raygen bytes
+and the maximum direct-callable bytes among the selected callable records.
+Callable estimates may be conservative floors; they are not measured VGPR,
+spill, or total per-thread physical stack usage. The current public API does
+not expose those hardware metrics.
+
+The manual comparison uses the existing chain, diamond and textured-material
+fixtures, comparing full float images across split, fused-scratch and
+fused-local modes:
+
+```powershell
+python .\testsuite\cmake-hart\check-generated.py `
+    .\build\hart-validation\bin\Release\testshade.exe `
+    --oslc .\build\hart-validation\bin\Release\oslc.exe --gpu --fused-benchmark
+```
+
+It runs a 256x256 grid, one warmup and 100 measured launches per process,
+with three trials in rotated mode order. JSON rows report timing medians
+and ranges, stack estimates and storage requirements. Pipeline creation
+can include a first cache miss. There is no timing-based pass/fail threshold
+or automatic mode selection; compare on the intended GPU and workload.
+
 Numeric comparisons and `if`/`else` can also use connected inputs
 conditionally. For example, replace the consumer with:
 
@@ -577,7 +608,7 @@ Math domain boundaries and derivatives follow existing OSL semantics,
 including zero derivatives for `floor`, `ceil`, and `step`; this does not
 automatically filter discontinuities.
 The supported command-line subset is `--hart-device`, `--hart-no-cache`,
-`--hart-fused`, `--hart-local-groupdata`,
+`--hart-fused`, `--hart-local-groupdata`, `--runstats`,
 `--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
 `-d float|half|uint8`, `--groupname`, `--layer`, `--shader`, `--connect`,
 uniform `--param`, `-O0`/`-O1`/`-O2`, and `--llvm_opt`.

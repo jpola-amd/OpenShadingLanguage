@@ -3,11 +3,13 @@
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 import argparse
+import json
 import math
 import os
 from pathlib import Path
 import re
 import shutil
+import statistics
 import struct
 import subprocess
 import uuid
@@ -52,13 +54,16 @@ suites.add_argument("--fused", action="store_true",
                     help="Compare split and fused generated HART callables")
 suites.add_argument("--fused-local", action="store_true",
                     help="Compare scratch and callable-local HART group storage")
+suites.add_argument("--fused-benchmark", action="store_true",
+                    help="Benchmark host-synchronized launch latency for split, "
+                         "fused-scratch and fused-local execution")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
         or args.spaces or args.geometry or args.groups
         or args.topology or args.materials or args.fused
-        or args.fused_local) and not args.gpu:
+        or args.fused_local or args.fused_benchmark) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1667,6 +1672,49 @@ def check_fused_suite():
         assert "HART callable mode: " + mode in output, output
 
 
+def hart_group_storage(output):
+    storage = re.findall(
+        r"HART group storage: (\d+) bytes, alignment (\d+), "
+        r"local (\d+) bytes, scratch (\d+) bytes", output,
+    )
+    assert len(storage) == 1, output
+    size, alignment, local, scratch = map(int, storage[0])
+    assert size > 0 and alignment > 0, storage
+    assert alignment & (alignment - 1) == 0, storage
+    return size, alignment, local, scratch
+
+
+def check_hart_runstats(output, iterations):
+    pipeline = re.findall(r"HART pipeline creation: (\S+) ms", output)
+    launches = re.findall(
+        r"HART synchronized launches: (\d+) iterations, "
+        r"(\S+) ms total, (\S+) ms mean",
+        output,
+    )
+    assert len(pipeline) == 1 and len(launches) == 1, output
+    count, total, mean = launches[0]
+    assert int(count) == iterations and iterations > 0, output
+    pipeline_ms, total_ms, mean_ms = map(float, (pipeline[0], total, mean))
+    assert all(math.isfinite(value) and value >= 0
+               for value in (pipeline_ms, total_ms, mean_ms)), output
+    # Total and mean are independently rounded to six decimal places.
+    assert math.isclose(total_ms / iterations, mean_ms,
+                        abs_tol=1e-6, rel_tol=0), output
+    return pipeline_ms, mean_ms
+
+
+def hart_stack_estimates(output):
+    stacks = re.findall(
+        r"^HART stack estimates: raygen ([0-9]+) bytes, "
+        r"direct callable max ([0-9]+) bytes\r?$", output, re.MULTILINE,
+    )
+    assert len(stacks) == 1, output
+    raygen, callable_max = map(int, stacks[0])
+    # SDK estimates can include conservative floors, not register/spill counts
+    # or the logical group-data allocation.
+    return {"raygen": raygen, "direct_callable_max": callable_max}
+
+
 def check_fused_local_suite():
     levels = prepare_texture_images()[0]
 
@@ -1675,7 +1723,7 @@ def check_fused_local_suite():
         image = root / "fused-local-gpu.pfm"
         if image.exists():
             image.unlink()
-        flags = ["--hart", "--hart-no-cache", "-v",
+        flags = ["--hart", "--hart-no-cache", "--runstats", "-v",
                  "-g", str(width), str(height), "-o", "Cout", str(image)]
         if mode == "fused":
             flags += ["--hart-fused"]
@@ -1688,14 +1736,11 @@ def check_fused_local_suite():
         assert "HART callable mode: " + mode in output, output
         assert "HART pipeline cache disabled" in output, output
         assert output.count("Launching HART grid") == (4 if repeat else 1), output
-        storage = re.findall(
-            r"HART group storage: (\d+) bytes, alignment (\d+), "
-            r"local (\d+) bytes, scratch (\d+) bytes", output,
-        )
-        assert len(storage) == 1, output
-        size, alignment, local, scratch = map(int, storage[0])
-        assert size > 0 and alignment > 0, storage
-        assert alignment & (alignment - 1) == 0, storage
+        hart_stack_estimates(output)
+        if error is None:
+            check_hart_runstats(output, 3 if repeat else 1)
+        storage = hart_group_storage(output)
+        size, alignment, local, scratch = storage
         expected_local = (size if mode == "fused" and budget is not None
                           and budget >= size else 0)
         assert local == expected_local, (budget, storage)
@@ -1756,6 +1801,85 @@ def check_fused_local_suite():
     for budget in (0, layout[0]):
         _, actual_layout = render(shader_args, 9, 9, "fused", budget, error=error)
         assert actual_layout == layout, (layout, actual_layout)
+
+
+def check_fused_benchmark():
+    prepare_texture_images()
+    width = height = 256
+    iterations, trials = 100, 3
+    modes = ("split", "fused-scratch", "fused-local")
+    cases = (("chain9", group_arguments(9, "3")),
+             ("diamond", topology_arguments("3")),
+             ("material", material_arguments("3", report=1)))
+    image = root / "fused-benchmark.pfm"
+    for graph, shader_args in cases:
+        print("Benchmarking HART " + graph, flush=True)
+        samples = {mode: [] for mode in modes}
+        storage_by_mode = {}
+        stacks_by_mode = {}
+        baseline = None
+        for trial in range(trials):
+            for mode in modes[trial:] + modes[:trial]:
+                if image.exists():
+                    image.unlink()
+                flags = ["--hart", "--runstats", "-v", "--warmup",
+                         "--iters", str(iterations), "-g", str(width), str(height),
+                         "-o", "Cout", str(image)]
+                if mode != "split":
+                    flags += ["--hart-fused", "--hart-local-groupdata",
+                              "2147483647" if mode == "fused-local" else "0"]
+                output = run(flags + shader_args)
+                callable_mode = "split" if mode == "split" else "fused"
+                assert "HART callable mode: " + callable_mode in output, output
+                assert "HART pipeline cache disabled" not in output, output
+                assert output.count("Launching HART grid") == iterations + 1, output
+                samples[mode].append(check_hart_runstats(output, iterations))
+                stacks = hart_stack_estimates(output)
+                if mode in stacks_by_mode:
+                    assert stacks_by_mode[mode] == stacks, (graph, mode, stacks)
+                stacks_by_mode[mode] = stacks
+                storage = hart_group_storage(output)
+                size, alignment, local, scratch = storage
+                assert local == (size if mode == "fused-local" else 0), storage
+                stride = ((size + alignment - 1) // alignment) * alignment
+                assert scratch == (0 if local else width * height * stride), storage
+                if mode in storage_by_mode:
+                    assert storage_by_mode[mode] == storage, storage
+                storage_by_mode[mode] = storage
+                assert storage[:2] == storage_by_mode["split"][:2], storage
+                actual = image_pixels(image, width, height)
+                assert all(math.isfinite(value) for value in actual), (graph, mode)
+                if baseline is None:
+                    assert mode == "split"
+                    baseline = actual
+                compare(actual, baseline)
+
+        # Launch latency includes host submission and synchronization, not just
+        # GPU execution. Pipeline creation can include a first cache miss.
+        # Report trial ranges, not pass/fail speed thresholds.
+        for mode in modes:
+            pipeline_ms, launch_mean_ms = zip(*samples[mode])
+            size, alignment, local, scratch = storage_by_mode[mode]
+            print(json.dumps({
+                "benchmark": "hart-fused",
+                "measurement": "host-synchronized-launch",
+                "graph": graph, "mode": mode, "grid": [width, height],
+                "llvm_opt": 3, "osl_opt": 2,
+                "warmup": 1, "iterations": iterations, "trials": trials,
+                "launch_mean_ms": {
+                    "median": statistics.median(launch_mean_ms),
+                    "range": [min(launch_mean_ms), max(launch_mean_ms)],
+                    "trials": launch_mean_ms,
+                },
+                "pipeline_ms": {
+                    "median": statistics.median(pipeline_ms),
+                    "range": [min(pipeline_ms), max(pipeline_ms)],
+                    "trials": pipeline_ms,
+                },
+                "group_bytes": size, "alignment": alignment,
+                "local_bytes": local, "scratch_bytes": scratch,
+                "stack_estimate_bytes": stacks_by_mode[mode],
+            }, allow_nan=False), flush=True)
 
 
 try:
@@ -2055,12 +2179,15 @@ try:
     if args.fused_local:
         check_fused_local_suite()
 
+    if args.fused_benchmark:
+        check_fused_benchmark()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.matrices
                          or args.spaces or args.geometry or args.groups
                          or args.topology or args.materials or args.fused
-                         or args.fused_local):
+                         or args.fused_local or args.fused_benchmark):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -2152,7 +2279,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.fused_local:
+if args.fused_benchmark:
+    suite = "fused benchmark"
+elif args.fused_local:
     suite = "callable-local group storage"
 elif args.fused:
     suite = "split/fused callable"
@@ -2164,5 +2293,7 @@ else:
     suite = ("surface" if args.surface else
              ("derivative" if args.derivatives else ("loop" if args.loops else "CLI")))
 print("Generated HART " + suite + " checks passed"
-      + ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
-         if args.gpu else ""))
+      + ("; GPU image comparisons and launch statistics passed"
+         if args.fused_benchmark else
+         ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
+          if args.gpu else "")))
