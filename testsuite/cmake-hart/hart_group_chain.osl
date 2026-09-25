@@ -1,0 +1,27 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_group_chain(float scalar = 0, color tint = 0,
+                        point position = point(0), vector direction = vector(0),
+                        normal orientation = normal(0), matrix basis = matrix(1),
+                        output float next_scalar = 0, output color next_tint = 0,
+                        output point next_position = point(0),
+                        output vector next_direction = vector(0),
+                        output normal next_orientation = normal(0),
+                        output matrix next_basis = matrix(1))
+{
+    float seed = u + 2 * v;
+    next_scalar = 0.5 * scalar + 0.25 * seed;
+    next_tint = 0.5 * tint + color(0.25 * u, 0.125 * v, 0.25 * u * v);
+    next_position = 0.5 * position + vector(0.125 * seed, 0.25 * u, -0.125 * v);
+    next_direction = 0.5 * direction
+                     + vector(0.25 * v, -0.125 * u, 0.25 * (u - v));
+    next_orientation = 0.5 * orientation
+                       + normal(0.125 * u, 0.25 * v, 0.125 * (u + v));
+    next_basis = basis;
+    next_basis[0][0] = 0.5 * basis[0][0] + 0.5 * (1 + u);
+    next_basis[1][1] = 0.5 * basis[1][1] + 0.5 * (1 + v);
+    next_basis[3][0] = 0.5 * basis[3][0] + 0.25 * (u - v);
+    next_basis[3][1] = 0.5 * basis[3][1] + 0.25 * (u + v);
+}

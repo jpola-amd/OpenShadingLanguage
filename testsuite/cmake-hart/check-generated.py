@@ -42,11 +42,13 @@ suites.add_argument("--spaces", action="store_true",
                     help="Run literal common/object/shader space runtime cases")
 suites.add_argument("--geometry", action="store_true",
                     help="Run read-only I/time and composed material runtime cases")
+suites.add_argument("--groups", action="store_true",
+                    help="Run numeric multilayer chain runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
-        or args.spaces or args.geometry) and not args.gpu:
+        or args.spaces or args.geometry or args.groups) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1363,6 +1365,54 @@ def check_geometry_suite():
             "HART: writing shader global '" + global_name + "'")
 
 
+def group_arguments(depth, optimize, specialize="-O2"):
+    names = ["chain" + str(i) for i in range(depth - 1)] + ["probe"]
+    arguments = ["--llvm_opt", optimize, specialize]
+    for name in names[:-1]:
+        arguments += ["--shader", "hart_group_chain", name]
+    arguments += ["--shader", "hart_group_probe", names[-1]]
+    for source, destination in zip(names, names[1:]):
+        for port in ("scalar", "tint", "position", "direction",
+                     "orientation", "basis"):
+            arguments += ["--connect", source, "next_" + port, destination, port]
+    return arguments
+
+
+def group_reference(depth, width, height):
+    # Each of the depth-1 live chain layers applies x -> x/2 + seed.
+    # Close the geometric series rather than executing the shader recurrence.
+    gain = 1 - 0.5**(depth - 1)
+    du, dv = 1 / max(1, width - 1), 1 / max(1, height - 1)
+
+    def evaluate(u, v):
+        values = (gain * (7 * u + 6.5 * v),
+                  gain * (u + 10 * v),
+                  2 + gain * (9.5 * u + v + u * v))
+        # The matrix's varying diagonal/translation terms have zero derivatives.
+        dx = (6.5 * gain * du, 0.5 * gain * du, gain * (8.5 + v) * du)
+        dy = (7 * gain * dv, 9.5 * gain * dv, gain * u * dv)
+        component = int(u >= 0.25) + int(u >= 0.75)
+        return tuple(0.0625 * value[component] for value in (values, dx, dy))
+    return reference(width, height, evaluate)
+
+
+def check_group_suite():
+    for optimize in ("10", "3"):
+        print("Checking HART multilayer chains at LLVM level " + optimize,
+              flush=True)
+        for depth in (3, 5, 9):
+            shader_args = group_arguments(depth, optimize)
+            expected = group_reference(depth, 7, 5)
+            cpu = noise_cpu_image(shader_args, 7, 5)
+            compare(cpu, expected)
+            actual = check_texture_render(shader_args, 7, 5, expected)
+            compare(actual, cpu)
+    # One singleton OSL O0 case covers both repeated cold and cached launches.
+    # Keep values below one so the printed representative fits image tolerance.
+    check_render(group_arguments(9, "10", "-O0"), 1, 1,
+                 group_reference(9, 1, 1))
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1630,10 +1680,13 @@ try:
     if args.geometry:
         check_geometry_suite()
 
+    if args.groups:
+        check_group_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.matrices
-                         or args.spaces or args.geometry):
+                         or args.spaces or args.geometry or args.groups):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -1645,9 +1698,10 @@ try:
             ("hart_userdata", "HART"),
         ):
             run(["--hart", "-v", shader], error)
-        run(["--hart", "--shader", "hart_first", "first",
-             "--shader", "hart_sine", "second",
-             "--shader", "hart_first", "third", "-v"], "one or two shader layers")
+        run(["--hart", "--shader", "hart_surface_incident", "unused",
+             "--shader", "hart_first", "middle",
+             "--shader", "hart_sine", "surface", "-v"],
+            "HART: unsupported shader global 'Ps'")
         # Even an unused producer must be validated before optimization.
         for shader in ("hart_closure", "hart_string", "hart_printf",
                        "hart_texture", "hart_userdata"):

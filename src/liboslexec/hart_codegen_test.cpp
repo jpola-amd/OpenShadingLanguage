@@ -158,7 +158,7 @@ void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
-             bool looping = false)
+             bool looping = false, int used_layers = 0)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -389,6 +389,51 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         ss.getattribute(&group, "llvm_groupdata_alignment", alignment));
     OIIO_CHECK_ASSERT(size_bytes > 0 && alignment > 0);
     OIIO_CHECK_EQUAL(size_bytes % alignment, 0);
+    if (used_layers && optimize == 10) {
+        auto* storage = llvm::StructType::getTypeByName(context, "Groupdata");
+        OIIO_CHECK_ASSERT(storage);
+        if (storage) {
+            const auto& layout = module.getDataLayout();
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(storage).getFixedValue(),
+                             uint64_t(size_bytes));
+            OIIO_CHECK_EQUAL(layout.getABITypeAlign(storage).value(),
+                             uint64_t(alignment));
+            const auto* flags = llvm::dyn_cast<llvm::ArrayType>(
+                storage->getElementType(0));
+            OIIO_CHECK_ASSERT(flags);
+            if (flags) {
+                OIIO_CHECK_ASSERT(flags->getElementType()->isIntegerTy(1));
+                OIIO_CHECK_EQUAL(flags->getNumElements(),
+                                 uint64_t((used_layers + 3) & ~3));
+            }
+        }
+        int internal_layers = 0;
+        for (const auto& function : module) {
+            if (function.getName().find("osl_layer_group_hart_test_group_name_")
+                != 0)
+                continue;
+            ++internal_layers;
+            OIIO_CHECK_ASSERT(function.hasLocalLinkage());
+            OIIO_CHECK_ASSERT(!function.isDeclaration());
+            OIIO_CHECK_EQUAL(function.arg_size(), 6);
+            int calls = 0;
+            for (const auto* user : function.users()) {
+                const auto* call = llvm::dyn_cast<llvm::CallInst>(user);
+                OIIO_CHECK_ASSERT(call);
+                if (!call)
+                    continue;
+                ++calls;
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 function.getCallingConv());
+                OIIO_CHECK_EQUAL(call->arg_size(), 6);
+                for (unsigned int arg = 0; arg < 6; ++arg)
+                    OIIO_CHECK_EQUAL(call->getArgOperand(arg),
+                                     call->getFunction()->getArg(arg));
+            }
+            OIIO_CHECK_ASSERT(calls > 0);
+        }
+        OIIO_CHECK_EQUAL(internal_layers, used_layers - 1);
+    }
     const void* again = nullptr;
     OIIO_CHECK_ASSERT(
         ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &again));
@@ -409,6 +454,75 @@ check_rejection(string_view arch, string_view oso, string_view expected,
         ss.attribute("debug_nan", 1);
     auto group = make_group(ss, oso, layers);
     check_rejected_group(ss, *group, errors, expected);
+}
+
+
+
+bool
+check_chain_modules(string_view arch, string_view stdosl)
+{
+    for (string_view type :
+         { "float", "color", "point", "vector", "normal", "matrix" }) {
+        const auto expression
+            = type == "matrix" ? "incoming*matrix(1+u*v+u+2*v)"
+                               : fmtformat("0.5*incoming+{}(u*v+u+2*v)", type);
+        const auto source = fmtformat(
+            "shader hart_chain({0} incoming={1},output {0} value=0) {{ "
+            "value={2}; }}",
+            type, type == "matrix" ? 1 : 0, expression);
+        const auto terminal = fmtformat(
+            "shader hart_chain_end({} value=0,output color Cout=0) {{ "
+            "float x={}; Cout=color(x,Dx(x),Dy(x)); }}",
+            type,
+            type == "matrix"  ? "value[0][0]"
+            : type == "float" ? "value"
+                              : "dot(vector(value),vector(1,2,3))");
+        OSLCompiler relay_compiler, output_compiler;
+        std::string relay, output;
+        if (!relay_compiler.compile_buffer(source, relay, { }, stdosl)
+            || !output_compiler.compile_buffer(terminal, output, { }, stdosl))
+            return false;
+        for (int layers : { 3, 5, 9 })
+            for (int osl_optimize : { 0, 2 })
+                for (int optimize : { 10, 3 }) {
+                    HartServices renderer;
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("optimize", osl_optimize);
+                    ss.attribute("llvm_optimize", optimize);
+                    OIIO_CHECK_ASSERT(
+                        ss.LoadMemoryCompiledShader("hart_chain", relay));
+                    OIIO_CHECK_ASSERT(
+                        ss.LoadMemoryCompiledShader("hart_chain_end", output));
+                    auto group = ss.ShaderGroupBegin("hart_test_group");
+                    for (int i = 0; i < layers; ++i) {
+                        const bool last = i == layers - 1;
+                        OIIO_CHECK_ASSERT(
+                            ss.Shader("surface",
+                                      last ? "hart_chain_end" : "hart_chain",
+                                      fmtformat("layer{}", i)));
+                        if (i)
+                            OIIO_CHECK_ASSERT(
+                                ss.ConnectShaders(fmtformat("layer{}", i - 1),
+                                                  "value",
+                                                  fmtformat("layer{}", i),
+                                                  last ? "value" : "incoming"));
+                    }
+                    OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+                    const SymLocationDesc result(
+                        fmtformat("layer{}.Cout", layers - 1), TypeColor, false,
+                        SymArena::Outputs, 0, 3 * sizeof(float));
+                    ss.add_symlocs(group.get(), { &result, 1 });
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "{}\n", errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    check_module(ss, *group, arch, { }, optimize, false, false,
+                                 false, layers);
+                }
+    }
+    return true;
 }
 
 
@@ -1256,7 +1370,7 @@ main(int argc, char* argv[])
         }
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
-    check_rejection(arch, oso[0], "one or two shader layers", 3);
+    check_rejection(arch, oso[2], "unsupported operation 'printf'", 3);
     check_rejection(arch, oso[0], "instrumentation", 1, true);
     check_rejection(arch, oso[2], "unsupported operation 'printf'");
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
@@ -1323,7 +1437,8 @@ main(int argc, char* argv[])
                                        TypeDesc(TypeDesc::STRING, 1), &entry));
         check_rejected_group(ss, *group, errors, "default entry point");
     }
-    if (!check_math_modules(arch, argv[2])
+    if (!check_chain_modules(arch, argv[2])
+        || !check_math_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])

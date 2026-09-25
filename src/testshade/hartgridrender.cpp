@@ -733,9 +733,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         return false;
     }
     int layers = 0;
-    if (!shadingsys.getattribute(&group, "num_layers", layers) || layers < 1
-        || layers > 2) {
-        err.errorfmt("Generated HART mode supports one or two shader layers");
+    if (!shadingsys.getattribute(&group, "num_layers", layers) || layers < 1) {
+        err.errorfmt("Generated HART mode requires at least one shader layer");
         return false;
     }
     int outputs    = 0;

@@ -3938,9 +3938,8 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
                  "selected before shader compilation");
         return false;
     }
-    if (group.nlayers() < 1 || group.nlayers() > 2
-        || group.num_entry_layers() != 0) {
-        errorfmt("HART currently supports one or two shader layers with the "
+    if (group.nlayers() < 1 || group.num_entry_layers() != 0) {
+        errorfmt("HART requires at least one shader layer with the "
                  "last layer as the default entry point");
         return false;
     }

@@ -176,7 +176,7 @@ It defaults to `OFF`, so CPU-only and CUDA/OptiX builds do not need either
 SDK. With `USE_LLVM_BITCODE=ON`, it also compiles the GPU shadeops to
 architecture-specific AMDGCN LLVM bitcode using **direct Clang `-x hip`**,
 not hipcc, and embeds each architecture's linked module in `liboslexec`.
-It also enables an initial one- or two-layer OSL HART execution path in
+It also enables a numeric multi-layer OSL HART execution path in
 `testshade`. It does not generate shader bundles or install standalone
 AMD bitcode files.
 It does not require `USE_LLVM_BITCODE` just to discover the dependencies.
@@ -294,7 +294,7 @@ Each point receives real `ShaderGlobals` and separately aligned group
 storage. Generated output placement writes `Cout` to RGB records; the
 renderer does not assume offsets inside the group.
 
-This initial path supports **one or two layers, with exactly one
+This path supports **one or more layers, with exactly one
 `output color Cout` on the final layer**. A connected two-layer example is:
 
 ```osl
@@ -621,8 +621,8 @@ options remain unsupported.
 tracing, shader printing, writes to shader globals, other globals such as
 `Ps` and `dtime`, unlisted coordinate spaces and transforms,
 general strings, arrays, interpolated or interactive parameters, other
-renderer-service callbacks, batched execution, instrumentation, more than two
-layers, explicit entry layers, multiple final outputs, and unlisted frontend
+renderer-service callbacks, batched execution, instrumentation,
+explicit entry layers, multiple final outputs, and unlisted frontend
 options are unsupported.
 They fail explicitly; there is **no CPU fallback**.
 `--hart-entry` and `--hart-callable-module` belong only to external-module
@@ -764,6 +764,13 @@ transforms, procedural UVs and texture sampling in standalone and connected
 groups at LLVM levels 10 and 3, including disabled OSL optimization. Values
 and derivatives are compared with CPU execution and the sampler oracle.
 Unsupported globals and writes still fail before launch.
+
+`hart-groups-runtime` checks longer numeric chains with float, color, point,
+vector, normal and matrix connections. Group storage, derivative propagation,
+and the unchanged two-callable ABI use OSL's existing layer machinery, without
+a HART-specific scheduler or fixed layer-count cap. The last layer remains
+the sole default entry point; every original layer is validated before
+optimization, including unused layers.
 
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
