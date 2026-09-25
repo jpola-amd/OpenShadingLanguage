@@ -629,6 +629,50 @@ check_noise_modules(string_view arch, string_view stdosl)
     return true;
 }
 
+
+
+bool
+check_procedural_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_octaves(int octaves=3, output float value=0) { "
+        "float amplitude=0.5, frequency=1; "
+        "for(int i=0;i<octaves;i+=1) { "
+        "value+=amplitude*psnoise(point(u*frequency,v*frequency,0.375),"
+        "point(frequency,frequency,1)); amplitude*=0.5; frequency*=2; } }",
+        "shader hart_ramp(float value=0, output color Cout=0) { "
+        "float width=filterwidth(value); "
+        "float a=smoothstep(-0.25-width,0.25+width,value); "
+        "color c=mix(color(0.1,0.2,0.3),color(0.8,0.6,0.4),a); "
+        "Cout=c+Dx(c)+Dy(c); }",
+    };
+    std::string bytecode[2];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+            return false;
+    }
+    for (int optimize : { 10, 3 }) {
+        for (int osl_optimize : { 0, 2 }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("llvm_optimize", optimize);
+            ss.attribute("optimize", osl_optimize);
+            auto group = make_connected_group(ss, bytecode[0], bytecode[1]);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "{}\n", errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch,
+                         { "osl_psnoise_dfdvv", "osl_filterwidth_fdf" },
+                         optimize, true);
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 
@@ -900,7 +944,8 @@ main(int argc, char* argv[])
         check_rejected_group(ss, *group, errors, "default entry point");
     }
     if (!check_math_modules(arch, argv[2])
-        || !check_noise_modules(arch, argv[2]))
+        || !check_noise_modules(arch, argv[2])
+        || !check_procedural_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;
 }

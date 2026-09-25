@@ -469,6 +469,25 @@ noise options, Gabor noise, and periodic simplex remain unsupported.
 Original-operation validation rejects them before specialization, even
 for constant inputs or unused layers; general string support is not enabled.
 
+These operations can be composed into a tileable, multi-octave color ramp:
+
+```osl
+float value = 0, amplitude = 0.5, frequency = 1;
+for (int i = 0; i < 3; i += 1) {
+    value += amplitude * psnoise(point(u * frequency, v * frequency, 0.375),
+                                point(frequency, frequency, 1));
+    amplitude *= 0.5;
+    frequency *= 2;
+}
+float width = filterwidth(value);
+float mask = smoothstep(-0.25 - width, 0.25 + width, value);
+Cout = mix(color(0.1, 0.2, 0.3), color(0.8, 0.6, 0.4), mask);
+```
+
+Here the footprint explicitly broadens the ramp transition; it does not
+automatically filter the noise octaves. Numeric signals and their first-order
+derivatives can also pass from a producer layer into a separate ramp layer.
+
 Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color/point/vector/normal construction,
 `sin`, `dot`, `length`, `normalize`, the noise forms listed above, component
@@ -613,11 +632,22 @@ same input bits. Values and simplex derivatives retain `2e-6`; only Perlin
 derivatives use `4e-6`. No production floating-point settings are changed.
 Dynamic/unknown/empty names, options, Gabor, and periodic simplex are rejected.
 
+`hart-procedural-runtime` combines these operations in connected groups:
+a bounded multi-octave periodic-noise loop with a color ramp, a repeating
+cell/hash pattern, and an explicitly footprint-filtered transition.
+The tests compare CPU/GPU values and derivatives at LLVM levels 10 and 3,
+check opposite tile edges along both axes on a `17x9` grid, and verify that
+additional octaves and explicit filtering change the output. A singleton
+group also runs with OSL optimization disabled, cache modes, and repeated
+launches. Compiler checks cover the loop/footprint/ramp composition on all
+configured architectures. The fixture's octave limit is only a test-workload
+bound, not a backend limit.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(codegen-.*|noise(-families)?-runtime|math-runtime)$" --output-on-failure
+  -R "^hart-(codegen-.*|noise(-families)?-runtime|math-runtime|procedural-runtime)$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

@@ -32,9 +32,12 @@ suites.add_argument("--noise-families", action="store_true",
                     help="Run periodic, cell, hash and named noise runtime cases")
 suites.add_argument("--math", action="store_true",
                     help="Run scalar and triple math runtime cases")
+suites.add_argument("--procedural", action="store_true",
+                    help="Run connected procedural material runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
-        or args.noise or args.noise_families or args.math) and not args.gpu:
+        or args.noise or args.noise_families or args.math
+        or args.procedural) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -624,6 +627,73 @@ def check_math_suite():
                  math_reference(1, 1, report=1))
 
 
+def procedural_arguments(optimize, recipe=0, octaves=3, filtered=1, report=0,
+                         specialize="-O2"):
+    return ["--llvm_opt", optimize, specialize,
+            "--param", "recipe", str(recipe), "--param", "octaves", str(octaves),
+            "--shader", "hart_procedural", "producer",
+            "--param", "recipe", str(recipe), "--param", "filtered", str(filtered),
+            "--param", "report", str(report),
+            "--shader", "hart_procedural_consumer", "consumer",
+            "--connect", "producer", "Cout", "consumer", "value"]
+
+
+def check_procedural_edges(image, width, height, report):
+    left, right = [], []
+    for row in range(height):
+        start, end = 3 * row * width, 3 * ((row + 1) * width - 1)
+        left.extend(image[start:start + 3])
+        right.extend(image[end:end + 3])
+    compare_noise(left, right, report)
+    compare_noise(image[:3 * width], image[-3 * width:], report)
+
+
+def check_procedural_suite():
+    cases = [
+        ("fbm", dict(recipe=0), (0, 1)),
+        ("single", dict(recipe=0, octaves=1), (0,)),
+        ("pattern", dict(recipe=1), (0, 1)),
+        ("filtered", dict(recipe=2), (0, 1)),
+        ("sharp", dict(recipe=2, filtered=0), (0,)),
+    ]
+    for optimize in ("10", "3"):
+        print("Checking HART procedural materials at LLVM level " + optimize,
+              flush=True)
+        cpu, gpu = {}, {}
+        for name, options, reports in cases:
+            for report in reports:
+                shader_args = procedural_arguments(optimize, report=report, **options)
+                expected = noise_cpu_image(shader_args, 17, 9)
+                actual = check_noise_render(shader_args, 17, 9, expected, report=report)
+                for image in (expected, actual):
+                    check_procedural_edges(image, 17, 9, report)
+                    if report:
+                        for channel in (1, 2):
+                            if name == "pattern":
+                                compare(image[channel::3], [0] * (17 * 9), 0)
+                            else:
+                                assert max(abs(d) for d in image[channel::3]) > 1e-3
+                if not report:
+                    cpu[name], gpu[name] = expected, actual
+        for images in (cpu, gpu):
+            assert max(abs(a - b) for a, b in
+                       zip(images["fbm"], images["single"])) > 1e-3
+            # A partial ramp weight must differ visibly from the binary edge.
+            weights = [(r - 0.125) / 0.75 for r in images["filtered"][0::3]]
+            sharp = [(r - 0.125) / 0.75 for r in images["sharp"][0::3]]
+            compare(sharp, [round(w) for w in sharp], 2e-6)
+            assert any(0.1 < w < 0.9 and abs(w - s) > 0.1
+                       for w, s in zip(weights, sharp))
+
+    # Keep the loop/clamp wrapper at OSL O0 and exercise caching/repeated
+    # launches only once. The non-square matrix above checks all recipes.
+    shader_args = procedural_arguments("10", report=1, specialize="-O0")
+    expected = noise_cpu_image(shader_args, 1, 1)
+    check_render(shader_args, 1, 1, expected,
+                 compare_device=lambda actual, reference: compare_noise(
+                     actual, reference, 1))
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         result = subprocess.run(
@@ -881,8 +951,12 @@ try:
     if args.math:
         check_math_suite()
 
+    if args.procedural:
+        check_procedural_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
-                         or args.noise or args.noise_families or args.math):
+                         or args.noise or args.noise_families or args.math
+                         or args.procedural):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

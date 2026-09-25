@@ -1,0 +1,26 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_procedural(int recipe = 0, int octaves = 3, output color Cout = 0)
+{
+    if (recipe == 1) {
+        point q = point(4 * u - 2, 4 * v - 2, 0.25);
+        float cell = pnoise("cell", q, point(4, 4, 1));
+        float hash = pnoise("hash", q, point(4, 4, 1));
+        Cout = color(cell, hash, 0);
+    } else {
+        int count = clamp(octaves, 1, 4);
+        float amplitude = 0.5;
+        float frequency = 1;
+        float total = 0;
+        for (int octave = 0; octave < count; ++octave) {
+            point q = frequency * point(2 * u - 1, 2 * v - 1, 0.375);
+            total += amplitude
+                     * psnoise(q, point(2 * frequency, 2 * frequency, 2));
+            frequency *= 2;
+            amplitude *= 0.5;
+        }
+        Cout = color(total);
+    }
+}
