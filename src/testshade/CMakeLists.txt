@@ -13,7 +13,7 @@ if (OSL_BUILD_BATCHED)
 endif()
 
 if (OSL_USE_HART)
-    list (APPEND testshade_srcs hartgridrender.cpp)
+    list (APPEND testshade_srcs hartgridrender.cpp harttexture.cpp)
 endif ()
 
 if (OSL_USE_OPTIX)
@@ -320,6 +320,18 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
 endif ()
 
 if (BUILD_TESTING AND OSL_USE_HART)
+    if (OSL_BUILD_TESTS)
+        add_executable (hart_texture_test hart_texture_test.cpp harttexture.cpp)
+        target_include_directories (hart_texture_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+        target_link_libraries (hart_texture_test PRIVATE OpenImageIO::OpenImageIO hip::host)
+        add_dependencies (hart_texture_test testshade)
+        set_target_properties (hart_texture_test PROPERTIES FOLDER "Unit Tests")
+        if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+            add_test (NAME hart-texture-resources COMMAND hart_texture_test)
+            set_tests_properties (hart-texture-resources PROPERTIES
+                LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+        endif ()
+    endif ()
     add_test (NAME hart-grid-cli
         COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"

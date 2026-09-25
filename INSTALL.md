@@ -632,6 +632,13 @@ same input bits. Values and simplex derivatives retain `2e-6`; only Perlin
 derivatives use `4e-6`. No production floating-point settings are changed.
 Dynamic/unknown/empty names, options, Gabor, and periodic simplex are rejected.
 
+`hart-texture-resources` checks the HART test renderer's image resource layer
+on a HIP device. It verifies float image uploads, existing and box-generated
+mips (including non-power-of-two dimensions), stable texture IDs, descriptor
+table replacement, channel zero-fill, raw numeric image data, explicit load
+errors, and repeated cleanup. Resource addresses are held in a launch-time
+device table rather than embedded in shader bitcode.
+
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
 cell/hash pattern, and an explicitly footprint-filtered transition.
