@@ -4,8 +4,9 @@
 
 // GPU-independent compiler regression tests for the HART backend. Compile small
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
-// checking target metadata, callable ABI, address spaces, group-data alignment,
-// linked shadeops, HART provenance, and rejection of unsupported operations.
+// checking target metadata, split/fused callable ABI, address spaces, group-data
+// alignment, linked shadeops, HART provenance, and rejection of unsupported
+// operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -156,6 +157,69 @@ make_connected_group(ShadingSystem& ss, string_view producer,
 
 
 void
+check_function_abi(const llvm::Function& function, string_view arch)
+{
+    OIIO_CHECK_ASSERT(!function.isDeclaration());
+    OIIO_CHECK_ASSERT(function.getReturnType()->isVoidTy());
+    OIIO_CHECK_ASSERT(!function.isVarArg());
+    OIIO_CHECK_EQUAL(function.arg_size(), 6);
+    OIIO_CHECK_EQUAL(
+        function.getFnAttribute("target-cpu").getValueAsString().str(),
+        std::string(arch));
+    for (const auto& arg : function.args()) {
+        if (arg.getArgNo() == 4)
+            OIIO_CHECK_ASSERT(arg.getType()->isIntegerTy(32));
+        else
+            OIIO_CHECK_ASSERT(arg.getType()->isPointerTy()
+                              && arg.getType()->getPointerAddressSpace() == 0);
+    }
+}
+
+
+
+void
+check_wrapper(const llvm::Function* wrapper,
+              std::initializer_list<const llvm::Function*> targets)
+{
+    OIIO_CHECK_ASSERT(wrapper);
+    if (!wrapper)
+        return;
+    OIIO_CHECK_EQUAL(wrapper->size(), 1);
+    size_t calls = 0;
+    for (const auto& block : *wrapper)
+        for (const auto& inst : block) {
+            const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+            if (!call) {
+                // No local groupdata allocation or other wrapper-side work.
+                OIIO_CHECK_ASSERT(llvm::isa<llvm::ReturnInst>(inst));
+                continue;
+            }
+            const auto* target = calls < targets.size()
+                                     ? *(targets.begin() + calls)
+                                     : nullptr;
+            ++calls;
+            OIIO_CHECK_ASSERT(target);
+            OIIO_CHECK_EQUAL(call->getCalledFunction(), target);
+            if (target) {
+                OIIO_CHECK_ASSERT(target->getName().find("__direct_callable__")
+                                  != 0);
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 target->getCallingConv());
+                OIIO_CHECK_EQUAL(wrapper->getFunctionType(),
+                                 target->getFunctionType());
+            }
+            OIIO_CHECK_EQUAL(call->arg_size(), 6);
+            for (unsigned int arg = 0;
+                 arg < call->arg_size() && arg < wrapper->arg_size(); ++arg)
+                OIIO_CHECK_EQUAL(call->getArgOperand(arg),
+                                 wrapper->getArg(arg));
+        }
+    OIIO_CHECK_EQUAL(calls, targets.size());
+}
+
+
+
+void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
@@ -194,29 +258,58 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     for (const auto& global : module.globals())
         provenance |= global.getName().contains("__hart_device_storage_abi");
     OIIO_CHECK_ASSERT(provenance);
-    for (const auto* query : { "group_init_name", "group_entry_name" }) {
+    const char* queries[]       = { "group_init_name", "group_entry_name",
+                                    "group_fused_name" };
+    llvm::Function* wrappers[3] = { };
+    for (size_t i = 0; i < std::size(queries); ++i) {
         ustring name;
-        OIIO_CHECK_ASSERT(ss.getattribute(&group, query, name));
-        const auto* function = module.getFunction(name.c_str());
+        OIIO_CHECK_ASSERT(ss.getattribute(&group, queries[i], name));
+        auto* function = module.getFunction(name.c_str());
+        wrappers[i]    = function;
         OIIO_CHECK_ASSERT(function && !function->isDeclaration());
         if (!function)
             continue;
         OIIO_CHECK_ASSERT(function->hasExternalLinkage());
-        OIIO_CHECK_ASSERT(function->getReturnType()->isVoidTy());
-        OIIO_CHECK_ASSERT(!function->isVarArg());
-        OIIO_CHECK_EQUAL(function->arg_size(), 6);
-        OIIO_CHECK_EQUAL(
-            function->getFnAttribute("target-cpu").getValueAsString().str(),
-            std::string(arch));
-        for (const auto& arg : function->args()) {
-            if (arg.getArgNo() == 4)
-                OIIO_CHECK_ASSERT(arg.getType()->isIntegerTy(32));
-            else
-                OIIO_CHECK_ASSERT(arg.getType()->isPointerTy()
-                                  && arg.getType()->getPointerAddressSpace()
-                                         == 0);
-        }
+        OIIO_CHECK_ASSERT(function->getName().find("__direct_callable__") == 0);
+        check_function_abi(*function, arch);
     }
+    if (wrappers[0])
+        OIIO_CHECK_EQUAL(wrappers[0]->getName().str(),
+                         "__direct_callable__osl_init_group_hart_test_group");
+    if (wrappers[1]) {
+        const llvm::StringRef entry_prefix(
+            "__direct_callable__osl_layer_group_");
+        const bool has_prefix = wrappers[1]->getName().find(entry_prefix) == 0;
+        OIIO_CHECK_ASSERT(has_prefix);
+        if (has_prefix && wrappers[2])
+            OIIO_CHECK_EQUAL(wrappers[2]->getName().str(),
+                             fmtformat("__direct_callable__fused_{}",
+                                       wrappers[1]
+                                           ->getName()
+                                           .drop_front(entry_prefix.size())
+                                           .str()));
+    }
+    llvm::Function* bodies[2] = { };
+    if (optimize == 10) {
+        const llvm::StringRef prefix("__direct_callable__");
+        for (size_t i = 0; i < std::size(bodies); ++i) {
+            if (!wrappers[i] || wrappers[i]->getName().find(prefix) != 0)
+                continue;
+            auto* body = module.getFunction(
+                wrappers[i]->getName().drop_front(prefix.size()));
+            bodies[i] = body;
+            OIIO_CHECK_ASSERT(body);
+            if (body) {
+                OIIO_CHECK_ASSERT(body->hasLocalLinkage());
+                check_function_abi(*body, arch);
+            }
+        }
+        check_wrapper(wrappers[0], { bodies[0] });
+        check_wrapper(wrappers[1], { bodies[1] });
+        check_wrapper(wrappers[2], { bodies[0], bodies[1] });
+    }
+    auto* init    = bodies[0];
+    auto* entry   = bodies[1];
     int callables = 0;
     for (const auto& function : module) {
         if (function.getName().find("__direct_callable__") == 0)
@@ -234,14 +327,14 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                     if (const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
                             cast->getOperand(0)))
                         OIIO_CHECK_ASSERT(value->isZero());
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                    if (const auto* callee = call->getCalledFunction())
+                        OIIO_CHECK_ASSERT(
+                            callee->getName().find("__direct_callable__") != 0);
             }
     }
-    OIIO_CHECK_EQUAL(callables, 2);
+    OIIO_CHECK_EQUAL(callables, 3);
     if (looping && optimize == 10) {
-        ustring entry_name;
-        OIIO_CHECK_ASSERT(
-            ss.getattribute(&group, "group_entry_name", entry_name));
-        auto* entry = module.getFunction(entry_name.c_str());
         OIIO_CHECK_ASSERT(entry);
         if (entry) {
             llvm::DominatorTree dominators(*entry);
@@ -270,10 +363,6 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         }
     }
     if (branching && optimize == 10) {
-        ustring entry_name;
-        OIIO_CHECK_ASSERT(
-            ss.getattribute(&group, "group_entry_name", entry_name));
-        auto* entry = module.getFunction(entry_name.c_str());
         OIIO_CHECK_ASSERT(entry);
         if (entry) {
             llvm::DominatorTree dominators(*entry);
@@ -319,10 +408,6 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             OIIO_CHECK_EQUAL(
                 producer->getFnAttribute("target-cpu").getValueAsString().str(),
                 std::string(arch));
-            ustring entry_name;
-            OIIO_CHECK_ASSERT(
-                ss.getattribute(&group, "group_entry_name", entry_name));
-            const auto* entry   = module.getFunction(entry_name.c_str());
             bool calls_producer = false;
             if (entry)
                 for (const auto& block : *entry)
@@ -436,10 +521,11 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             if (function.getName().find("osl_layer_group_hart_test_group_name_")
                 != 0)
                 continue;
-            ++internal_layers;
             OIIO_CHECK_ASSERT(function.hasLocalLinkage());
-            OIIO_CHECK_ASSERT(!function.isDeclaration());
-            OIIO_CHECK_EQUAL(function.arg_size(), 6);
+            check_function_abi(function, arch);
+            if (&function == entry)
+                continue;
+            ++internal_layers;
             int flag = -1, stores = 0;
             for (const auto& block : function)
                 for (const auto& inst : block) {
@@ -504,10 +590,6 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             OIIO_CHECK_ASSERT(calls > 0);
         }
         OIIO_CHECK_EQUAL(internal_layers, used_layers - 1);
-        ustring init_name;
-        OIIO_CHECK_ASSERT(
-            ss.getattribute(&group, "group_init_name", init_name));
-        const auto* init  = module.getFunction(init_name.c_str());
         bool resets_flags = false;
         if (init)
             for (const auto& block : *init)

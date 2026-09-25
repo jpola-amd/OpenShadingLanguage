@@ -558,6 +558,9 @@ public:
     ///   string pickle              Retrieves a serialized representation
     ///                                 of the shader group declaration.
     ///   int llvm_groupdata_size    Size of the GroupData struct.
+    ///   string group_init_name     GPU init callable name.
+    ///   string group_entry_name    GPU entry callable name.
+    ///   string group_fused_name    GPU callable combining init and entry.
     ///   int llvm_groupdata_alignment
     ///                             Required HART GroupData alignment in bytes.
     ///                             Available after successful compilation.

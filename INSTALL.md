@@ -321,10 +321,18 @@ testshade --hart --hart-no-cache --warmup --iters 3 -g 3 2 --print `
 
 The producer is an internal LLVM function, not a separate HART callable.
 OSL's existing layer scheduling and connection copies share the per-point
-group storage. HART still sees only the group's init and final entry
-callables. Output placement is qualified to the final layer, so producer
+group storage. HART exports init, final-entry and fused init+entry wrappers,
+not a callable per layer. Output placement is qualified to the final layer, so producer
 outputs remain internal. Both layers are validated before optimization,
 including unused layers and parameters.
+
+Generated mode defaults to two direct calls (init then entry) within one GPU
+launch. `--hart-fused` selects one callable that invokes the same internal
+init and entry functions, still using renderer-supplied per-point group
+storage. Both paths keep the six-argument callable ABI and lazy layer
+execution. This switch is not supported for external modules; their ABI and
+two fixed callable entries remain unchanged. The fused path is opt-in, not
+an assumed performance improvement.
 
 Numeric comparisons and `if`/`else` can also use connected inputs
 conditionally. For example, replace the consumer with:
@@ -550,7 +558,7 @@ do not enable general string support. Early function returns remain unsupported.
 Math domain boundaries and derivatives follow existing OSL semantics,
 including zero derivatives for `floor`, `ceil`, and `step`; this does not
 automatically filter discontinuities.
-The supported command-line subset is `--hart-device`, `--hart-no-cache`,
+The supported command-line subset is `--hart-device`, `--hart-no-cache`, `--hart-fused`,
 `--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
 `-d float|half|uint8`, `--groupname`, `--layer`, `--shader`, `--connect`,
 uniform `--param`, `-O0`/`-O1`/`-O2`, and `--llvm_opt`.
@@ -645,7 +653,7 @@ parameter. Control-flow checks cover mixed/all-true/all-false outcomes,
 equality boundaries, signed integer and float comparisons, and reuse of a
 connected input after branches join. The GPU-independent `hart-codegen-*`
 tests check the internal producer call, its six arguments and calling
-convention, and exactly two exported HART callables for each configured
+convention, and exactly three exported HART callables for each configured
 architecture. At LLVM level 10, they also verify a varying branch and that
 the conditional consumer's producer call is confined to the true branch.
 
@@ -767,7 +775,7 @@ Unsupported globals and writes still fail before launch.
 
 `hart-groups-runtime` checks longer numeric chains with float, color, point,
 vector, normal and matrix connections. Group storage, derivative propagation,
-and the unchanged two-callable ABI use OSL's existing layer machinery, without
+and the six-argument callable ABI use OSL's existing layer machinery, without
 a HART-specific scheduler or fixed layer-count cap. The last layer remains
 the sole default entry point; every original layer is validated before
 optimization, including unused layers.

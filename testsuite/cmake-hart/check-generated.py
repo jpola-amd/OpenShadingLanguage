@@ -48,12 +48,14 @@ suites.add_argument("--topology", action="store_true",
                     help="Run diamond, join and lazy dependency runtime cases")
 suites.add_argument("--materials", action="store_true",
                     help="Run composed multilayer material runtime cases")
+suites.add_argument("--fused", action="store_true",
+                    help="Compare split and fused generated HART callables")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
         or args.spaces or args.geometry or args.groups
-        or args.topology or args.materials) and not args.gpu:
+        or args.topology or args.materials or args.fused) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -888,13 +890,18 @@ def check_texture_cpu(shader_args, expected, image, report):
 
 
 def check_texture_render(shader_args, width, height, expected, repeat=False,
-                         cache_hit=False, compare_device=compare):
+                         cache_hit=False, compare_device=compare,
+                         callable_mode=None):
     image = root / "texture-gpu.pfm"
     if image.exists():
         image.unlink()
     flags = (["--warmup", "--iters", "3"] if repeat else ["--hart-no-cache"])
+    if callable_mode == "fused":
+        flags += ["--hart-fused"]
     output = run(["--hart", "-v"] + flags + ["-g", str(width), str(height),
                  "-o", "Cout", str(image)] + shader_args)
+    if callable_mode is not None:
+        assert "HART callable mode: " + callable_mode in output, output
     assert output.count("Launching HART grid") == (4 if repeat else 1), output
     if not repeat:
         assert "HART pipeline cache disabled" in output, output
@@ -1608,6 +1615,55 @@ def check_material_suite():
         assert max(abs(a - b) for a, b in zip(packed[0.75], packed[0.375])) > 1e-3
 
 
+def check_fused_suite():
+    levels = prepare_texture_images()[0]
+
+    def check_modes(shader_args, width, height, expected, repeat=False):
+        cpu = noise_cpu_image(shader_args, width, height)
+        compare(cpu, expected)
+        images = []
+        for mode in ("split", "fused"):
+            actual = check_texture_render(
+                shader_args, width, height, expected, repeat=repeat,
+                callable_mode=mode,
+            )
+            compare(actual, cpu)
+            images.append(actual)
+        compare(images[0], images[1])
+
+    # Six representative graphs, each run once per mode, plus four lazy-probe
+    # processes keep this suite to 16 GPU processes rather than doubling suites.
+    for optimize in ("10", "3"):
+        print("Checking split/fused HART callables at LLVM level " + optimize,
+              flush=True)
+        check_modes(
+            group_arguments(9, optimize, "-O0" if optimize == "10" else "-O2"),
+            7, 5, group_reference(9, 7, 5), repeat=optimize == "3",
+        )
+        check_modes(topology_arguments(optimize), 9, 9,
+                    topology_reference(9, 9))
+        noise = material_noise_signal(optimize)
+        expected = material_reference(levels, noise, 0.75)[1]
+        check_modes(material_arguments(optimize, report=1), 17, 9, expected)
+
+    # Divergent selection samples both safe branches while the unselected
+    # producer would overflow. Repeated launches also reset live-layer flags.
+    check_modes(
+        topology_arguments("3", mode=0, reuse_all=0, textures=True),
+        9, 9, topology_reference(9, 9, mode=0, reuse_all=0, textures=True),
+        repeat=True,
+    )
+    for mode in ("split", "fused"):
+        flags = ["--hart", "--hart-no-cache", "-v", "-g", "9", "9"]
+        if mode == "fused":
+            flags += ["--hart-fused"]
+        output = run(
+            flags + topology_arguments("3", mode=0, reuse_all=1, textures=True),
+            "nonfinite coordinates/gradients", error_after_launch=True,
+        )
+        assert "HART callable mode: " + mode in output, output
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1627,6 +1683,9 @@ try:
                    ["--hart-callable-module", "other.bc"]):
         run(base + option, "cannot be mixed")
     run(base + ["--hart-module", "other.bc"], "not OSL shaders")
+    run(["--hart-fused", "-v", "hart_first"], "require --hart")
+    run(["--hart", "--hart-fused", "-v", "--hart-module", "other.bc"],
+        "generated")
     run(base + ["-o", "other", "null"], "one RGB output")
     run(base + ["-o", "Cout", "null", "-o", "Cout", "null"], "one RGB output")
     run(base + ["-g", "0", "1"], "must be positive")
@@ -1884,11 +1943,14 @@ try:
     if args.materials:
         check_material_suite()
 
+    if args.fused:
+        check_fused_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.matrices
                          or args.spaces or args.geometry or args.groups
-                         or args.topology or args.materials):
+                         or args.topology or args.materials or args.fused):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -1980,7 +2042,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.noise:
+if args.fused:
+    suite = "split/fused callable"
+elif args.noise:
     suite = "noise"
 elif args.filterwidth:
     suite = "filterwidth"

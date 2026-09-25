@@ -742,6 +742,9 @@ getargs(int argc, const char* argv[])
     ap.arg("--hart-no-cache", &hart.no_cache)
       .help("Disable the HART pipeline cache for this run")
       .action([&](cspan<const char*>) { hart.no_cache = hart_options = true; });
+    ap.arg("--hart-fused", &hart.fused)
+      .help("Use one init+entry callable for a generated HART shader group")
+      .action([&](cspan<const char*>) { hart.fused = hart_options = true; });
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
     ap.arg("--debug2", &debug2)
@@ -1971,6 +1974,11 @@ test_shade(int argc, const char* argv[])
             return EXIT_FAILURE;
         }
 #if OSL_TESTSHADE_HART
+        if (hart.fused && (hart.has_module || shader_setup_args.size() == 1)) {
+            ErrorHandler::default_handler().errorfmt(
+                "--hart-fused requires a generated OSL shader group");
+            return EXIT_FAILURE;
+        }
         if (hart.has_module || shader_setup_args.size() == 1)
             return testshade_hart(argc, argv);
         if (!testshade_hart_validate_generated(argc, argv, hart, xres, yres,

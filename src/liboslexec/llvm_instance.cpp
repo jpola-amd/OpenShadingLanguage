@@ -208,8 +208,7 @@ layer_function_name(const ShaderGroup& group, const ShaderInstance& inst,
                     bool api)
 {
     const auto& ss     = inst.shadingsys();
-    const char* prefix = ((ss.use_hart() && inst.last_layer())
-                          || (ss.use_optix() && api))
+    const char* prefix = ((ss.use_hart() || ss.use_optix()) && api)
                              ? "__direct_callable__"
                              : "";
     return fmtformat("{}osl_layer_group_{}_name_{}", prefix, group.name(),
@@ -220,8 +219,8 @@ std::string
 init_function_name(const ShadingSystemImpl& shadingsys,
                    const ShaderGroup& group, bool api)
 {
-    const char* prefix = (shadingsys.use_hart()
-                          || (shadingsys.use_optix() && api))
+    const char* prefix = ((shadingsys.use_hart() || shadingsys.use_optix())
+                          && api)
                              ? "__direct_callable__"
                              : "";
 
@@ -1423,8 +1422,8 @@ BackendLLVM::build_llvm_init()
     return ll.current_function();
 }
 
-// OptiX Callables:
-//  Builds three OptiX callables: an init wrapper, an entry layer wrapper,
+// GPU Callables:
+//  Builds three callables: an init wrapper, an entry layer wrapper,
 //  and a "fused" callable that wraps both and owns the groupdata params buffer.
 //
 //  Clients can either call both init + entry, or use the fused callable.
@@ -1434,7 +1433,7 @@ BackendLLVM::build_llvm_init()
 //  direct callables.
 //
 std::vector<llvm::Function*>
-BackendLLVM::build_llvm_optix_callables()
+BackendLLVM::build_llvm_gpu_callables()
 {
     std::vector<llvm::Function*> funcs;
 
@@ -1515,7 +1514,7 @@ BackendLLVM::build_llvm_optix_callables()
 
 //
 // Fused callable:
-//  Alternative OptiX API to the init + entry callables.
+//  Alternative GPU API to the init + entry callables.
 //
 //  Calls init and the entry layer functions itself, so that OSL can own
 //  the groupdata params buffer.
@@ -1549,8 +1548,9 @@ BackendLLVM::build_llvm_fused_callable(void)
     // renderer-supplied pointer
     llvm::Value* llvm_groupdata_ptr = ll.current_function_arg(1);
 
-    if ((int)group().llvm_groupdata_size()
-        <= shadingsys().m_max_optix_groupdata_alloc)
+    if (use_optix()
+        && (int)group().llvm_groupdata_size()
+               <= shadingsys().m_max_optix_groupdata_alloc)
         llvm_groupdata_ptr = ll.op_alloca(m_llvm_type_groupdata, 1,
                                           "groupdata_buffer", 8);
 
@@ -2427,6 +2427,10 @@ BackendLLVM::run()
         }
     }
 
+    std::vector<llvm::Function*> gpu_externals;
+    if (use_optix() || use_hart())
+        gpu_externals = build_llvm_gpu_callables();
+
 #if OSL_USE_HART
     if (use_hart()) {
         // Recursive block generation may not propagate an opcode's failure.
@@ -2447,10 +2451,11 @@ BackendLLVM::run()
         auto prepare_function = [&](llvm::Function* function) {
             if (!function)
                 return;
-            function->setLinkage(function == init_func
-                                         || function == funcs.back()
-                                     ? llvm::GlobalValue::ExternalLinkage
-                                     : llvm::GlobalValue::InternalLinkage);
+            function->setLinkage(
+                std::find(gpu_externals.begin(), gpu_externals.end(), function)
+                        != gpu_externals.end()
+                    ? llvm::GlobalValue::ExternalLinkage
+                    : llvm::GlobalValue::InternalLinkage);
             for (const auto* name :
                  { "target-cpu", "target-features", "denormal-fp-math",
                    "denormal-fp-math-f32" }) {
@@ -2464,12 +2469,10 @@ BackendLLVM::run()
         prepare_function(init_func);
         for (auto* function : funcs)
             prepare_function(function);
+        for (auto* function : gpu_externals)
+            prepare_function(function);
     }
 #endif
-
-    std::vector<llvm::Function*> optix_externals;
-    if (use_optix())
-        optix_externals = build_llvm_optix_callables();
 
     // llvm::Function* entry_func = group().num_entry_layers() ? NULL : funcs[m_num_used_layers-1];
     m_stat_llvm_irgen_time += timer.lap();
@@ -2500,8 +2503,8 @@ BackendLLVM::run()
         // seems to yield about another 5-10% opt+JIT speed gain versus
         // merely internalizing.
         std::unordered_set<llvm::Function*> external_functions;
-        if (use_optix()) {
-            for (llvm::Function* func : optix_externals)
+        if (use_optix() || use_hart()) {
+            for (llvm::Function* func : gpu_externals)
                 external_functions.insert(func);
         } else {
             external_functions.insert(init_func);
@@ -2665,7 +2668,8 @@ BackendLLVM::run()
         }
         for (const auto& name :
              { init_function_name(shadingsys(), group(), true),
-               layer_function_name(group(), *group()[nlayers - 1], true) }) {
+               layer_function_name(group(), *group()[nlayers - 1], true),
+               fused_function_name(group()) }) {
             const auto* function = ll.module()->getFunction(name);
             bool valid           = function && !function->isDeclaration()
                                    && function->hasExternalLinkage()

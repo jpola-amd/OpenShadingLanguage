@@ -311,13 +311,17 @@ public:
         desc[0].kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
         desc[0].raygen.module            = m_modules[0];
         desc[0].raygen.entryFunctionName = entry.c_str();
-        m_group_count                    = inputs.size() == 2 ? 3 : 1;
         const std::array<std::string, 2> external_names {
             "__direct_callable__testshade_init",
             "__direct_callable__testshade_entry"
         };
         if (callable_names.empty())
             callable_names = external_names;
+        if (callable_names.size() > 2) {
+            m_err.errorfmt("HART grid supports at most two selected callables");
+            return false;
+        }
+        m_group_count = inputs.size() == 2 ? 1 + callable_names.size() : 1;
         for (unsigned int i = 1; i < m_group_count; ++i) {
             desc[i].kind               = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
             desc[i].callables.moduleDC = m_modules[1];
@@ -602,6 +606,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--hart");
     ap.arg("--hart-device %s:INDEX", &device);
     ap.arg("--hart-no-cache");
+    ap.arg("--hart-fused");
     ap.arg("--res %d:WIDTH %d:HEIGHT");
     ap.arg("-g %d:WIDTH %d:HEIGHT");
     ap.arg("--iters %d:COUNT");
@@ -780,7 +785,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     const void* data = nullptr;
     uint64_t bytes   = 0;
     int group_size = -1, group_alignment = 0;
-    std::array<std::string, 2> callables;
+    std::vector<std::string> callables(options.fused ? 1 : 2);
     if (!shadingsys.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &data)
         || !shadingsys.getattribute(&group, "hart_bitcode_size", TypeUInt64,
                                     &bytes)
@@ -789,8 +794,13 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         || !shadingsys.getattribute(&group, "llvm_groupdata_alignment",
                                     group_alignment)
         || group_size < 0 || group_alignment <= 0
-        || !shadingsys.getattribute(&group, "group_init_name", callables[0])
-        || !shadingsys.getattribute(&group, "group_entry_name", callables[1])) {
+        || !shadingsys.getattribute(&group,
+                                    options.fused ? "group_fused_name"
+                                                  : "group_init_name",
+                                    callables[0])
+        || (!options.fused
+            && !shadingsys.getattribute(&group, "group_entry_name",
+                                        callables[1]))) {
         err.errorfmt("Cannot retrieve a compiled HART shader group; "
                      "CPU fallback is not supported");
         return false;
@@ -825,8 +835,13 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!textures.prepare())
         return false;
     HartGridRenderer runtime(err);
+    const char* entry = options.fused ? "__raygen__testshade_generated_fused"
+                                      : "__raygen__testshade_generated";
+    if (verbose)
+        err.infofmt("HART callable mode: {}",
+                    options.fused ? "fused" : "split");
     if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
-        || !runtime.load(modules, "__raygen__testshade_generated", callables))
+        || !runtime.load(modules, entry, callables))
         return false;
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
     const Matrix44 transforms[] = { object2common, object2common.inverse(),

@@ -21,6 +21,7 @@ struct HartOptions {
     std::string entry = "__raygen__testshade";
     int device        = 0;
     bool no_cache     = false;
+    bool fused        = false;
     bool has_module = false, has_callables = false, has_entry = false;
 };
 

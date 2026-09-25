@@ -14,8 +14,9 @@
 
 extern "C" __constant__ testshade::HartGeneratedParams testshade_hart_params;
 
-extern "C" __global__ void
-__raygen__testshade_generated()
+template<bool Fused>
+__device__ void
+testshade_generated()
 {
     const uint3 index         = optixGetLaunchIndex();
     const uint3 size          = optixGetLaunchDimensions();
@@ -48,6 +49,20 @@ __raygen__testshade_generated()
     void* group    = params.scratch + shadeindex * params.group_stride;
     optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int, void*>(
         0u, &sg, group, nullptr, params.output, int(shadeindex), nullptr);
-    optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int, void*>(
-        1u, &sg, group, nullptr, params.output, int(shadeindex), nullptr);
+    if (!Fused)
+        optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int,
+                        void*>(1u, &sg, group, nullptr, params.output,
+                               int(shadeindex), nullptr);
 }
+
+
+
+extern "C" __global__ void
+__raygen__testshade_generated()
+{ testshade_generated<false>(); }
+
+
+
+extern "C" __global__ void
+__raygen__testshade_generated_fused()
+{ testshade_generated<true>(); }
