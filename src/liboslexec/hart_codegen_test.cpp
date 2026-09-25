@@ -26,6 +26,7 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -122,7 +123,7 @@ make_connected_group(ShadingSystem& ss, string_view producer,
 
 void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
-             int optimize, bool connected = false)
+             int optimize, bool connected = false, bool branching = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -143,7 +144,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
         OIIO_CHECK_ASSERT(false);
         return;
     }
-    const auto& module = **parsed;
+    auto& module = **parsed;
     const llvm::Triple triple(module.getTargetTriple());
     OIIO_CHECK_EQUAL(triple.getArch(), llvm::Triple::amdgcn);
     OIIO_CHECK_EQUAL(triple.getOS(), llvm::Triple::AMDHSA);
@@ -200,6 +201,46 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
             }
     }
     OIIO_CHECK_EQUAL(callables, 2);
+    if (branching && optimize == 10) {
+        ustring entry_name;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(&group, "group_entry_name", entry_name));
+        auto* entry = module.getFunction(entry_name.c_str());
+        OIIO_CHECK_ASSERT(entry);
+        if (entry) {
+            llvm::DominatorTree dominators(*entry);
+            bool varying_branch       = false;
+            bool conditional_producer = false;
+            const auto* producer      = module.getFunction(
+                "osl_layer_group_hart_test_group_name_producer");
+            for (const auto& block : *entry) {
+                for (const auto& inst : block) {
+                    const auto* cmp    = llvm::dyn_cast<llvm::FCmpInst>(&inst);
+                    const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                        block.getTerminator());
+                    if (!cmp
+                        || (cmp->getPredicate() != llvm::CmpInst::FCMP_OGT
+                            && cmp->getPredicate() != llvm::CmpInst::FCMP_UGT)
+                        || !branch || !branch->isConditional())
+                        continue;
+                    varying_branch = true;
+                    if (producer)
+                        for (const auto* user : producer->users())
+                            if (const auto* call
+                                = llvm::dyn_cast<llvm::CallInst>(user))
+                                if (call->getFunction() == entry) {
+                                    conditional_producer = true;
+                                    OIIO_CHECK_ASSERT(dominators.dominates(
+                                        branch->getSuccessor(0),
+                                        call->getParent()));
+                                }
+                }
+            }
+            OIIO_CHECK_ASSERT(varying_branch);
+            if (connected)
+                OIIO_CHECK_ASSERT(conditional_producer);
+        }
+    }
     if (connected && optimize == 10) {
         const auto* producer = module.getFunction(
             "osl_layer_group_hart_test_group_name_producer");
@@ -293,6 +334,11 @@ main(int argc, char* argv[])
         "shader hart_userdata_producer(float scale=1 [[ int interpolated=1 ]], output float value=0) { value=scale*(u+v); }",
         "shader hart_userdata_consumer(float value=42 [[ int interpolated=1 ]], output color Cout=0) { Cout=color(u,v,sin(value)); }",
         "shader hart_array(output float values[2]={1,2}, output color Cout=0) { Cout=color(u,v,0); }",
+        "shader hart_branch(float value=42, output color Cout=0) { if (u>v) Cout=color(u,v,sin(value)); else Cout=color(u,v,0); }",
+        "shader hart_loop(output color Cout=0) { int i=0; while (i<2) { Cout+=color(u,v,0); i+=1; } }",
+        "shader hart_branch_printf(output color Cout=0) { if (u>v) printf(\"not supported\"); Cout=color(u,v,0); }",
+        "shader hart_branch_texture(output color Cout=0) { if (u>v) Cout=texture(\"missing.tx\",u,v); else Cout=0; }",
+        "shader hart_compare(output color Cout=0) { int a=(u>0.5)-1; int b=(v>0.5)-1; Cout=color((u<v)+2*(u<=v)+4*(a<b)+8*(a<=b), (u>v)+2*(u>=v)+4*(a>b)+8*(a>=b), (u==v)+2*(u!=v)+4*(a==b)+8*(a!=b)); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -302,7 +348,7 @@ main(int argc, char* argv[])
     }
     // OSL level 10 skips passes; even O0 inlines alwaysinline HIP shadeops.
     for (int optimize : { 10, 3 }) {
-        for (size_t i = 0; i < 2; ++i) {
+        for (int i : { 0, 1, 12, 16 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -313,7 +359,7 @@ main(int argc, char* argv[])
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
-            check_module(ss, *group, arch, i == 1, optimize);
+            check_module(ss, *group, arch, i == 1, optimize, false, i == 12);
             auto* thread = ss.create_thread_info();
             auto* ctx    = ss.get_context(thread);
             ShaderGlobals globals { };
@@ -324,19 +370,22 @@ main(int argc, char* argv[])
             OIIO_CHECK_ASSERT(
                 OIIO::Strutil::contains(errors.last_error, "not CPU execute"));
         }
-        HartServices renderer;
-        Diagnostics errors;
-        ShadingSystem ss(&renderer, nullptr, &errors);
-        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
-        ss.attribute("llvm_optimize", optimize);
-        auto group = make_connected_group(ss, oso[5], oso[6]);
-        // Instance parameter overrides are released during optimization.
-        ss.optimize_group(group.get(), nullptr, false);
-        ss.optimize_group(group.get(), nullptr);
-        if (errors.errors)
-            print(stderr, "{}\n", errors.last_error);
-        OIIO_CHECK_EQUAL(errors.errors, 0);
-        check_module(ss, *group, arch, true, optimize, true);
+        for (int consumer : { 6, 12 }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            ss.attribute("llvm_optimize", optimize);
+            auto group = make_connected_group(ss, oso[5], oso[consumer]);
+            // Instance parameter overrides are released during optimization.
+            ss.optimize_group(group.get(), nullptr, false);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "{}\n", errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch, true, optimize, true,
+                         consumer == 12);
+        }
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
     check_rejection(arch, oso[0], "one or two shader layers", 3);
@@ -345,6 +394,9 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
     check_rejection(arch, oso[4], "shader globals u and v");
     check_rejection(arch, oso[11], "unsupported type");
+    check_rejection(arch, oso[13], "unsupported operation 'while'");
+    check_rejection(arch, oso[14], "unsupported operation 'printf'");
+    check_rejection(arch, oso[15], "unsupported operation 'texture'");
     for (bool userdata : { false, true }) {
         for (int unsupported_layer = 0; unsupported_layer < 2;
              ++unsupported_layer) {

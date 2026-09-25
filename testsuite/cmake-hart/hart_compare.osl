@@ -1,0 +1,18 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_compare(int integer_inputs = 0, output color Cout = 0)
+{
+    if (integer_inputs) {
+        int a = (u > 0.5) - 1;
+        int b = (v > 0.5) - 1;
+        Cout = color((a < b) + 2 * (a <= b),
+                     (a > b) + 2 * (a >= b),
+                     (a == b) + 2 * (a != b));
+    } else {
+        Cout = color((u < v) + 2 * (u <= v),
+                     (u > v) + 2 * (u >= v),
+                     (u == v) + 2 * (u != v));
+    }
+}

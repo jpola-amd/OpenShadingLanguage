@@ -57,13 +57,13 @@ def pixels(output, width, height):
     return result
 
 
-def reference(width, height, sine):
+def reference(width, height, evaluate):
     result = []
     for y in range(height):
         v = 0.5 if height == 1 else y / (height - 1)
         for x in range(width):
             u = 0.5 if width == 1 else x / (width - 1)
-            result.extend((u, v, math.sin(u + v) if sine else u + v))
+            result.extend(evaluate(u, v))
     return result
 
 
@@ -87,6 +87,50 @@ def image_pixels(path, width, height):
     # PFM scanlines are stored bottom to top.
     return [value for y in reversed(range(height))
             for value in data[y * width * 3:(y + 1) * width * 3]]
+
+
+def check_render(shader_args, width, height, expected):
+    grid = ["-g", str(width), str(height)]
+    cpu = pixels(run(["-t", "1"] + grid + ["--print"] + shader_args),
+                 width, height)
+    # CPU testshade prints six significant digits.
+    compare(cpu, expected, 5e-6)
+    for cache_options in (["--hart-no-cache"], []):
+        flags = ["--hart", "-v", "--warmup", "--iters", "3"]
+        flags += cache_options + grid
+        output = run(flags + ["--print"] + shader_args)
+        if cache_options:
+            assert "HART pipeline cache disabled" in output, output
+        assert output.count("Launching HART grid") == 4, output
+        gpu = pixels(output, width, height)
+        compare(gpu, expected, 2e-6)
+        compare(gpu, cpu, 5e-6)
+
+        cpu_image, gpu_image = root / "cpu.pfm", root / "gpu.pfm"
+        for image in (cpu_image, gpu_image):
+            if image.exists():
+                image.unlink()
+        run(["-t", "1"] + grid
+            + ["-o", "Cout", str(cpu_image)] + shader_args)
+        run(flags + ["-o", "Cout", str(gpu_image)] + shader_args)
+        host_pixels = image_pixels(cpu_image, width, height)
+        device_pixels = image_pixels(gpu_image, width, height)
+        compare(host_pixels, expected, 2e-6)
+        compare(device_pixels, expected, 2e-6)
+        compare(device_pixels, host_pixels, 2e-6)
+
+
+def connected_group(consumer, parameters=None):
+    return (["--shader", "hart_group_producer", "producer"]
+            + (parameters or [])
+            + ["--shader", consumer, "consumer",
+               "--connect", "producer", "value", "consumer", "value"])
+
+
+def comparison_result(a, b):
+    return (int(a < b) + 2 * int(a <= b),
+            int(a > b) + 2 * int(a >= b),
+            int(a == b) + 2 * int(a != b))
 
 
 try:
@@ -137,6 +181,7 @@ try:
             ("hart_printf", "HART"),
             ("hart_texture", "HART"),
             ("hart_userdata", "HART"),
+            ("hart_loop", "unsupported operation 'while'"),
         ):
             run(["--hart", "-v", shader], error)
         run(["--hart", "--shader", "hart_first", "first",
@@ -144,49 +189,51 @@ try:
              "--shader", "hart_first", "third", "-v"], "one or two shader layers")
         # Even an unused producer must be validated before optimization.
         for shader in ("hart_closure", "hart_string", "hart_printf",
-                       "hart_texture", "hart_userdata"):
+                       "hart_texture", "hart_userdata", "hart_loop"):
             run(["--hart", "--shader", shader, "producer",
                  "--shader", "hart_sine", "consumer", "-v"], "HART")
 
-        connected = ["--shader", "hart_group_producer", "producer",
-                     "--shader", "hart_group_consumer", "consumer",
-                     "--connect", "producer", "value", "consumer", "value"]
-        for shader_args, sine in (
-            (["hart_first"], False), (["hart_sine"], True),
-            (["--llvm_opt", "10"] + connected, True),
-            (["--llvm_opt", "3"] + connected, True),
+        connected = connected_group("hart_group_consumer")
+        arithmetic = lambda u, v: (u, v, u + v)
+        sine = lambda u, v: (u, v, math.sin(u + v))
+        branch = lambda u, v: (u, v, math.sin(u + v) if u > v else 0)
+        for shader_args, evaluate in (
+            (["hart_first"], arithmetic), (["hart_sine"], sine),
+            (["--llvm_opt", "10"] + connected, sine),
+            (["--llvm_opt", "3"] + connected, sine),
+            (["--llvm_opt", "10"] + connected_group("hart_branch"), branch),
+            (["--llvm_opt", "3"] + connected_group("hart_branch"), branch),
         ):
             for width, height in ((1, 1), (3, 2), (37, 5)):
-                grid = ["-g", str(width), str(height)]
-                expected = reference(width, height, sine)
-                cpu = pixels(run(["-t", "1"] + grid + ["--print"] + shader_args),
-                             width, height)
-                # CPU testshade prints six significant digits.
-                compare(cpu, expected, 5e-6)
-                for cache_options in (["--hart-no-cache"], []):
-                    flags = ["--hart", "-v", "--warmup", "--iters", "3"]
-                    flags += cache_options + grid
-                    output = run(flags + ["--print"] + shader_args)
-                    if cache_options:
-                        assert "HART pipeline cache disabled" in output, output
-                    assert output.count("Launching HART grid") == 4, output
-                    gpu = pixels(output, width, height)
-                    compare(gpu, expected, 2e-6)
-                    compare(gpu, cpu, 5e-6)
-
-                    cpu_image, gpu_image = root / "cpu.pfm", root / "gpu.pfm"
-                    for image in (cpu_image, gpu_image):
-                        if image.exists():
-                            image.unlink()
-                    run(["-t", "1"] + grid
-                        + ["-o", "Cout", str(cpu_image)] + shader_args)
-                    run(flags + ["-o", "Cout", str(gpu_image)] + shader_args)
-                    host_pixels = image_pixels(cpu_image, width, height)
-                    device_pixels = image_pixels(gpu_image, width, height)
-                    compare(host_pixels, expected, 2e-6)
-                    compare(device_pixels, expected, 2e-6)
-                    compare(device_pixels, host_pixels, 2e-6)
+                check_render(shader_args, width, height,
+                             reference(width, height, evaluate))
         for optimize in ("10", "3"):
+            # Uniform outcomes, integer conditions/comparisons, and a second
+            # use after reconvergence complement the divergent image tests.
+            cases = [
+                (connected_group("hart_branch",
+                                 ["--param:type=float", "bias", "-2"]), sine),
+                (connected_group("hart_branch",
+                                 ["--param:type=float", "bias", "2"]),
+                 lambda u, v: (u, v, 0)),
+                (connected_group("hart_branch_reuse"),
+                 lambda u, v: (math.sin(u + v) if u > v else 0, v, u + v)),
+                (["--param:type=float", "value", "1", "hart_branch"],
+                 lambda u, v: (u, v, math.sin(1) if u > v else 0)),
+                (["hart_compare"], comparison_result),
+                (["--param", "integer_inputs", "-1", "hart_compare"],
+                 lambda u, v: comparison_result(int(u > 0.5) - 1,
+                                                int(v > 0.5) - 1)),
+            ]
+            for shader_args, evaluate in cases:
+                flags = ["--llvm_opt", optimize, "-O0", "-g", "3", "3", "--print"]
+                expected = reference(3, 3, evaluate)
+                cpu = pixels(run(flags + shader_args), 3, 3)
+                gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
+                                  "--iters", "3"] + flags + shader_args), 3, 3)
+                compare(cpu, expected, 5e-6)
+                compare(gpu, expected, 2e-6)
+                compare(gpu, cpu, 5e-6)
             parameter_group = ["--llvm_opt", optimize, "-O0",
                                "--param:type=float", "scale", "2"] + connected
             expected = [0.5, 0.5, math.sin(2)]
@@ -198,7 +245,7 @@ try:
         # Exercise the ordinary named-layer setup, not just positional shaders.
         named = run(["--hart", "--groupname", "generated",
                      "--shader", "hart_first", "surface", "--print"])
-        compare(pixels(named, 1, 1), reference(1, 1, False), 2e-6)
+        compare(pixels(named, 1, 1), reference(1, 1, arithmetic), 2e-6)
         # A bare "2" is inferred as int; the shader parameter is float.
         parameter_args = ["--param:type=float", "scale", "2",
                           "--shader", "hart_parameter", "surface", "--print"]

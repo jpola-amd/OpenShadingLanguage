@@ -1,0 +1,11 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_branch(float value = 42, float bias = 0, output color Cout = 0)
+{
+    if (u > v + bias)
+        Cout = color(u, v, sin(value));
+    else
+        Cout = color(u, v, 0);
+}

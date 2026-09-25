@@ -326,17 +326,46 @@ callables. Output placement is qualified to the final layer, so producer
 outputs remain internal. Both layers are validated before optimization,
 including unused layers and parameters.
 
+Numeric comparisons and `if`/`else` can also use connected inputs
+conditionally. For example, replace the consumer with:
+
+```osl
+shader hart_branch(float value = 42, float bias = 0, output color Cout = 0)
+{
+    if (u > v + bias)
+        Cout = color(u, v, sin(value));
+    else
+        Cout = color(u, v, 0);
+}
+```
+
+```powershell
+oslc hart_branch.osl
+testshade --hart --llvm_opt 10 --warmup --iters 3 -g 37 5 --print `
+  --shader hart_group_producer producer `
+  --shader hart_branch consumer `
+  --connect producer value consumer value
+```
+
+With the default bias, points where `u > v` use the producer's value;
+the other points, including `u == v`, write zero to the blue channel.
+The generated code uses the existing OSL conditional and lazy-layer
+lowering, without adding HART callable types or changing the group ABI.
+
 Its numeric instruction subset is assignment, addition, subtraction,
-multiplication, division, negation, color construction, `sin`, and component
-reads/writes (plus internal structural operations). Only reads of the `u`
+multiplication, division, negation, color construction, `sin`, component
+reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), and `if`/`else`
+(plus internal structural operations). Only reads of the `u`
 and `v` shader globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
 The supported command-line subset is `--hart-device`, `--hart-no-cache`,
 `--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
 `-d float|half|uint8`, `--groupname`, `--layer`, `--shader`, `--connect`,
 uniform `--param`, `-O0`/`-O1`/`-O2`, and `--llvm_opt`.
-`--llvm_opt 10` skips OSL's LLVM passes, preserving the inter-layer call in
-the emitted bitcode; HART still performs final device optimization.
+`--llvm_opt 10` skips OSL's LLVM passes, allowing inspection of branches and
+inter-layer calls in the emitted bitcode. OSL graph specialization still
+runs (use `-O0` to disable its optional optimizations), and HART still
+performs final device optimization.
 `--llvm_opt 3` exercises optimized bitcode.
 Grid coordinates include the endpoints, with 0.5 for
 singleton dimensions. `--print` suppresses image writing. As in CPU
@@ -344,8 +373,8 @@ testshade, JPEG/GIF/PNG images are converted to sRGB.
 Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
-Textures, closures, tracing, shader printing, strings, arrays, interpolated or
-interactive parameters, renderer-service callbacks, batched execution,
+Loops, textures, closures, tracing, shader printing, strings, arrays,
+interpolated or interactive parameters, renderer-service callbacks, batched execution,
 instrumentation, more than two layers, explicit entry layers, multiple final
 outputs, and unlisted frontend options are
 unsupported.
@@ -357,16 +386,21 @@ its `hart_arch` attribute may be set again only to the same architecture.
 
 `hart-generated-cli` checks the supported CLI boundary without GPU execution.
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
-which compares arithmetic, `sin(u+v)`, and the connected two-layer group
+which compares arithmetic, `sin(u+v)`, and straight-line and conditional
+two-layer groups
 against CPU execution
 on `1x1`, `3x2`, and `37x5` grids. It checks numerical and image output,
 cold-cache compilation, warmup, and repeated launches. Absolute tolerances
 are `2e-6` for GPU/image values and `5e-6` for comparison with CPU text's
 six-significant-digit formatting (relative tolerance `1e-6`).
 The two-layer tests cover LLVM levels 10 and 3 and an overridden producer
-parameter. The GPU-independent `hart-codegen-*` tests check the internal
-producer call, its six arguments and calling convention, and exactly two
-exported HART callables for each configured architecture.
+parameter. Control-flow checks cover mixed/all-true/all-false outcomes,
+equality boundaries, signed integer and float comparisons, and reuse of a
+connected input after branches join. The GPU-independent `hart-codegen-*`
+tests check the internal producer call, its six arguments and calling
+convention, and exactly two exported HART callables for each configured
+architecture. At LLVM level 10, they also verify a varying branch and that
+the conditional consumer's producer call is confined to the true branch.
 
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
