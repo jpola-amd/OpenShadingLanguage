@@ -1,0 +1,14 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_deriv_flow(output float value = 0)
+{
+    int count = 1;
+    if (u > v)
+        count = 3;
+    else if (u < v)
+        count = 0;
+    for (int i = 0; i < count; i += 1)
+        value += sin(u * v + i);
+}

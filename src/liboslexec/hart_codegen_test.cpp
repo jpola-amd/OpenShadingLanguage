@@ -123,9 +123,9 @@ make_connected_group(ShadingSystem& ss, string_view producer,
 
 
 void
-check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
-             int optimize, bool connected = false, bool branching = false,
-             bool looping = false)
+check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
+             string_view sine_function, int optimize, bool connected = false,
+             bool branching = false, bool looping = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -307,12 +307,23 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
             OIIO_CHECK_ASSERT(calls_producer);
         }
     }
-    if (sine && optimize == 10) {
-        bool shadeop = false;
-        for (const auto& function : module)
-            shadeop |= function.getName().find("osl_sin_") == 0
-                       && !function.isDeclaration() && !function.use_empty();
-        OIIO_CHECK_ASSERT(shadeop);
+    if (!sine_function.empty() && optimize == 10) {
+        const auto* shadeop = module.getFunction(std::string(sine_function));
+        OIIO_CHECK_ASSERT(shadeop && !shadeop->isDeclaration()
+                          && !shadeop->use_empty());
+        if (connected && sine_function == "osl_sin_dfdf") {
+            const auto* storage = llvm::StructType::getTypeByName(context,
+                                                                  "Groupdata");
+            OIIO_CHECK_ASSERT(storage);
+            bool dual_storage = false;
+            if (storage)
+                for (const auto* field : storage->elements())
+                    if (const auto* array = llvm::dyn_cast<llvm::ArrayType>(
+                            field))
+                        dual_storage |= array->getNumElements() == 3
+                                        && array->getElementType()->isFloatTy();
+            OIIO_CHECK_ASSERT(dual_storage);
+        }
     }
     int size_bytes = 0, alignment = 0;
     OIIO_CHECK_ASSERT(
@@ -379,6 +390,14 @@ main(int argc, char* argv[])
         "shader hart_dowhile(output color Cout=0) { int i=0; do { Cout+=color(u,v,0); i+=1; } while(i<2); }",
         "shader hart_loop_printf(int count=0, output color Cout=0) { for(int i=0;i<count;i+=1) printf(\"not supported\"); Cout=color(u,v,0); }",
         "shader hart_loop_texture(int count=0, output color Cout=0) { for(int i=0;i<count;i+=1) Cout=texture(\"missing.tx\",u,v); }",
+        "shader hart_deriv(output color Cout=0) { float value=sin(u*v); Cout=color(value,Dx(value),Dy(value)); }",
+        "shader hart_deriv_producer(float scale=1, output float value=0) { value=sin(scale*u*v); }",
+        "shader hart_deriv_consumer(float value=42, output color Cout=0) { Cout=color(value,Dx(value),Dy(value)); }",
+        "shader hart_deriv_flow(output float value=0) { int count=1; if(u>v) count=3; else if(u<v) count=0; for(int i=0;i<count;i+=1) value+=sin(u*v+i); }",
+        "shader hart_deriv_color(output color Cout=0) { color value=sin(color(u*v,u+v,u-v)); color dx=Dx(value); color dy=Dy(value); Cout=color(dx[0],dy[1],dx[2]+dy[2]); }",
+        "shader hart_deriv_dz(output color Cout=0) { Cout=color(Dz(u)); }",
+        "shader hart_deriv_filterwidth(output color Cout=0) { Cout=color(filterwidth(u)); }",
+        "shader hart_deriv_arithmetic(output color Cout=0) { float value=-(u*v+u-v)/(v+1); Cout=color(value,Dx(value),Dy(value)); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -388,7 +407,7 @@ main(int argc, char* argv[])
     }
     // OSL level 10 skips passes; even O0 inlines alwaysinline HIP shadeops.
     for (int optimize : { 10, 3 }) {
-        for (int i : { 0, 1, 12, 13, 16, 17 }) {
+        for (int i : { 0, 1, 12, 13, 16, 17, 23, 25, 27, 30 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -400,7 +419,11 @@ main(int argc, char* argv[])
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
             const bool looping = i == 13 || i == 17;
-            check_module(ss, *group, arch, i == 1 || looping, optimize, false,
+            const string_view sine_function = i == 23   ? "osl_sin_dfdf"
+                                              : i == 27 ? "osl_sin_dvdv"
+                                              : i == 1 || looping ? "osl_sin_ff"
+                                                                  : "";
+            check_module(ss, *group, arch, sine_function, optimize, false,
                          i == 12, looping);
             auto* thread = ss.create_thread_info();
             auto* ctx    = ss.get_context(thread);
@@ -425,8 +448,21 @@ main(int argc, char* argv[])
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
-            check_module(ss, *group, arch, true, optimize, true, consumer == 12,
-                         consumer == 13 || consumer == 17);
+            check_module(ss, *group, arch, "osl_sin_ff", optimize, true,
+                         consumer == 12, consumer == 13 || consumer == 17);
+        }
+        for (int producer : { 24, 26 }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            ss.attribute("llvm_optimize", optimize);
+            auto group = make_connected_group(ss, oso[producer], oso[25]);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "{}\n", errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch, "osl_sin_dfdf", optimize, true);
         }
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
@@ -443,6 +479,8 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[20], "unsupported operation 'dowhile'");
     check_rejection(arch, oso[21], "unsupported operation 'printf'");
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
+    check_rejection(arch, oso[28], "unsupported operation 'Dz'");
+    check_rejection(arch, oso[29], "unsupported operation 'filterwidth'");
     for (bool userdata : { false, true }) {
         for (int unsupported_layer = 0; unsupported_layer < 2;
              ++unsupported_layer) {

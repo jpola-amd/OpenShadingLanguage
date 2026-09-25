@@ -17,11 +17,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument("testshade")
 parser.add_argument("--oslc", required=True)
 parser.add_argument("--gpu", action="store_true")
-parser.add_argument("--loops", action="store_true",
+suites = parser.add_mutually_exclusive_group()
+suites.add_argument("--loops", action="store_true",
                     help="Run loop runtime cases instead of the basic runtime cases")
+suites.add_argument("--derivatives", action="store_true",
+                    help="Run derivative runtime cases instead of the basic runtime cases")
 args = parser.parse_args()
-if args.loops and not args.gpu:
-    parser.error("--loops requires --gpu")
+if (args.loops or args.derivatives) and not args.gpu:
+    parser.error("--loops and --derivatives require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -124,8 +127,8 @@ def check_render(shader_args, width, height, expected):
         compare(device_pixels, host_pixels, 2e-6)
 
 
-def connected_group(consumer, parameters=None):
-    return (["--shader", "hart_group_producer", "producer"]
+def connected_group(consumer, parameters=None, producer="hart_group_producer"):
+    return (["--shader", producer, "producer"]
             + (parameters or [])
             + ["--shader", consumer, "consumer",
                "--connect", "producer", "value", "consumer", "value"])
@@ -144,6 +147,13 @@ def loop_result(u, v, count=-1, value=None, reuse=False):
         value = u + v
     total = sum(math.sin(value + i) for i in range(count))
     return (value if reuse else u, v, total)
+
+
+def derivative_result(u, v, width, height, count=1):
+    value = sum(math.sin(u * v + i) for i in range(count))
+    gradient = sum(math.cos(u * v + i) for i in range(count))
+    return (value, gradient * v / max(1, width - 1),
+            gradient * u / max(1, height - 1))
 
 
 try:
@@ -221,7 +231,48 @@ try:
                     compare(gpu, expected, 2e-6)
                     compare(gpu, cpu, 5e-6)
 
-    if args.gpu and not args.loops:
+    if args.derivatives:
+        connected = connected_group("hart_deriv_consumer",
+                                    producer="hart_deriv_producer")
+        flow = connected_group("hart_deriv_consumer", producer="hart_deriv_flow")
+        for optimize in ("10", "3"):
+            flags = ["--llvm_opt", optimize]
+            for shader_args, varying in ((["hart_deriv"], False),
+                                         (connected, False), (flow, True)):
+                for width, height in ((1, 1), (3, 2), (37, 5)):
+                    expected = reference(
+                        width, height,
+                        lambda u, v: derivative_result(
+                            u, v, width, height,
+                            (3 if u > v else (0 if u < v else 1))
+                            if varying else 1),
+                    )
+                    check_render(flags + shader_args, width, height, expected)
+            for shader, evaluate in (
+                ("hart_deriv_arithmetic",
+                 lambda u, v: (v / (v + 1) - u, -0.5, 1 / (v + 1)**2)),
+                ("hart_deriv_color",
+                 lambda u, v: (math.cos(u * v) * v * 0.5,
+                               math.cos(u + v), -0.5 * math.cos(u - v))),
+            ):
+                check_render(flags + [shader], 3, 2, reference(3, 2, evaluate))
+            for specialize in ("-O0", "-O2"):
+                for shader_args, value in (
+                    (["--param:type=float", "value", "3",
+                      "hart_deriv_consumer"], 3),
+                    (["--param:type=float", "scale", "0"] + connected, 0),
+                ):
+                    constant_flags = flags + [specialize, "-g", "3", "2", "--print"]
+                    expected = reference(3, 2, lambda u, v: (value, 0, 0))
+                    cpu = pixels(run(constant_flags + shader_args), 3, 2)
+                    gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
+                                      "--iters", "3"] + constant_flags + shader_args),
+                                 3, 2)
+                    compare(cpu, expected, 5e-6)
+                    compare(gpu, expected, 2e-6)
+                    compare(gpu, cpu, 5e-6)
+
+    if args.gpu and not (args.loops or args.derivatives):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -310,6 +361,7 @@ try:
 finally:
     shutil.rmtree(root)
 
-print("Generated HART " + ("loop" if args.loops else "CLI") + " checks passed"
+suite = "derivative" if args.derivatives else ("loop" if args.loops else "CLI")
+print("Generated HART " + suite + " checks passed"
       + ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
          if args.gpu else ""))

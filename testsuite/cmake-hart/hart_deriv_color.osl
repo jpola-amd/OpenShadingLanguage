@@ -1,0 +1,11 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_deriv_color(output color Cout = 0)
+{
+    color value = sin(color(u * v, u + v, u - v));
+    color dx = Dx(value);
+    color dy = Dy(value);
+    Cout = color(dx[0], dy[1], dx[2] + dy[2]);
+}

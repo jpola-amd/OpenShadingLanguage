@@ -374,10 +374,29 @@ small bounds; the backend checks supported operations and types, not
 termination, and does not impose an iteration limit. Shader authors remain
 responsible for terminating their loops.
 
+`Dx` and `Dy` expose OSL's propagated first-order derivatives. For example:
+
+```osl
+float value = sin(u * v);
+Cout = color(value, Dx(value), Dy(value));
+```
+
+The result is `(sin(u*v), cos(u*v)*v*dudx, cos(u*v)*u*dvdy)`.
+The endpoint grid supplies `dudx = 1/max(1,width-1)` and
+`dvdy = 1/max(1,height-1)`, with `dudy = dvdx = 0`, matching CPU testshade.
+Singleton dimensions use coordinate 0.5 and derivative 1, not zero.
+These are propagated derivatives, not finite differences between GPU threads.
+The existing arithmetic and derivative-aware sine lowering also handles
+color components, executed branches and loops, and connected layer inputs.
+For example, a producer can compute `value = sin(u*v)` and its consumer
+can read `Dx(value)` and `Dy(value)`; OSL propagates derivative requirements
+upstream and copies value/dx/dy through group storage. Constant and uniform
+parameter derivatives are zero. No new callable or launch ABI is needed.
+
 Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color construction, `sin`, component
 reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
-and `for`/`while`
+`for`/`while`, `Dx`, and `Dy`
 (plus internal structural operations). Only reads of the `u`
 and `v` shader globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
@@ -396,7 +415,8 @@ testshade, JPEG/GIF/PNG images are converted to sRGB.
 Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
-`break`, `continue`, `do`/`while`, textures, closures, tracing, shader printing,
+`Dz`, `filterwidth`, `break`, `continue`, `do`/`while`, textures, closures,
+tracing, shader printing,
 strings, arrays, interpolated or interactive parameters, renderer-service
 callbacks, batched execution, instrumentation, more than two layers, explicit
 entry layers, multiple final outputs, and unlisted frontend options are
@@ -434,9 +454,22 @@ compilation, and repeated launches. The `hart-codegen-*` tests use LLVM loop
 analysis at level 10 to confirm that real loops remain, containing both a
 sine shadeop and, for connected groups, an internal producer call.
 
+`hart-derivatives-runtime` separately checks `Dx`/`Dy` against analytical
+values and CPU execution at LLVM levels 10 and 3. It covers single-layer
+sine, connected derivative propagation, and a producer with varying
+zero/one/three-iteration loops on `1x1`, `3x2`, and `37x5` grids, plus
+arithmetic and color derivatives and zero derivatives for uniform parameters
+and constant-valued connections. It uses the same numerical/image,
+cold/cache-enabled and repeated-launch checks. The `hart-codegen-*` tests
+verify linked scalar/color derivative-aware sine calls and derivative-sized
+connected storage at level 10, and reject the still-unsupported `Dz` and
+`filterwidth` operations.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|grid)" --output-on-failure
+ctest --test-dir build\hart-validation -C Release `
+  -R "^hart-(codegen-.*|derivatives-runtime)$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

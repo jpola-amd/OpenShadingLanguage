@@ -402,7 +402,7 @@ ShaderInstance::validate_hart() const
         ustring("compassign"), ustring("if"),  ustring("lt"),
         ustring("le"),         ustring("eq"),  ustring("ge"),
         ustring("gt"),         ustring("neq"), ustring("for"),
-        ustring("while"),
+        ustring("while"),      ustring("Dx"),  ustring("Dy"),
     };
     for (const Opcode& op : m_master->m_ops) {
         if (std::find(std::begin(supported), std::end(supported), op.opname())
