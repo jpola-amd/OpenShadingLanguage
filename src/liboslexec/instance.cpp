@@ -401,7 +401,8 @@ ShaderInstance::validate_hart() const
         ustring("color"),      ustring("sin"), ustring("compref"),
         ustring("compassign"), ustring("if"),  ustring("lt"),
         ustring("le"),         ustring("eq"),  ustring("ge"),
-        ustring("gt"),         ustring("neq"),
+        ustring("gt"),         ustring("neq"), ustring("for"),
+        ustring("while"),
     };
     for (const Opcode& op : m_master->m_ops) {
         if (std::find(std::begin(supported), std::end(supported), op.opname())

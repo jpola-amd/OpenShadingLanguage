@@ -1,0 +1,12 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_loop_dowhile(output color Cout = 0)
+{
+    int i = 0;
+    do {
+        Cout += color(u, v, 0);
+        i += 1;
+    } while (i < 2);
+}

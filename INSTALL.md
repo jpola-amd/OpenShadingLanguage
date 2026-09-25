@@ -352,9 +352,32 @@ the other points, including `u == v`, write zero to the blue channel.
 The generated code uses the existing OSL conditional and lazy-layer
 lowering, without adding HART callable types or changing the group ABI.
 
+`for` and `while` loops use the same shared LLVM lowering. A consumer can,
+for example, accumulate a shadeop result over a varying number of iterations:
+
+```osl
+int count = 1;
+if (u > v)
+    count = 4;
+else if (u < v)
+    count = 0;
+
+float sum = 0;
+for (int i = 0; i < count; i += 1)
+    sum += sin(value + i);
+Cout = color(u, v, sum);
+```
+
+The connected input can be used inside the loop and again afterward,
+including when the loop executes zero times. Loop tests use deliberately
+small bounds; the backend checks supported operations and types, not
+termination, and does not impose an iteration limit. Shader authors remain
+responsible for terminating their loops.
+
 Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color construction, `sin`, component
-reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), and `if`/`else`
+reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
+and `for`/`while`
 (plus internal structural operations). Only reads of the `u`
 and `v` shader globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
@@ -373,10 +396,10 @@ testshade, JPEG/GIF/PNG images are converted to sRGB.
 Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
-Loops, textures, closures, tracing, shader printing, strings, arrays,
-interpolated or interactive parameters, renderer-service callbacks, batched execution,
-instrumentation, more than two layers, explicit entry layers, multiple final
-outputs, and unlisted frontend options are
+`break`, `continue`, `do`/`while`, textures, closures, tracing, shader printing,
+strings, arrays, interpolated or interactive parameters, renderer-service
+callbacks, batched execution, instrumentation, more than two layers, explicit
+entry layers, multiple final outputs, and unlisted frontend options are
 unsupported.
 They fail explicitly; there is **no CPU fallback**.
 `--hart-entry` and `--hart-callable-module` belong only to external-module
@@ -402,9 +425,18 @@ convention, and exactly two exported HART callables for each configured
 architecture. At LLVM level 10, they also verify a varying branch and that
 the conditional consumer's producer call is confined to the true branch.
 
+`hart-loops-runtime` is a separate GPU test, enabled by the same
+`TESTSUITE_HART=1` configuration. It reuses the generated-shader test helpers
+to check `for` and `while`, zero/one/four iterations, varying loop lengths,
+loop-carried accumulation, and connected inputs inside and after loops.
+It covers LLVM levels 10 and 3, numerical/image output, cold/cache-enabled
+compilation, and repeated launches. The `hart-codegen-*` tests use LLVM loop
+analysis at level 10 to confirm that real loops remain, containing both a
+sine shadeop and, for connected groups, an internal producer call.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|grid)" --output-on-failure
+  -R "hart-(generated|loops|grid)" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

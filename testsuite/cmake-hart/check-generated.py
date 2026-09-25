@@ -17,7 +17,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("testshade")
 parser.add_argument("--oslc", required=True)
 parser.add_argument("--gpu", action="store_true")
+parser.add_argument("--loops", action="store_true",
+                    help="Run loop runtime cases instead of the basic runtime cases")
 args = parser.parse_args()
+if args.loops and not args.gpu:
+    parser.error("--loops requires --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -133,6 +137,15 @@ def comparison_result(a, b):
             int(a == b) + 2 * int(a != b))
 
 
+def loop_result(u, v, count=-1, value=None, reuse=False):
+    if count < 0:
+        count = 4 if u > v else (0 if u < v else 1)
+    if value is None:
+        value = u + v
+    total = sum(math.sin(value + i) for i in range(count))
+    return (value if reuse else u, v, total)
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         result = subprocess.run(
@@ -171,7 +184,44 @@ try:
     for option in ("TESTSHADE_BATCHED", "TESTSHADE_RS_BITCODE"):
         run(base, "does not support " + option, {option: "1"})
 
-    if args.gpu:
+    if args.loops:
+        for operation in ("break", "continue", "dowhile"):
+            shader = "hart_loop_" + operation
+            error = "unsupported operation '" + operation + "'"
+            run(["--hart", "-v", shader], error)
+            run(["--hart", "-v", "--shader", shader, "producer",
+                 "--shader", "hart_sine", "consumer"], error)
+        for optimize in ("10", "3"):
+            for shader in ("hart_for", "hart_loop"):
+                loop_args = ["--llvm_opt", optimize] + connected_group(shader)
+                for width, height in ((1, 1), (3, 2), (37, 5)):
+                    check_render(loop_args, width, height,
+                                 reference(width, height, loop_result))
+                cases = [
+                    (connected_group(shader, ["--param", "count", str(count)]),
+                     lambda u, v, count=count: loop_result(u, v, count=count))
+                    for count in (0, 1, 4)
+                ]
+                # Reusing the input after a zero-iteration loop must still
+                # execute its producer, while nonempty loops reuse its result.
+                cases.extend([
+                    (connected_group(shader, ["--param", "reuse", "1"]),
+                     lambda u, v: loop_result(u, v, reuse=True)),
+                    (["--param:type=float", "value", "1",
+                      "--param", "count", "4", shader],
+                     lambda u, v: loop_result(u, v, count=4, value=1)),
+                ])
+                for loop_args, evaluate in cases:
+                    flags = ["--llvm_opt", optimize, "-O0", "-g", "3", "3", "--print"]
+                    expected = reference(3, 3, evaluate)
+                    cpu = pixels(run(flags + loop_args), 3, 3)
+                    gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
+                                      "--iters", "3"] + flags + loop_args), 3, 3)
+                    compare(cpu, expected, 5e-6)
+                    compare(gpu, expected, 2e-6)
+                    compare(gpu, cpu, 5e-6)
+
+    if args.gpu and not args.loops:
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -181,7 +231,6 @@ try:
             ("hart_printf", "HART"),
             ("hart_texture", "HART"),
             ("hart_userdata", "HART"),
-            ("hart_loop", "unsupported operation 'while'"),
         ):
             run(["--hart", "-v", shader], error)
         run(["--hart", "--shader", "hart_first", "first",
@@ -189,7 +238,7 @@ try:
              "--shader", "hart_first", "third", "-v"], "one or two shader layers")
         # Even an unused producer must be validated before optimization.
         for shader in ("hart_closure", "hart_string", "hart_printf",
-                       "hart_texture", "hart_userdata", "hart_loop"):
+                       "hart_texture", "hart_userdata"):
             run(["--hart", "--shader", shader, "producer",
                  "--shader", "hart_sine", "consumer", "-v"], "HART")
 
@@ -261,6 +310,6 @@ try:
 finally:
     shutil.rmtree(root)
 
-print("Generated HART CLI checks passed"
+print("Generated HART " + ("loop" if args.loops else "CLI") + " checks passed"
       + ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
          if args.gpu else ""))

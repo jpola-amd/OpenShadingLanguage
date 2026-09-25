@@ -23,6 +23,7 @@
 
 #include <OpenImageIO/unittest.h>
 
+#include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
@@ -123,7 +124,8 @@ make_connected_group(ShadingSystem& ss, string_view producer,
 
 void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
-             int optimize, bool connected = false, bool branching = false)
+             int optimize, bool connected = false, bool branching = false,
+             bool looping = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -201,6 +203,38 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
             }
     }
     OIIO_CHECK_EQUAL(callables, 2);
+    if (looping && optimize == 10) {
+        ustring entry_name;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(&group, "group_entry_name", entry_name));
+        auto* entry = module.getFunction(entry_name.c_str());
+        OIIO_CHECK_ASSERT(entry);
+        if (entry) {
+            llvm::DominatorTree dominators(*entry);
+            llvm::LoopInfo loops(dominators);
+            OIIO_CHECK_ASSERT(!loops.empty());
+            bool loop_shadeop  = false;
+            bool loop_producer = false;
+            for (const auto& block : *entry) {
+                if (!loops.getLoopFor(&block))
+                    continue;
+                for (const auto& inst : block) {
+                    const auto* call   = llvm::dyn_cast<llvm::CallInst>(&inst);
+                    const auto* callee = call ? call->getCalledFunction()
+                                              : nullptr;
+                    if (!callee)
+                        continue;
+                    loop_shadeop |= callee->getName().find("osl_sin_") == 0;
+                    loop_producer
+                        |= callee->getName()
+                           == "osl_layer_group_hart_test_group_name_producer";
+                }
+            }
+            OIIO_CHECK_ASSERT(loop_shadeop);
+            if (connected)
+                OIIO_CHECK_ASSERT(loop_producer);
+        }
+    }
     if (branching && optimize == 10) {
         ustring entry_name;
         OIIO_CHECK_ASSERT(
@@ -335,10 +369,16 @@ main(int argc, char* argv[])
         "shader hart_userdata_consumer(float value=42 [[ int interpolated=1 ]], output color Cout=0) { Cout=color(u,v,sin(value)); }",
         "shader hart_array(output float values[2]={1,2}, output color Cout=0) { Cout=color(u,v,0); }",
         "shader hart_branch(float value=42, output color Cout=0) { if (u>v) Cout=color(u,v,sin(value)); else Cout=color(u,v,0); }",
-        "shader hart_loop(output color Cout=0) { int i=0; while (i<2) { Cout+=color(u,v,0); i+=1; } }",
+        "shader hart_loop(float value=42, output color Cout=0) { int count=1; if(u>v) count=4; else if(u<v) count=0; float sum=0; int i=0; while(i<count) { sum+=sin(value+i); i+=1; } Cout=color(u,v,sum); }",
         "shader hart_branch_printf(output color Cout=0) { if (u>v) printf(\"not supported\"); Cout=color(u,v,0); }",
         "shader hart_branch_texture(output color Cout=0) { if (u>v) Cout=texture(\"missing.tx\",u,v); else Cout=0; }",
         "shader hart_compare(output color Cout=0) { int a=(u>0.5)-1; int b=(v>0.5)-1; Cout=color((u<v)+2*(u<=v)+4*(a<b)+8*(a<=b), (u>v)+2*(u>=v)+4*(a>b)+8*(a>=b), (u==v)+2*(u!=v)+4*(a==b)+8*(a!=b)); }",
+        "shader hart_for(float value=42, output color Cout=0) { int count=1; if(u>v) count=4; else if(u<v) count=0; float sum=0; for(int i=0;i<count;i+=1) sum+=sin(value+i); Cout=color(u,v,sum); }",
+        "shader hart_break(output color Cout=0) { for(int i=0;i<4;i+=1) { if(u>v) break; Cout+=color(u,v,0); } }",
+        "shader hart_continue(output color Cout=0) { for(int i=0;i<4;i+=1) { if(u>v) continue; Cout+=color(u,v,0); } }",
+        "shader hart_dowhile(output color Cout=0) { int i=0; do { Cout+=color(u,v,0); i+=1; } while(i<2); }",
+        "shader hart_loop_printf(int count=0, output color Cout=0) { for(int i=0;i<count;i+=1) printf(\"not supported\"); Cout=color(u,v,0); }",
+        "shader hart_loop_texture(int count=0, output color Cout=0) { for(int i=0;i<count;i+=1) Cout=texture(\"missing.tx\",u,v); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -348,7 +388,7 @@ main(int argc, char* argv[])
     }
     // OSL level 10 skips passes; even O0 inlines alwaysinline HIP shadeops.
     for (int optimize : { 10, 3 }) {
-        for (int i : { 0, 1, 12, 16 }) {
+        for (int i : { 0, 1, 12, 13, 16, 17 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -359,7 +399,9 @@ main(int argc, char* argv[])
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
-            check_module(ss, *group, arch, i == 1, optimize, false, i == 12);
+            const bool looping = i == 13 || i == 17;
+            check_module(ss, *group, arch, i == 1 || looping, optimize, false,
+                         i == 12, looping);
             auto* thread = ss.create_thread_info();
             auto* ctx    = ss.get_context(thread);
             ShaderGlobals globals { };
@@ -370,7 +412,7 @@ main(int argc, char* argv[])
             OIIO_CHECK_ASSERT(
                 OIIO::Strutil::contains(errors.last_error, "not CPU execute"));
         }
-        for (int consumer : { 6, 12 }) {
+        for (int consumer : { 6, 12, 13, 17 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -383,8 +425,8 @@ main(int argc, char* argv[])
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
-            check_module(ss, *group, arch, true, optimize, true,
-                         consumer == 12);
+            check_module(ss, *group, arch, true, optimize, true, consumer == 12,
+                         consumer == 13 || consumer == 17);
         }
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
@@ -394,9 +436,13 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
     check_rejection(arch, oso[4], "shader globals u and v");
     check_rejection(arch, oso[11], "unsupported type");
-    check_rejection(arch, oso[13], "unsupported operation 'while'");
     check_rejection(arch, oso[14], "unsupported operation 'printf'");
     check_rejection(arch, oso[15], "unsupported operation 'texture'");
+    check_rejection(arch, oso[18], "unsupported operation 'break'");
+    check_rejection(arch, oso[19], "unsupported operation 'continue'");
+    check_rejection(arch, oso[20], "unsupported operation 'dowhile'");
+    check_rejection(arch, oso[21], "unsupported operation 'printf'");
+    check_rejection(arch, oso[22], "unsupported operation 'texture'");
     for (bool userdata : { false, true }) {
         for (int unsupported_layer = 0; unsupported_layer < 2;
              ++unsupported_layer) {
