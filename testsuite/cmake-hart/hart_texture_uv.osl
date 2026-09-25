@@ -1,0 +1,16 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_texture_uv(int report = 0, output color Cout = 0)
+{
+    float n = psnoise(2 * u - 1, 2 * v - 1, 2, 2);
+    float s = 0.25 + 0.375 * u + 0.0625 * n;
+    float t = 0.125 + 0.5 * v - 0.03125 * n;
+    if (report == 1)
+        Cout = color(s, Dx(s), Dy(s));
+    else if (report == 2)
+        Cout = color(t, Dx(t), Dy(t));
+    else
+        Cout = color(s, t, 0);
+}

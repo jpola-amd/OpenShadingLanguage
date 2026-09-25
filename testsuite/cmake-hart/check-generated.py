@@ -34,10 +34,12 @@ suites.add_argument("--math", action="store_true",
                     help="Run scalar and triple math runtime cases")
 suites.add_argument("--procedural", action="store_true",
                     help="Run connected procedural material runtime cases")
+suites.add_argument("--textures", action="store_true",
+                    help="Run explicit HART texture sampler runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
-        or args.procedural) and not args.gpu:
+        or args.procedural or args.textures) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -50,7 +52,7 @@ root = Path.cwd() / ("hart-generated-check-" + uuid.uuid4().hex)
 root.mkdir()
 
 
-def run(arguments, error=None, extra_env=None):
+def run(arguments, error=None, extra_env=None, error_after_launch=False):
     result = subprocess.run(
         [testshade] + arguments, cwd=root, env={**env, **(extra_env or {})},
         capture_output=True, text=True, timeout=300,
@@ -61,8 +63,18 @@ def run(arguments, error=None, extra_env=None):
     else:
         assert result.returncode != 0, "Unexpected success:\n" + output
         assert error.lower() in output.lower(), output
-        assert "Launching HART grid" not in output, output
+        assert ("Launching HART grid" in output) == error_after_launch, output
     return output
+
+
+def compile_fixture(source, name=None, defines=()):
+    result = subprocess.run(
+        [oslc, "-I" + str(fixtures.parents[1] / "src" / "shaders")]
+        + ["-D" + define for define in defines]
+        + ["-o", str(root / ((name or source.stem) + ".oso")), str(source)],
+        cwd=root, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def pixels(output, width, height):
@@ -694,14 +706,288 @@ def check_procedural_suite():
                      actual, reference, 1))
 
 
+def texture_mips(image):
+    # Power-of-two fixture pyramid: exact box averages, including 2x1 -> 1x1.
+    levels = [image]
+    while len(image) > 1 or len(image[0]) > 1:
+        height, width = len(image), len(image[0])
+        sx, sy = min(2, width), min(2, height)
+        image = [
+            [tuple(sum(image[sy * y + j][sx * x + i][c]
+                       for j in range(sy) for i in range(sx)) / (sx * sy)
+                   for c in range(len(image[0][0])))
+             for x in range(max(1, width // 2))]
+            for y in range(max(1, height // 2))
+        ]
+        levels.append(image)
+    return levels
+
+
+def prepare_texture_images(scale=1):
+    images = [
+        [[((x + 1) / 8, (y + 1) / 4, 0.875 if (x + y) % 2 else 0.125)
+          for x in range(8)] for y in range(4)],
+        [[((x + 1) / 8,) for x in range(8)] for y in range(4)],
+        [[(0.25, 0.5, 0.75) for x in range(8)] for y in range(4)],
+    ]
+    images = [[[tuple(scale * c for c in pixel) for pixel in row]
+               for row in image] for image in images]
+    for name, image in zip(("rgb", "mono", "constant"), images):
+        channels = len(image[0][0])
+        values = [c for row in reversed(image) for pixel in row for c in pixel]
+        path = root / ("hart_texture_" + name + ".pfm")
+        with path.open("wb") as stream:
+            stream.write(b"PF\n8 4\n-1\n" if channels == 3 else b"Pf\n8 4\n-1\n")
+            stream.write(struct.pack("<" + str(len(values)) + "f", *values))
+    return [texture_mips(image) for image in images]
+
+
+def texture_sample(levels, s, t, gradients, linear, wraps):
+    height, width = len(levels[0]), len(levels[0][0])
+    dsdx, dtdx, dsdy, dtdy = gradients
+    footprint = max(1, math.hypot(width * dsdx, height * dtdx),
+                    math.hypot(width * dsdy, height * dtdy))
+    lod = min(math.log2(footprint), len(levels) - 1)
+
+    def level_sample(level):
+        image = levels[level]
+        h, w = len(image), len(image[0])
+
+        def fetch(x, y):
+            indices = []
+            for coordinate, size, wrap in zip((x, y), (w, h), wraps):
+                if wrap == "black" and not 0 <= coordinate < size:
+                    return (0, 0, 0)
+                indices.append(coordinate % size if wrap == "periodic"
+                               else min(max(coordinate, 0), size - 1))
+            return (image[indices[1]][indices[0]] + (0, 0, 0))[:3]
+
+        if not linear:
+            return fetch(math.floor(s * w), math.floor(t * h)), (0, 0, 0), (0, 0, 0)
+        x, y = s * w - 0.5, t * h - 0.5
+        ix, iy = math.floor(x), math.floor(y)
+        a, b = x - ix, y - iy
+        p00, p10 = fetch(ix, iy), fetch(ix + 1, iy)
+        p01, p11 = fetch(ix, iy + 1), fetch(ix + 1, iy + 1)
+        value = tuple((1 - b) * ((1 - a) * p00[c] + a * p10[c])
+                      + b * ((1 - a) * p01[c] + a * p11[c]) for c in range(3))
+        ds = [w * ((1 - b) * (p10[c] - p00[c]) + b * (p11[c] - p01[c]))
+              for c in range(3)]
+        dt = [h * ((1 - a) * (p01[c] - p00[c]) + a * (p11[c] - p10[c]))
+              for c in range(3)]
+        return (value, tuple(ds[c] * dsdx + dt[c] * dtdx for c in range(3)),
+                tuple(ds[c] * dsdy + dt[c] * dtdy for c in range(3)))
+
+    if not linear:
+        return level_sample(int(math.floor(lod + 0.5)))
+    low = int(math.floor(lod))
+    a, b = level_sample(low), level_sample(min(low + 1, len(levels) - 1))
+    fraction = lod - low
+    # The footprint/LOD stays fixed for the OSL output derivative chain rule.
+    return tuple(tuple(x + fraction * (y - x) for x, y in zip(lhs, rhs))
+                 for lhs, rhs in zip(a, b))
+
+
+def texture_probe(column, row):
+    band, probe = divmod(column, 8)
+    coordinates = [(-0.125, 0.375), (0.3125, -0.25), (0, 0),
+                   (0.0625, 0.125), (0.5, 0.5), (0.9375, 0.875),
+                   (1, 1), (1.125, 1.25)]
+    s, t = (0.3125, 0.375) if band == 8 else coordinates[probe]
+    gradients = (1 / 64, 0, 0, 1 / 16)
+    if band in (2, 8):
+        gradients = (0, 0, 0, 0)
+    elif band in (3, 7):
+        gradients = (0.25, 0, 0, 0.25)
+    elif band == 4:
+        gradients = (0.375, 0, 0, 0.5)
+    elif band == 5:
+        gradients = (2, 0, 0, 2)
+    elif band == 6:
+        gradients = (0.125, 0.375, -0.125, 0.25)
+    wraps = [("black", "black"), ("clamp", "clamp"),
+             ("periodic", "periodic"), ("clamp", "periodic")][(row % 8) // 2]
+    return s, t, gradients, bool(row % 2), wraps, row >= 8, probe % 3
+
+
+def texture_reference(levels, report):
+    result = []
+    for row in range(17):
+        for column in range(65):
+            s, t, gradients, linear, wraps, scalar, component = texture_probe(column, row)
+            sample = texture_sample(levels, s, t, gradients, linear, wraps)
+            if scalar:
+                sample = tuple((values[0],) * 3 for values in sample)
+            result.extend(tuple(values[component] for values in sample)
+                          if report else sample[0])
+    return result
+
+
+def check_texture_oracle(images):
+    rgb = images[0]
+    assert [(len(level[0]), len(level)) for level in rgb] == [(8, 4), (4, 2), (2, 1), (1, 1)]
+    compare(rgb[-1][0][0], (0.5625, 0.625, 0.5), 0)
+    sample = texture_sample(rgb, 0.375, 0.5, (1 / 64, 0, 0, 1 / 16),
+                            True, ("clamp", "clamp"))
+    compare(sample[0], (0.4375, 0.625, 0.5), 0)
+    compare(sample[1], (1 / 64, 0, 0), 0)
+    compare(sample[2], (0, 1 / 16, 0), 0)
+    gradients = (0.125, 0.375, -0.125, 0.25)
+    for wraps in (("black", "black"), ("clamp", "clamp"),
+                  ("periodic", "periodic"), ("clamp", "periodic")):
+        for s, t in ((0.37, 0.41), (-0.02, 0.37), (1.01, -0.04)):
+            sampled = texture_sample(rgb, s, t, gradients, True, wraps)
+            for axis in (0, 1):
+                ds, dt = gradients[2 * axis:2 * axis + 2]
+                h = 1 / 65536
+                plus, minus = [texture_sample(
+                    rgb, s + sign * h * ds, t + sign * h * dt,
+                    gradients, True, wraps)[0] for sign in (1, -1)]
+                compare(sampled[axis + 1], [(p - m) / (2 * h) for p, m in zip(plus, minus)])
+
+
+def texture_arguments(optimize, image=0, report=0, connected=False):
+    producer = (["--shader", "hart_texture_uv", "producer"] if connected else [])
+    consumer = ["--param", "image", str(image), "--param", "report", str(report),
+                "--param", "connected", str(int(connected))]
+    if connected:
+        consumer += ["--shader", "hart_texture_samples", "consumer",
+                     "--connect", "producer", "Cout", "consumer", "value"]
+    else:
+        consumer += ["hart_texture_samples"]
+    return ["--llvm_opt", optimize] + producer + consumer
+
+
+def check_texture_cpu(shader_args, expected, image, report):
+    actual = noise_cpu_image(shader_args, 65, 17)
+    # OIIO's anisotropic minification is deliberately not the HART LOD rule.
+    # Also exclude color reads of mono files: OIIO may promote gray to RGB,
+    # whereas the HART resource contract zero-fills absent channels.
+    # OIIO closest has different tie-breaking and does not reliably supply
+    # zero derivatives. Only compare its values at unambiguous texel centers.
+    indices = [3 * (row * 65 + col) + channel
+               for row in range(17) for col in range(65) for channel in range(3)
+               if col // 8 in (0, 1, 2, 8) and (image != 1 or row >= 8)
+               and (row % 2 or ((col % 8 in (3, 5) or col == 64)
+                               and (not report or channel == 0)))]
+    compare([actual[i] for i in indices], [expected[i] for i in indices], 2e-6)
+
+
+def check_texture_render(shader_args, width, height, expected, repeat=False,
+                         cache_hit=False):
+    image = root / "texture-gpu.pfm"
+    if image.exists():
+        image.unlink()
+    flags = (["--warmup", "--iters", "3"] if repeat else ["--hart-no-cache"])
+    output = run(["--hart", "-v"] + flags + ["-g", str(width), str(height),
+                 "-o", "Cout", str(image)] + shader_args)
+    assert output.count("Launching HART grid") == (4 if repeat else 1), output
+    if not repeat:
+        assert "HART pipeline cache disabled" in output, output
+    if cache_hit:
+        assert "cache hit for key" in output, output
+    actual = image_pixels(image, width, height)
+    compare(actual, expected, 2e-6)
+    return actual
+
+
+def texture_connected_reference(optimize, levels):
+    # CPU-produced noise coordinates/gradients feed the independent sampler,
+    # not a CPU minification oracle. This transform is entirely magnifying.
+    coordinates = [noise_cpu_image(["--llvm_opt", optimize, "--param", "report",
+                                    str(report), "hart_texture_uv"], 17, 9)
+                   for report in (1, 2)]
+    samples = []
+    for i in range(17 * 9):
+        s, dsdx, dsdy = coordinates[0][3 * i:3 * i + 3]
+        t, dtdx, dtdy = coordinates[1][3 * i:3 * i + 3]
+        assert max(math.hypot(8 * dsdx, 4 * dtdx),
+                   math.hypot(8 * dsdy, 4 * dtdy)) < 1
+        samples.append(texture_sample(levels, s, t, (dsdx, dtdx, dsdy, dtdy),
+                                      True, ("clamp", "clamp")))
+    images = []
+    for report in (0, 1):
+        expected = []
+        for i, sample in enumerate(samples):
+            component = int(8 * ((i % 17) / 16)) % 3
+            expected.extend(tuple(values[component] for values in sample)
+                            if report else sample[0])
+        images.append(expected)
+    return images
+
+
+def check_texture_suite():
+    images = prepare_texture_images()
+    check_texture_oracle(images)
+    for optimize in ("10", "3"):
+        print("Checking HART textures at LLVM level " + optimize, flush=True)
+        cases = [(0, (0, 1)), (1, (0, 1))]
+        if optimize == "3":
+            cases.append((2, (1,)))
+        for image, reports in cases:
+            for report in reports:
+                shader_args = texture_arguments(optimize, image, report)
+                expected = texture_reference(images[image], report)
+                check_texture_cpu(shader_args, expected, image, report)
+                actual = check_texture_render(shader_args, 65, 17, expected)
+                if image == 1 and not report:
+                    compare([actual[3 * i + c] for i in range(65 * 8)
+                             for c in (1, 2)], [0] * (65 * 8 * 2), 0)
+                if report:
+                    for row in range(17):
+                        for col in range(65):
+                            _, _, _, linear, wraps, _, _ = texture_probe(col, row)
+                            if (not linear or col // 8 in (2, 8)
+                                    or (image == 2 and "black" not in wraps)):
+                                i = 3 * (row * 65 + col)
+                                compare(actual[i + 1:i + 3], (0, 0), 0)
+
+        for report, expected in enumerate(texture_connected_reference(optimize, images[0])):
+            shader_args = texture_arguments(optimize, report=report, connected=True)
+            compare(noise_cpu_image(shader_args, 17, 9), expected, 2e-6)
+            check_texture_render(shader_args, 17, 9, expected,
+                                 repeat=optimize == "3" and report == 1)
+
+    # All three handles coexist in one group. Change only file contents, not
+    # shader code or filenames, and reuse the cached pipeline across processes.
+    for index, scale in enumerate((1, 0.5, 1)):
+        rebound = prepare_texture_images(scale)
+        references = [texture_reference(levels, 1) for levels in rebound]
+        expected = []
+        for row in range(17):
+            reference = references[int(2 * row / 16 + 0.5)]
+            expected.extend(reference[3 * row * 65:3 * (row + 1) * 65])
+        check_texture_render(texture_arguments("3", image=-1, report=1),
+                             65, 17, expected, repeat=True, cache_hit=index > 0)
+
+    run(["--hart", "-v", "--hart-no-cache", "-g", "65", "17",
+         "--param:type=float", "coordinate_scale", "3.0e38"]
+        + texture_arguments("3"), "nonfinite coordinates/gradients",
+        error_after_launch=True)
+
+    # The blur call is both untaken and in an unused layer. String parameters
+    # can be rejected by either the renderer or the compiler's type guard.
+    errors = (
+        "HART: texture requires explicit closest or linear interpolation",
+        "HART: texture requires explicit wrap modes",
+        "'string'",
+        "UDIM patterns are not supported",
+        "HART: texture requires a literal filename",
+        "HART: unsupported texture option 'blur'",
+        "Cannot open HART texture 'hart_texture_missing.pfm'",
+    )
+    for case, error in enumerate(errors):
+        name = "hart_texture_rejected_" + str(case)
+        compile_fixture(fixtures / "hart_texture_rejected.osl", name,
+                        ("TEXTURE_CASE=" + str(case),))
+        shader_args = ([name] if case != 5 else
+                       ["--shader", name, "unused", "--shader", "hart_first", "surface"])
+        run(["--hart", "-v"] + shader_args, error)
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
-        result = subprocess.run(
-            [oslc, "-I" + str(fixtures.parents[1] / "src" / "shaders"),
-             "-o", str(root / (source.stem + ".oso")), str(source)],
-            cwd=root, env=env, capture_output=True, text=True, timeout=30,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
+        compile_fixture(source)
 
     base = ["--hart", "hart_first"]
     for option in (
@@ -954,9 +1240,12 @@ try:
     if args.procedural:
         check_procedural_suite()
 
+    if args.textures:
+        check_texture_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
-                         or args.procedural):
+                         or args.procedural or args.textures):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -964,7 +1253,7 @@ try:
             ("hart_closure", "does not support parameter"),
             ("hart_string", "does not support parameter"),
             ("hart_printf", "HART"),
-            ("hart_texture", "HART"),
+            ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),
             ("hart_userdata", "HART"),
         ):
             run(["--hart", "-v", shader], error)
@@ -975,7 +1264,9 @@ try:
         for shader in ("hart_closure", "hart_string", "hart_printf",
                        "hart_texture", "hart_userdata"):
             run(["--hart", "--shader", shader, "producer",
-                 "--shader", "hart_sine", "consumer", "-v"], "HART")
+                 "--shader", "hart_sine", "consumer", "-v"],
+                "HART: texture requires explicit closest or linear interpolation"
+                if shader == "hart_texture" else "HART")
 
         connected = connected_group("hart_group_consumer")
         arithmetic = lambda u, v: (u, v, u + v)

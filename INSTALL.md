@@ -691,6 +691,17 @@ table replacement, channel zero-fill, raw numeric image data, explicit load
 errors, and repeated cleanup. Resource addresses are held in a launch-time
 device table rather than embedded in shader bitcode.
 
+`hart-texture-runtime` exercises real OSL-generated GPU shaders at LLVM levels
+10 and 3. A packed matrix checks float/color lookups, all supported wraps,
+texel boundaries, magnification, integer/fractional mip selection, implicit
+and explicit gradients, and sampled `Dx`/`Dy`. It includes connected
+noise-transformed UVs, zero-filled monochrome images, and exact-zero
+constant/closest derivatives. An independent sampler oracle checks the
+specified mip policy; CPU comparisons use compatible magnifying lookups.
+Three textures coexist in a cached group whose file contents change A-B-A,
+with confirmed cache hits and repeated launches. Rejections cover unsupported
+options in unused code, missing/UDIM resources, and nonfinite device inputs.
+
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
 cell/hash pattern, and an explicitly footprint-filtered transition.
@@ -704,9 +715,9 @@ bound, not a backend limit.
 
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|texture|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(codegen-.*|noise(-families)?-runtime|math-runtime|procedural-runtime)$" --output-on-failure
+  -R "^hart-(codegen-.*|texture-(resources|runtime))$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

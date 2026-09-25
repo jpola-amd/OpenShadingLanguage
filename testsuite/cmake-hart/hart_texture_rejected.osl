@@ -1,0 +1,36 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#ifndef TEXTURE_CASE
+#define TEXTURE_CASE 0
+#endif
+
+shader hart_texture_rejected(
+#if TEXTURE_CASE == 2
+    string filename = "hart_texture_rgb.pfm",
+#elif TEXTURE_CASE == 5
+    int enabled = 0,
+#endif
+    output color Cout = 0)
+{
+#if TEXTURE_CASE == 0
+    Cout = texture("hart_texture_rgb.pfm", u, v, "wrap", "clamp");
+#elif TEXTURE_CASE == 1
+    Cout = texture("hart_texture_rgb.pfm", u, v, "interp", "linear");
+#elif TEXTURE_CASE == 2
+    Cout = texture(filename, u, v, "interp", "linear", "wrap", "clamp");
+#elif TEXTURE_CASE == 3
+    Cout = texture("hart_texture_<UDIM>.pfm", u, v,
+                   "interp", "linear", "wrap", "clamp");
+#elif TEXTURE_CASE == 4
+    Cout = texture("", u, v, "interp", "linear", "wrap", "clamp");
+#elif TEXTURE_CASE == 5
+    if (enabled)
+        Cout = texture("hart_texture_rgb.pfm", u, v,
+                       "interp", "linear", "wrap", "clamp", "blur", 0.5);
+#elif TEXTURE_CASE == 6
+    Cout = texture("hart_texture_missing.pfm", u, v,
+                   "interp", "linear", "wrap", "clamp");
+#endif
+}
