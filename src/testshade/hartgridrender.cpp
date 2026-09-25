@@ -567,6 +567,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--layer %s:NAME");
     ap.arg("--shader %s:SHADER %s:LAYER")
       .action([&](cspan<const char*>) { has_shader = true; });
+    ap.arg("--connect %s:FROMLAYER %s:FROMOUTPUT %s:TOLAYER %s:TOINPUT");
     ap.arg("--param %s:NAME %s:VALUE")
       .action([&](cspan<const char*> args) {
           const string_view option(args[0]);
@@ -576,6 +577,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("-O0");
     ap.arg("-O1");
     ap.arg("-O2");
+    ap.arg("--llvm_opt %d:LEVEL");
     // clang-format on
     if (ap.parse_args(argc, argv) < 0) {
         err.errorfmt("Generated HART mode: unsupported option or argument: {}",
@@ -682,43 +684,47 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
 {
     auto& err  = renderer.errhandler();
     int layers = 0;
-    if (!shadingsys.getattribute(&group, "num_layers", layers) || layers != 1) {
-        err.errorfmt("Generated HART mode supports exactly one shader layer");
+    if (!shadingsys.getattribute(&group, "num_layers", layers) || layers < 1
+        || layers > 2) {
+        err.errorfmt("Generated HART mode supports one or two shader layers");
         return false;
     }
-    OSLQuery query = shadingsys.oslquery(group, 0);
     int outputs    = 0;
     bool has_cout  = false;
-    for (const auto& parameter : query) {
-        if (parameter.isoutput) {
-            ++outputs;
-            has_cout |= parameter.name == "Cout" && parameter.type == TypeColor
-                        && !parameter.isclosure;
-        }
-        if (parameter.isclosure || parameter.isstruct || parameter.varlenarray
-            || parameter.type.basetype == TypeDesc::STRING) {
-            err.errorfmt("Generated HART mode does not support parameter '{}' "
-                         "of type '{}'",
-                         parameter.name, parameter.type_name());
-            return false;
-        }
-        for (const auto& metadata : parameter.metadata) {
-            if ((metadata.name == "interpolated"
-                 || metadata.name == "interactive")
-                && !metadata.idefault.empty() && metadata.idefault[0]) {
-                err.errorfmt("Generated HART mode does not support {} "
-                             "parameter '{}'",
-                             metadata.name, parameter.name);
+    for (int layer = 0; layer < layers; ++layer) {
+        OSLQuery query = shadingsys.oslquery(group, layer);
+        for (const auto& parameter : query) {
+            if (layer == layers - 1 && parameter.isoutput) {
+                ++outputs;
+                has_cout |= parameter.name == "Cout"
+                            && parameter.type == TypeColor
+                            && !parameter.isclosure;
+            }
+            if (parameter.isclosure || parameter.isstruct
+                || parameter.type.is_array()
+                || parameter.type.basetype == TypeDesc::STRING) {
+                err.errorfmt(
+                    "Generated HART mode does not support parameter '{}' "
+                    "of type '{}'",
+                    parameter.name, parameter.type_name());
                 return false;
             }
         }
     }
     if (!has_cout || outputs != 1) {
         err.errorfmt("Generated HART mode requires exactly one RGB color "
-                     "output parameter: Cout");
+                     "output parameter on the last layer: Cout");
         return false;
     }
-    const SymLocationDesc output("Cout", TypeColor, false, SymArena::Outputs, 0,
+    std::vector<ustring> layer_names(layers);
+    if (!shadingsys.getattribute(&group, "layer_names",
+                                 TypeDesc(TypeDesc::STRING, layers),
+                                 layer_names.data())) {
+        err.errorfmt("Cannot retrieve HART shader layer names");
+        return false;
+    }
+    const SymLocationDesc output(fmtformat("{}.Cout", layer_names.back()),
+                                 TypeColor, false, SymArena::Outputs, 0,
                                  3 * sizeof(float));
     shadingsys.add_symlocs(&group, { &output, 1 });
     shadingsys.optimize_group(&group, nullptr);
@@ -741,7 +747,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                      "CPU fallback is not supported");
         return false;
     }
-    const auto* symbol = shadingsys.find_symbol(group, ustring("Cout"));
+    const auto* symbol = shadingsys.find_symbol(group, layer_names.back(),
+                                                ustring("Cout"));
     if (!symbol || shadingsys.symbol_typedesc(symbol) != TypeColor) {
         err.errorfmt("Compiled HART group has no RGB color Cout symbol");
         return false;

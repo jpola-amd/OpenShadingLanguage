@@ -101,7 +101,7 @@ try:
     base = ["--hart", "hart_first"]
     for option in (
         ["--batched"], ["--center"], ["--entry", "layer"],
-        ["--entryoutput", "Cout"], ["--connect", "a", "Cout", "b", "Cout"],
+        ["--entryoutput", "Cout"],
         ["--userdata", "value", "1"], ["--use_rs_bitcode"],
         ["--no-output-placement"], ["--shadeimage"], ["--raytype", "shadow"],
         ["--scaleuv", "2", "2"], ["--offsetuv", "1", "1"],
@@ -140,21 +140,33 @@ try:
         ):
             run(["--hart", "-v", shader], error)
         run(["--hart", "--shader", "hart_first", "first",
-             "--shader", "hart_sine", "second", "-v"], "one shader layer")
+             "--shader", "hart_sine", "second",
+             "--shader", "hart_first", "third", "-v"], "one or two shader layers")
+        # Even an unused producer must be validated before optimization.
+        for shader in ("hart_closure", "hart_string", "hart_printf",
+                       "hart_texture", "hart_userdata"):
+            run(["--hart", "--shader", shader, "producer",
+                 "--shader", "hart_sine", "consumer", "-v"], "HART")
 
-        for shader in ("hart_first", "hart_sine"):
-            sine = shader == "hart_sine"
+        connected = ["--shader", "hart_group_producer", "producer",
+                     "--shader", "hart_group_consumer", "consumer",
+                     "--connect", "producer", "value", "consumer", "value"]
+        for shader_args, sine in (
+            (["hart_first"], False), (["hart_sine"], True),
+            (["--llvm_opt", "10"] + connected, True),
+            (["--llvm_opt", "3"] + connected, True),
+        ):
             for width, height in ((1, 1), (3, 2), (37, 5)):
                 grid = ["-g", str(width), str(height)]
                 expected = reference(width, height, sine)
-                cpu = pixels(run(["-t", "1"] + grid + ["--print", shader]),
+                cpu = pixels(run(["-t", "1"] + grid + ["--print"] + shader_args),
                              width, height)
                 # CPU testshade prints six significant digits.
                 compare(cpu, expected, 5e-6)
                 for cache_options in (["--hart-no-cache"], []):
                     flags = ["--hart", "-v", "--warmup", "--iters", "3"]
                     flags += cache_options + grid
-                    output = run(flags + ["--print", shader])
+                    output = run(flags + ["--print"] + shader_args)
                     if cache_options:
                         assert "HART pipeline cache disabled" in output, output
                     assert output.count("Launching HART grid") == 4, output
@@ -167,13 +179,22 @@ try:
                         if image.exists():
                             image.unlink()
                     run(["-t", "1"] + grid
-                        + ["-o", "Cout", str(cpu_image), shader])
-                    run(flags + ["-o", "Cout", str(gpu_image), shader])
+                        + ["-o", "Cout", str(cpu_image)] + shader_args)
+                    run(flags + ["-o", "Cout", str(gpu_image)] + shader_args)
                     host_pixels = image_pixels(cpu_image, width, height)
                     device_pixels = image_pixels(gpu_image, width, height)
                     compare(host_pixels, expected, 2e-6)
                     compare(device_pixels, expected, 2e-6)
                     compare(device_pixels, host_pixels, 2e-6)
+        for optimize in ("10", "3"):
+            parameter_group = ["--llvm_opt", optimize, "-O0",
+                               "--param:type=float", "scale", "2"] + connected
+            expected = [0.5, 0.5, math.sin(2)]
+            compare(pixels(run(["--print"] + parameter_group), 1, 1),
+                    expected, 5e-6)
+            compare(pixels(run(["--hart", "--print", "--hart-no-cache",
+                                "--warmup", "--iters", "3"] + parameter_group),
+                           1, 1), expected, 2e-6)
         # Exercise the ordinary named-layer setup, not just positional shaders.
         named = run(["--hart", "--groupname", "generated",
                      "--shader", "hart_first", "surface", "--print"])

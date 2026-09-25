@@ -371,6 +371,29 @@ ShaderInstance::validate_hart() const
 {
     // Check the original code before constant folding can execute host-only
     // operations or hide unsupported paths in a particular specialization.
+    auto validate_type = [&](const Symbol& sym) {
+        const TypeSpec& type = sym.typespec();
+        if (type.is_array() || type.is_structure() || type.is_closure_based()
+            || (!type.is_float_based() && !type.is_int_based())) {
+            shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
+                                  "in shader '{}'",
+                                  type.c_str(), sym.name(), shadername());
+            return false;
+        }
+        return true;
+    };
+    for (int i = firstparam(); i < lastparam(); ++i) {
+        const Symbol& sym = *mastersymbol(i);
+        if (!validate_type(sym))
+            return false;
+        const auto& hints = m_instoverrides[i];
+        if (hints.interpolated() || hints.interactive()) {
+            shadingsys().errorfmt("HART: interpolated or interactive parameter "
+                                  "'{}' is unsupported in shader '{}'",
+                                  sym.name(), shadername());
+            return false;
+        }
+    }
     static const ustring supported[] = {
         ustring("nop"),        ustring("end"), ustring("useparam"),
         ustring("assign"),     ustring("add"), ustring("sub"),
@@ -390,15 +413,8 @@ ShaderInstance::validate_hart() const
         for (int a = 0; a < op.nargs(); ++a) {
             const Symbol& sym
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
-            const TypeSpec& type = sym.typespec();
-            if (type.is_array() || type.is_structure()
-                || type.is_closure_based()
-                || (!type.is_float_based() && !type.is_int_based())) {
-                shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
-                                      "in shader '{}'",
-                                      type.c_str(), sym.name(), shadername());
+            if (!validate_type(sym))
                 return false;
-            }
             if (sym.symtype() == SymTypeGlobal
                 && ((sym.name() != ustring("u") && sym.name() != ustring("v"))
                     || op.argwrite(a))) {

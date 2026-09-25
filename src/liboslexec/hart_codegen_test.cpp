@@ -83,8 +83,46 @@ make_group(ShadingSystem& ss, string_view oso, int layers = 1)
 
 
 void
+check_rejected_group(ShadingSystem& ss, ShaderGroup& group,
+                     const Diagnostics& errors, string_view expected)
+{
+    ss.optimize_group(&group, nullptr);
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        !ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        !ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    OIIO_CHECK_ASSERT(bytes == nullptr && size == 0);
+    OIIO_CHECK_ASSERT(errors.errors > 0);
+    OIIO_CHECK_ASSERT(OIIO::Strutil::contains(errors.last_error, expected));
+}
+
+
+
+ShaderGroupRef
+make_connected_group(ShadingSystem& ss, string_view producer,
+                     string_view consumer)
+{
+    OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_producer", producer));
+    OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_consumer", consumer));
+    auto group = ss.ShaderGroupBegin("hart_test_group");
+    OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_producer", "producer"));
+    OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_consumer", "consumer"));
+    OIIO_CHECK_ASSERT(
+        ss.ConnectShaders("producer", "value", "consumer", "value"));
+    OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+    const SymLocationDesc output("consumer.Cout", TypeColor, false,
+                                 SymArena::Outputs, 0, 3 * sizeof(float));
+    ss.add_symlocs(group.get(), { &output, 1 });
+    return group;
+}
+
+
+
+void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
-             int optimize)
+             int optimize, bool connected = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -142,7 +180,10 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
                                          == 0);
         }
     }
+    int callables = 0;
     for (const auto& function : module) {
+        if (function.getName().find("__direct_callable__") == 0)
+            ++callables;
         OIIO_CHECK_ASSERT(!function.hasFnAttribute("nvptx-f32ftz"));
         const auto cpu = function.getFnAttribute("target-cpu");
         if (cpu.isStringAttribute())
@@ -157,6 +198,39 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch, bool sine,
                             cast->getOperand(0)))
                         OIIO_CHECK_ASSERT(value->isZero());
             }
+    }
+    OIIO_CHECK_EQUAL(callables, 2);
+    if (connected && optimize == 10) {
+        const auto* producer = module.getFunction(
+            "osl_layer_group_hart_test_group_name_producer");
+        OIIO_CHECK_ASSERT(producer && !producer->isDeclaration()
+                          && producer->hasLocalLinkage());
+        if (producer) {
+            OIIO_CHECK_EQUAL(producer->arg_size(), 6);
+            OIIO_CHECK_EQUAL(
+                producer->getFnAttribute("target-cpu").getValueAsString().str(),
+                std::string(arch));
+            ustring entry_name;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(&group, "group_entry_name", entry_name));
+            const auto* entry   = module.getFunction(entry_name.c_str());
+            bool calls_producer = false;
+            if (entry)
+                for (const auto& block : *entry)
+                    for (const auto& inst : block)
+                        if (const auto* call = llvm::dyn_cast<llvm::CallInst>(
+                                &inst))
+                            if (call->getCalledFunction() == producer) {
+                                calls_producer = true;
+                                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                                 producer->getCallingConv());
+                                OIIO_CHECK_EQUAL(call->arg_size(), 6);
+                                for (unsigned int arg = 0; arg < 6; ++arg)
+                                    OIIO_CHECK_EQUAL(call->getArgOperand(arg),
+                                                     entry->getArg(arg));
+                            }
+            OIIO_CHECK_ASSERT(calls_producer);
+        }
     }
     if (sine && optimize == 10) {
         bool shadeop = false;
@@ -191,16 +265,7 @@ check_rejection(string_view arch, string_view oso, string_view expected,
     if (instrument)
         ss.attribute("debug_nan", 1);
     auto group = make_group(ss, oso, layers);
-    ss.optimize_group(group.get(), nullptr);
-    const void* bytes = nullptr;
-    uint64_t size     = 0;
-    OIIO_CHECK_ASSERT(
-        !ss.getattribute(group.get(), "hart_bitcode", TypeDesc::PTR, &bytes));
-    OIIO_CHECK_ASSERT(
-        !ss.getattribute(group.get(), "hart_bitcode_size", TypeUInt64, &size));
-    OIIO_CHECK_ASSERT(bytes == nullptr && size == 0);
-    OIIO_CHECK_ASSERT(errors.errors > 0);
-    OIIO_CHECK_ASSERT(OIIO::Strutil::contains(errors.last_error, expected));
+    check_rejected_group(ss, *group, errors, expected);
 }
 
 }  // namespace
@@ -221,6 +286,13 @@ main(int argc, char* argv[])
         "shader hart_test(output color Cout=0) { printf(\"not supported\"); Cout=color(u,v,0); }",
         "shader hart_test(output color Cout=0) { Cout=texture(\"missing.tx\",u,v); }",
         "shader hart_test(output color Cout=0) { Cout=color(P); }",
+        "shader hart_producer(output float value=0) { value=u+v; }",
+        "shader hart_consumer(float value=42, output color Cout=0) { Cout=color(u,v,sin(value)); }",
+        "shader hart_bad_producer(output float value=0) { printf(\"not supported\"); value=u+v; }",
+        "shader hart_bad_consumer(float value=42, output color Cout=0) { printf(\"not supported\"); Cout=color(u,v,sin(value)); }",
+        "shader hart_userdata_producer(float scale=1 [[ int interpolated=1 ]], output float value=0) { value=scale*(u+v); }",
+        "shader hart_userdata_consumer(float value=42 [[ int interpolated=1 ]], output color Cout=0) { Cout=color(u,v,sin(value)); }",
+        "shader hart_array(output float values[2]={1,2}, output color Cout=0) { Cout=color(u,v,0); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -252,12 +324,52 @@ main(int argc, char* argv[])
             OIIO_CHECK_ASSERT(
                 OIIO::Strutil::contains(errors.last_error, "not CPU execute"));
         }
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        ss.attribute("llvm_optimize", optimize);
+        auto group = make_connected_group(ss, oso[5], oso[6]);
+        // Instance parameter overrides are released during optimization.
+        ss.optimize_group(group.get(), nullptr, false);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "{}\n", errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        check_module(ss, *group, arch, true, optimize, true);
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
-    check_rejection(arch, oso[0], "one shader layer", 2);
+    check_rejection(arch, oso[0], "one or two shader layers", 3);
     check_rejection(arch, oso[0], "instrumentation", 1, true);
     check_rejection(arch, oso[2], "unsupported operation 'printf'");
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
     check_rejection(arch, oso[4], "shader globals u and v");
+    check_rejection(arch, oso[11], "unsupported type");
+    for (bool userdata : { false, true }) {
+        for (int unsupported_layer = 0; unsupported_layer < 2;
+             ++unsupported_layer) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            auto group = make_connected_group(
+                ss, oso[unsupported_layer == 0 ? (userdata ? 9 : 7) : 5],
+                oso[unsupported_layer == 1 ? (userdata ? 10 : 8) : 6]);
+            check_rejected_group(ss, *group, errors,
+                                 userdata ? "interpolated or interactive"
+                                          : "unsupported operation 'printf'");
+        }
+    }
+    {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_connected_group(ss, oso[5], oso[6]);
+        const ustring entry("producer");
+        OIIO_CHECK_ASSERT(ss.attribute(group.get(), "entry_layers",
+                                       TypeDesc(TypeDesc::STRING, 1), &entry));
+        check_rejected_group(ss, *group, errors, "default entry point");
+    }
     return unit_test_failures;
 }

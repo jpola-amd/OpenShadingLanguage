@@ -3938,9 +3938,10 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
                  "selected before shader compilation");
         return false;
     }
-    if (group.nlayers() != 1 || group.num_entry_layers() != 0) {
-        errorfmt("HART currently supports one shader layer with its default "
-                 "entry point");
+    if (group.nlayers() < 1 || group.nlayers() > 2
+        || group.num_entry_layers() != 0) {
+        errorfmt("HART currently supports one or two shader layers with the "
+                 "last layer as the default entry point");
         return false;
     }
     if (debug_nan() || debug_uninit() || llvm_debug_layers() || llvm_debug_ops()
@@ -3956,7 +3957,12 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
         errorfmt("HART does not yet support interactive shader parameters");
         return false;
     }
-    return group[0]->validate_hart();
+    if (!group.optimized()) {
+        for (int layer = 0; layer < group.nlayers(); ++layer)
+            if (!group[layer]->validate_hart())
+                return false;
+    }
+    return true;
 #endif
 }
 

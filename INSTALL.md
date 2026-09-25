@@ -176,8 +176,9 @@ It defaults to `OFF`, so CPU-only and CUDA/OptiX builds do not need either
 SDK. With `USE_LLVM_BITCODE=ON`, it also compiles the GPU shadeops to
 architecture-specific AMDGCN LLVM bitcode using **direct Clang `-x hip`**,
 not hipcc, and embeds each architecture's linked module in `liboslexec`.
-It does not yet generate shader bundles, install standalone AMD bitcode
-files, or implement an OSL HART execution backend.
+It also enables an initial one- or two-layer OSL HART execution path in
+`testshade`. It does not generate shader bundles or install standalone
+AMD bitcode files.
 It does not require `USE_LLVM_BITCODE` just to discover the dependencies.
 
 Add these options to your normal CMake configuration command (in addition
@@ -200,7 +201,7 @@ shader compiler/runtime packages. Discovery uses the SDKs' own `amd.hart`
 and `hip` config packages rather than guessing library filenames.
 The imported `amd::hart` and `hip::host` targets carry the host link
 requirements; `osl_hart_target(target)` applies them privately to a future
-HART consumer. No existing OSL target is linked to HART yet.
+HART consumer. `testshade` links to HART when this option is enabled.
 
 `HART_TARGET_ARCHITECTURES` is a **semicolon-separated list**, not a single
 CUDA-style architecture. Its default is `gfx1201;gfx1100;gfx1151`; a nonempty
@@ -265,13 +266,121 @@ bitcode files and check unavailable-target errors. These are host-only tests,
 but a CUDA-enabled `oslexec` still requires its CUDA DLLs; use a build with
 `OSL_USE_OPTIX=OFF` to run them on machines without those runtime dependencies.
 
+### Running a generated OSL shader with HART
+
+With `OSL_USE_HART=ON` and `USE_LLVM_BITCODE=ON`, `testshade --hart` accepts
+an ordinary compiled OSL shader. `oslc` and the `.oso` format are unchanged:
+
+```osl
+shader hart_first(output color Cout = 0)
+{
+    Cout = color(u, v, u + v);
+}
+```
+
+```powershell
+oslc hart_first.osl
+testshade --hart -g 3 2 --print hart_first
+testshade --hart --hart-no-cache --warmup --iters 3 -g 37 5 `
+  -o Cout first.exr hart_first
+```
+
+The frontend uses its normal shader/parameter/layer setup. It selects the
+actual HIP device architecture before optimizing the shader group, then
+passes verified AMDGPU bitcode and the generated init/entry names to HART.
+The renderer embeds a separate raygen module for every configured
+architecture; execution does not read device code from build-tree paths.
+Each point receives real `ShaderGlobals` and separately aligned group
+storage. Generated output placement writes `Cout` to RGB records; the
+renderer does not assume offsets inside the group.
+
+This initial path supports **one or two layers, with exactly one
+`output color Cout` on the final layer**. A connected two-layer example is:
+
+```osl
+shader hart_group_producer(float scale = 1, output float value = 0)
+{
+    value = scale * (u + v);
+}
+
+// Compile each shader in its own .osl file.
+shader hart_group_consumer(float value = 42, output color Cout = 0)
+{
+    Cout = color(u, v, sin(value));
+}
+```
+
+```powershell
+oslc hart_group_producer.osl
+oslc hart_group_consumer.osl
+testshade --hart --hart-no-cache --warmup --iters 3 -g 3 2 --print `
+  --shader hart_group_producer producer `
+  --shader hart_group_consumer consumer `
+  --connect producer value consumer value
+```
+
+The producer is an internal LLVM function, not a separate HART callable.
+OSL's existing layer scheduling and connection copies share the per-point
+group storage. HART still sees only the group's init and final entry
+callables. Output placement is qualified to the final layer, so producer
+outputs remain internal. Both layers are validated before optimization,
+including unused layers and parameters.
+
+Its numeric instruction subset is assignment, addition, subtraction,
+multiplication, division, negation, color construction, `sin`, and component
+reads/writes (plus internal structural operations). Only reads of the `u`
+and `v` shader globals are supported. Other instructions are rejected before
+runtime optimization, even if optimization could eliminate them.
+The supported command-line subset is `--hart-device`, `--hart-no-cache`,
+`--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
+`-d float|half|uint8`, `--groupname`, `--layer`, `--shader`, `--connect`,
+uniform `--param`, `-O0`/`-O1`/`-O2`, and `--llvm_opt`.
+`--llvm_opt 10` skips OSL's LLVM passes, preserving the inter-layer call in
+the emitted bitcode; HART still performs final device optimization.
+`--llvm_opt 3` exercises optimized bitcode.
+Grid coordinates include the endpoints, with 0.5 for
+singleton dimensions. `--print` suppresses image writing. As in CPU
+testshade, JPEG/GIF/PNG images are converted to sRGB.
+Parameter types follow the normal frontend: use `--param:type=float scale 2`
+or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
+
+Textures, closures, tracing, shader printing, strings, arrays, interpolated or
+interactive parameters, renderer-service callbacks, batched execution,
+instrumentation, more than two layers, explicit entry layers, multiple final
+outputs, and unlisted frontend options are
+unsupported.
+They fail explicitly; there is **no CPU fallback**.
+`--hart-entry` and `--hart-callable-module` belong only to external-module
+mode and cannot override generated callables.
+The selected architecture is fixed for the lifetime of a `ShadingSystem`;
+its `hart_arch` attribute may be set again only to the same architecture.
+
+`hart-generated-cli` checks the supported CLI boundary without GPU execution.
+Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
+which compares arithmetic, `sin(u+v)`, and the connected two-layer group
+against CPU execution
+on `1x1`, `3x2`, and `37x5` grids. It checks numerical and image output,
+cold-cache compilation, warmup, and repeated launches. Absolute tolerances
+are `2e-6` for GPU/image values and `5e-6` for comparison with CPU text's
+six-significant-digit formatting (relative tolerance `1e-6`).
+The two-layer tests cover LLVM levels 10 and 3 and an overridden producer
+parameter. The GPU-independent `hart-codegen-*` tests check the internal
+producer call, its six arguments and calling convention, and exactly two
+exported HART callables for each configured architecture.
+
+```powershell
+ctest --test-dir build\hart-validation -C Release `
+  -R "hart-(generated|grid)" --output-on-failure
+```
+
+Use an OptiX-disabled build for runtime checks on a machine without an
+NVIDIA driver. A mixed HART/OptiX build can be validated by compilation only.
+
 ### Testing external HART device code
 
-`testshade --hart` is an experimental grid runner for externally compiled
-AMDGPU bitcode. It does **not** compile or execute OSL shaders yet, and does
-not change `liboslexec`'s LLVM-IR generation. Its purpose is to validate the
-HIP/HART execution path before connecting the OSL AMDGPU code generator.
-OSL shader arguments and unsupported options are errors, not CPU fallbacks.
+`testshade --hart --hart-module FILE.bc` preserves the independent external
+AMDGPU bitcode runner. It bypasses OSL group compilation. Mixing an external
+module with OSL shader arguments, or using unsupported options, is an error.
 
 Build with `OSL_USE_HART=ON`; use `OSL_USE_OPTIX=OFF` on machines without the
 NVIDIA runtime. Both backends may be compiled into the same executable, but
@@ -363,8 +472,8 @@ calls the real `osl_sin_ff` shadeop and writes
 `(u, v, 0.25 + 2 * sin(u+v))` through the output pointer and shade index.
 The build links only the needed definitions from the matching architecture's
 shadeops bitcode into the callable module; HART links it with raygen at runtime.
-This tests callable dispatch, pointer passing and shadeop integration without
-implementing OSL AMDGPU code generation or renderer services.
+This tests callable dispatch, pointer passing and shadeop integration
+independently of OSL AMDGPU code generation or renderer services.
 Callable grids are limited to `INT_MAX` pixels by the shade-index argument.
 
 `--hart-no-cache` disables HART's pipeline cache for this invocation, forcing

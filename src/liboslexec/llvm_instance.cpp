@@ -208,7 +208,8 @@ layer_function_name(const ShaderGroup& group, const ShaderInstance& inst,
                     bool api)
 {
     const auto& ss     = inst.shadingsys();
-    const char* prefix = (ss.use_hart() || (ss.use_optix() && api))
+    const char* prefix = ((ss.use_hart() && inst.last_layer())
+                          || (ss.use_optix() && api))
                              ? "__direct_callable__"
                              : "";
     return fmtformat("{}osl_layer_group_{}_name_{}", prefix, group.name(),
@@ -2432,8 +2433,13 @@ BackendLLVM::run()
             ll.module(nullptr);
             return;
         }
-        for (auto* function : { init_func, funcs.back() }) {
-            function->setLinkage(llvm::GlobalValue::ExternalLinkage);
+        auto prepare_function = [&](llvm::Function* function) {
+            if (!function)
+                return;
+            function->setLinkage(function == init_func
+                                         || function == funcs.back()
+                                     ? llvm::GlobalValue::ExternalLinkage
+                                     : llvm::GlobalValue::InternalLinkage);
             for (const auto* name :
                  { "target-cpu", "target-features", "denormal-fp-math",
                    "denormal-fp-math-f32" }) {
@@ -2443,7 +2449,10 @@ BackendLLVM::run()
             }
             function->removeFnAttr("prefer-vector-width");
             function->removeFnAttr("min-legal-vector-width");
-        }
+        };
+        prepare_function(init_func);
+        for (auto* function : funcs)
+            prepare_function(function);
     }
 #endif
 
@@ -2491,7 +2500,9 @@ BackendLLVM::run()
                 // If we plan to call bitcode_string of a layer's function after
                 // optimization it may not exist after optimization unless we
                 // treat it as external.
-                if (f && (group().is_entry_layer(layer) || llvm_debug())) {
+                if (f
+                    && (group().is_entry_layer(layer)
+                        || (llvm_debug() && !use_hart()))) {
                     external_functions.insert(f);
                 }
             }
@@ -2643,7 +2654,7 @@ BackendLLVM::run()
         }
         for (const auto& name :
              { init_function_name(shadingsys(), group(), true),
-               layer_function_name(group(), *group()[0], true) }) {
+               layer_function_name(group(), *group()[nlayers - 1], true) }) {
             const auto* function = ll.module()->getFunction(name);
             bool valid           = function && !function->isDeclaration()
                                    && function->hasExternalLinkage()
