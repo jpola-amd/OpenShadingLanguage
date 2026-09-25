@@ -1552,6 +1552,164 @@ check_geometry_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_texture_alpha_modules(string_view arch, string_view stdosl)
+{
+    const struct {
+        string_view output;
+        bool connected;
+        bool alpha_derivs;
+        bool result_derivs;
+    } tests[] = {
+        { "color(sampled)+color(alpha)", false, false, false },
+        { "color(alpha,Dx(alpha),Dy(alpha))", false, true, false },
+        { "color(sampled)+color(alpha,Dx(alpha),Dy(alpha))", false, true,
+          false },
+        { "color(sampled+Dx(sampled)+Dy(sampled))"
+          "+color(alpha,Dx(alpha),Dy(alpha))",
+          false, true, true },
+        { "color(value)", true, false, false },
+        { "color(value,Dx(value),Dy(value))", true, true, false },
+    };
+    for (string_view type : { "float", "color" }) {
+        const auto body = fmtformat(
+            "float alpha_a=0, alpha_b=0; "
+            "{0} a=texture(\"hart-test-texture.exr\",u,v,"
+            "\"interp\",\"linear\",\"wrap\",\"periodic\",\"alpha\",alpha_a); "
+            "{0} b=texture(\"hart-test-texture.exr\",u,v,0.25,0,0,0.5,"
+            "\"interp\",\"closest\",\"wrap\",\"clamp\",\"alpha\",alpha_b); "
+            "{0} sampled=a+b; float alpha=alpha_a+alpha_b; ",
+            type);
+        OSLCompiler producer_compiler;
+        std::string producer;
+        if (!producer_compiler.compile_buffer(
+                fmtformat(
+                    "shader hart_alpha_producer(output float value=0) {{ "
+                    "float extra=0; "
+                    "{0} a=texture(\"hart-test-texture.exr\",u,v,"
+                    "\"interp\",\"linear\",\"wrap\",\"periodic\","
+                    "\"alpha\",value); "
+                    "{0} b=texture(\"hart-test-texture.exr\",u,v,0.25,0,0,0.5,"
+                    "\"interp\",\"closest\",\"wrap\",\"clamp\","
+                    "\"alpha\",extra); value+=extra; }}",
+                    type),
+                producer, { }, stdosl))
+            return false;
+        for (const auto& test : tests) {
+            const auto source
+                = test.connected
+                      ? fmtformat("shader hart_alpha_consumer(float value=0,"
+                                  "output color Cout=0) {{ Cout={}; }}",
+                                  test.output)
+                      : fmtformat("shader hart_alpha(output color Cout=0) {{ "
+                                  "{} Cout={}; }}",
+                                  body, test.output);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            for (int osl_optimize : { 0, 2 })
+                for (int optimize : { 10, 3 }) {
+                    HartServices renderer(true);
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("optimize", osl_optimize);
+                    ss.attribute("llvm_optimize", optimize);
+                    auto group = test.connected
+                                     ? make_connected_group(ss, producer,
+                                                            bytecode)
+                                     : make_group(ss, bytecode);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "Texture alpha {}: {}\n", type,
+                              errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    OIIO_CHECK_ASSERT(renderer.texture_requests > 0);
+                    check_module(ss, *group, arch, { "osl_texture" }, optimize,
+                                 test.connected, false, false,
+                                 test.connected ? 2 : 0);
+                    if (optimize != 10)
+                        continue;
+                    const void* bytes = nullptr;
+                    uint64_t size     = 0;
+                    OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                      "hart_bitcode",
+                                                      TypeDesc::PTR, &bytes));
+                    OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                      "hart_bitcode_size",
+                                                      TypeUInt64, &size));
+                    if (!bytes || !size)
+                        continue;
+                    llvm::LLVMContext context;
+                    const llvm::StringRef data(static_cast<const char*>(bytes),
+                                               size);
+                    auto parsed = llvm::parseBitcodeFile(
+                        llvm::MemoryBufferRef(data, "hart_alpha"), context);
+                    if (!parsed) {
+                        print(stderr, "{}\n",
+                              llvm::toString(parsed.takeError()));
+                        OIIO_CHECK_ASSERT(false);
+                        continue;
+                    }
+                    const auto* texture = (*parsed)->getFunction("osl_texture");
+                    OIIO_CHECK_ASSERT(texture);
+                    int calls = 0;
+                    if (texture)
+                        for (const auto* user : texture->users()) {
+                            const auto* call = llvm::dyn_cast<llvm::CallInst>(
+                                user);
+                            if (!call || call->getCalledFunction() != texture)
+                                continue;
+                            ++calls;
+                            OIIO_CHECK_EQUAL(call->arg_size(), 18);
+                            if (call->arg_size() != 18)
+                                continue;
+                            const auto* channels
+                                = llvm::dyn_cast<llvm::ConstantInt>(
+                                    call->getArgOperand(10));
+                            OIIO_CHECK_ASSERT(channels);
+                            if (channels)
+                                OIIO_CHECK_EQUAL(channels->getZExtValue(),
+                                                 type == "float" ? 1 : 3);
+                            // Result (11..13) and alpha (14..16) have
+                            // independent derivative demand.
+                            for (int arg = 11; arg <= 16; ++arg) {
+                                const auto* pointer = call->getArgOperand(arg);
+                                OIIO_CHECK_ASSERT(
+                                    pointer->getType()->isPointerTy());
+                                const bool nonnull
+                                    = arg == 11 || arg == 14
+                                      || (arg < 14 ? test.result_derivs
+                                                   : test.alpha_derivs);
+                                OIIO_CHECK_EQUAL(
+                                    llvm::isa<llvm::ConstantPointerNull>(
+                                        pointer->stripPointerCasts()),
+                                    !nonnull);
+                            }
+                        }
+                    OIIO_CHECK_EQUAL(calls, 2);
+                }
+        }
+    }
+    for (string_view type : { "int", "color" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source = fmtformat(
+            "shader hart_bad_alpha(output color Cout=0) {{ {} alpha=0; "
+            "Cout=texture(\"hart-test-texture.exr\",u,v,\"interp\",\"linear\","
+            "\"wrap\",\"clamp\",\"alpha\",alpha); }}",
+            type);
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, "texture alpha requires a float output",
+                        1, false, true);
+    }
+    return true;
+}
+
+
+
+bool
 check_texture_modules(string_view arch, string_view stdosl)
 {
     for (string_view type : { "float", "color" }) {
@@ -1622,8 +1780,8 @@ check_texture_modules(string_view arch, string_view stdosl)
           "unsupported texture wrap mode 'default'" },
         { "texture(\"x.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\",\"width\",1)",
           "unsupported texture option 'width'" },
-        { "texture(\"x.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\",\"alpha\",alpha)",
-          "unsupported texture option 'alpha'" },
+        { "texture(\"x.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\",\"missingalpha\",alpha)",
+          "unsupported texture option 'missingalpha'" },
         { "texture(\"missing.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\")",
           "cannot prepare texture 'missing.exr'" },
     };
@@ -1660,7 +1818,7 @@ check_texture_modules(string_view arch, string_view stdosl)
         return false;
     check_rejection(arch, bytecode, "unsupported type 'string'", 1, false,
                     true);
-    return true;
+    return check_texture_alpha_modules(arch, stdosl);
 }
 
 

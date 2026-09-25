@@ -1,0 +1,100 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#ifndef ALPHA_CHANNELS
+#define ALPHA_CHANNELS 4
+#endif
+#if ALPHA_CHANNELS == 1
+#define ALPHA_FILE "hart_texture_alpha_1.exr"
+#elif ALPHA_CHANNELS == 2
+#define ALPHA_FILE "hart_texture_alpha_2.exr"
+#elif ALPHA_CHANNELS == 3
+#define ALPHA_FILE "hart_texture_alpha_3.exr"
+#else
+#define ALPHA_FILE "hart_texture_alpha_4.exr"
+#endif
+
+#define IMPLICIT(...) texture(ALPHA_FILE, s, t, "alpha", alpha, __VA_ARGS__)
+#define EXPLICIT(...) \
+    texture(ALPHA_FILE, s, t, dsdx, dtdx, dsdy, dtdy, "alpha", alpha, __VA_ARGS__)
+#define SAMPLE_OPTIONS(function, result)                            \
+    if (mode == 0)                                                 \
+        result = function("interp", "closest", "wrap", "black");   \
+    else if (mode == 1)                                            \
+        result = function("interp", "linear", "wrap", "black");    \
+    else if (mode == 2)                                            \
+        result = function("interp", "closest", "wrap", "clamp");   \
+    else if (mode == 3)                                            \
+        result = function("interp", "linear", "wrap", "clamp");    \
+    else if (mode == 4)                                            \
+        result = function("interp", "closest", "wrap", "periodic"); \
+    else if (mode == 5)                                            \
+        result = function("interp", "linear", "wrap", "periodic"); \
+    else if (mode == 6)                                            \
+        result = function("interp", "closest",                    \
+                          "swrap", "clamp", "twrap", "periodic"); \
+    else                                                          \
+        result = function("interp", "linear",                     \
+                          "swrap", "clamp", "twrap", "periodic");
+
+#define SAMPLE_TYPE(TYPE)                       \
+    TYPE result = 0;                           \
+    if (explicit_lookup) {                     \
+        SAMPLE_OPTIONS(EXPLICIT, result)       \
+    } else {                                   \
+        SAMPLE_OPTIONS(IMPLICIT, result)       \
+    }                                          \
+    rgb = color(result);
+
+shader hart_texture_alpha(int report = 1,
+#ifdef ALPHA_PRODUCER
+                          output float value = 0)
+#else
+                          output color Cout = 0)
+#endif
+{
+    // Match texture_probe's 65x17 coordinates, footprints and literal modes.
+    int column = int(64 * u);
+    int row = int(16 * v);
+    int band = column / 8;
+    int probe = column - 8 * band;
+    int mode = row - 8 * (row / 8);
+    float s0 = -0.125, t0 = 0.375;
+    if (probe == 1) { s0 = 0.3125; t0 = -0.25; }
+    else if (probe == 2) { s0 = 0; t0 = 0; }
+    else if (probe == 3) { s0 = 0.0625; t0 = 0.125; }
+    else if (probe == 4) { s0 = 0.5; t0 = 0.5; }
+    else if (probe == 5) { s0 = 0.9375; t0 = 0.875; }
+    else if (probe == 6) { s0 = 1; t0 = 1; }
+    else if (probe == 7) { s0 = 1.125; t0 = 1.25; }
+    float s = s0 + (band == 7 ? 16 : 1) * (u - column / 64.0);
+    float t = t0 + (band == 7 ? 4 : 1) * (v - row / 16.0);
+    if (band == 8) {
+        s = 0.3125;
+        t = 0.375;
+    }
+    float dsdx = Dx(s), dtdx = Dx(t), dsdy = Dy(s), dtdy = Dy(t);
+    int explicit_lookup = int(band >= 1 && band <= 6);
+    if (band == 2) {
+        dsdx = 0; dtdx = 0; dsdy = 0; dtdy = 0;
+    } else if (band == 3) {
+        dsdx = 0.25; dtdy = 0.25;
+    } else if (band == 4) {
+        dsdx = 0.375; dtdy = 0.5;
+    } else if (band == 5) {
+        dsdx = 2; dtdy = 2;
+    } else if (band == 6) {
+        dsdx = 0.125; dtdx = 0.375; dsdy = -0.125; dtdy = 0.25;
+    }
+    float alpha = -42;
+    color rgb = 0;
+    if (row >= 8) { SAMPLE_TYPE(float) }
+    else { SAMPLE_TYPE(color) }
+#ifdef ALPHA_PRODUCER
+    value = alpha;
+#else
+    // report=1 leaves the ordinary texture return dead after specialization.
+    Cout = report == 0 ? rgb : color(alpha, Dx(alpha), Dy(alpha));
+#endif
+}

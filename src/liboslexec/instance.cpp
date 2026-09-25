@@ -410,6 +410,11 @@ ShaderInstance::validate_hart() const
             if (!token.is_constant() || !token.typespec().is_string())
                 return fail("texture option names must be literal strings");
             const ustring name = token.get_string();
+            if (name == Strings::alpha) {
+                if (!value.typespec().is_float() || value.is_constant())
+                    return fail("texture alpha requires a float output");
+                continue;
+            }
             if (name != ustring("interp") && name != ustring("wrap")
                 && name != ustring("swrap") && name != ustring("twrap"))
                 return fail(fmtformat("unsupported texture option '{}'", name));

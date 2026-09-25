@@ -635,7 +635,8 @@ Cout = albedo;
 The filename must be a nonempty literal. An explicit literal `"interp"` of
 `"closest"` or `"linear"` is required, as are explicit wrap modes for both
 axes: `"wrap"` sets both, or use `"swrap"` and `"twrap"`. Each supports
-`"black"`, `"clamp"`, or `"periodic"`. These are the only supported options.
+`"black"`, `"clamp"`, or `"periodic"`. The optional `"alpha", alpha` writes
+to a scalar float variable using the normal OSL texture shadeop.
 The default OIIO smart-bicubic/anisotropic filtering is **not** approximated
 silently: omitted filtering/wrap options and unsupported options are errors,
 including in branches or layers that optimization could remove.
@@ -647,6 +648,14 @@ read the first three, zero-filling missing channels rather than replicating
 grayscale. Full shifted image windows work; cropped/data-window mismatches
 are rejected. Stored mip levels are preserved, and missing levels are
 box-resized to `max(1, floor(size/2))` down to 1x1.
+
+Alpha is the next channel after the returned value: channel 1 for a float
+lookup or channel 3 for a color lookup (zero-based), not a search for a channel
+named "A". Missing alpha is zero, with zero derivatives; it is not implicitly
+opaque. Alpha's `Dx`/`Dy` follow the same reconstruction and coordinate-gradient
+chain rule as RGB, including across layer connections. Requesting alpha does
+not premultiply or otherwise change the returned color. This raw-channel
+contract does not emulate OIIO's optional grayscale-to-RGB expansion.
 
 Filtering uses an isotropic footprint in base-level texels:
 
@@ -671,7 +680,7 @@ stable resource IDs, while each launch binds the current device descriptor
 table, keeping resource addresses out of cached shader code. Required images
 that cannot be loaded fail group compilation; nonfinite coordinates/gradients and invalid runtime
 bindings fail the launch rather than returning a successful black image.
-Dynamic filenames, UDIMs, texture3d/environment, alpha outputs, first-channel
+Dynamic filenames, UDIMs, texture3d/environment, first-channel
 selection, subimage selection, colorspace, width/blur, and error-message
 options remain unsupported.
 
