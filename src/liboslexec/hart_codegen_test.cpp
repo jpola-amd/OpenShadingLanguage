@@ -387,6 +387,93 @@ check_rejection(string_view arch, string_view oso, string_view expected,
 
 
 bool
+check_math_modules(string_view arch, string_view stdosl)
+{
+    for (string_view type : { "float", "color", "vector" }) {
+        const auto body = fmtformat(
+            "{0} x={0}(1.7*u-0.7), y={0}(v+0.4); "
+            "value=abs(x)+min(x,y)+max(x,y)+clamp(x,{0}(-0.5),{0}(0.5))"
+            "+mix(x,y,{0}(u))+step({0}(0.2),x)"
+            "+smoothstep(x-{0}(0.4),y+{0}(0.7),x)+floor(x)+ceil(x)"
+            "+fmod(x,y)+cos(x)+sqrt(abs(x)+{0}(0.25))"
+            "+pow(abs(x)+{0}(0.5),y); ",
+            type);
+        const std::string sources[] = {
+            fmtformat("shader hart_math(output color Cout=0) {{ "
+                      "{} value=0; {} Cout=color(value); }}",
+                      type, body),
+            fmtformat("shader hart_math_producer(output {} value=0) {{ {} }}",
+                      type, body),
+            fmtformat(
+                "shader hart_math_consumer({} value=0, output color Cout=0) {{ "
+                "Cout=color(value+Dx(value)+Dy(value)); }}",
+                type),
+        };
+        std::string bytecode[3];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+                return false;
+        }
+        for (int optimize : { 10, 3 }) {
+            for (int osl_optimize : { 0, 2 }) {
+                for (bool connected : { false, true }) {
+                    HartServices renderer;
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("llvm_optimize", optimize);
+                    ss.attribute("optimize", osl_optimize);
+                    auto group = connected
+                                     ? make_connected_group(ss, bytecode[1],
+                                                            bytecode[2])
+                                     : make_group(ss, bytecode[0]);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "Math {}: {}\n", type, errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    const auto signature = type == "float"
+                                               ? (connected ? "dfdf" : "ff")
+                                               : (connected ? "dvdv" : "vv");
+                    check_module(ss, *group, arch,
+                                 { fmtformat("osl_abs_{}", signature),
+                                   fmtformat("osl_cos_{}", signature),
+                                   fmtformat("osl_sqrt_{}", signature),
+                                   "osl_fmod_fff",
+                                   connected ? "osl_smoothstep_dfdfdfdf"
+                                             : "osl_smoothstep_ffff" },
+                                 optimize, connected);
+                }
+            }
+        }
+    }
+    const struct {
+        string_view source;
+        string_view error;
+    } rejected[] = {
+        { "float hidden(float x) { printf(\"no\"); return x; } "
+          "shader bad(output color Cout=0) { Cout=color(hidden(u)); }",
+          "unsupported operation 'printf'" },
+        { "float hidden(float x) { if (x>0) return x; return -x; } "
+          "shader bad(output color Cout=0) { Cout=color(hidden(u)); }",
+          "unsupported operation 'return'" },
+        { "string hidden() { return \"no\"; } "
+          "shader bad(output color Cout=0) { string s=hidden(); Cout=color(u); }",
+          "unsupported type 'string'" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, test.error);
+    }
+    return true;
+}
+
+
+
+bool
 check_noise_modules(string_view arch, string_view stdosl)
 {
     const string_view coordinates = "float x=1.7*u-0.23; float y=2.3*v+0.31; "
@@ -704,7 +791,7 @@ main(int argc, char* argv[])
         check_rejected_group(ss, *group, errors, "instrumentation");
     }
     // The two-argument transform is a stdosl wrapper.
-    check_rejection(arch, oso[38], "unsupported operation 'functioncall'");
+    check_rejection(arch, oso[38], "unsupported operation 'transform'");
     for (string_view type : { "point", "vector", "normal" }) {
         for (string_view space : { "object", "common" }) {
             OSLCompiler compiler;
@@ -744,7 +831,8 @@ main(int argc, char* argv[])
                                        TypeDesc(TypeDesc::STRING, 1), &entry));
         check_rejected_group(ss, *group, errors, "default entry point");
     }
-    if (!check_noise_modules(arch, argv[2]))
+    if (!check_math_modules(arch, argv[2])
+        || !check_noise_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;
 }

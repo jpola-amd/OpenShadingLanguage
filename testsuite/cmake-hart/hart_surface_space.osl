@@ -4,5 +4,6 @@
 
 shader hart_surface_space(output color Cout = 0)
 {
+    // A coordinate-space string is still rejected, unlike a function-name marker.
     Cout = color(point("object", u, v, 1));
 }

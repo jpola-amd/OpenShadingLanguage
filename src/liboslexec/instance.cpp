@@ -395,17 +395,22 @@ ShaderInstance::validate_hart() const
         }
     }
     static const ustring supported[] = {
-        ustring("nop"),         ustring("end"),    ustring("useparam"),
-        ustring("assign"),      ustring("add"),    ustring("sub"),
-        ustring("mul"),         ustring("div"),    ustring("neg"),
-        ustring("color"),       ustring("sin"),    ustring("compref"),
-        ustring("compassign"),  ustring("if"),     ustring("lt"),
-        ustring("le"),          ustring("eq"),     ustring("ge"),
-        ustring("gt"),          ustring("neq"),    ustring("for"),
-        ustring("while"),       ustring("Dx"),     ustring("Dy"),
-        ustring("point"),       ustring("vector"), ustring("normal"),
-        ustring("dot"),         ustring("length"), ustring("normalize"),
-        ustring("filterwidth"), ustring("noise"),  ustring("snoise"),
+        ustring("nop"),         ustring("end"),          ustring("useparam"),
+        ustring("assign"),      ustring("add"),          ustring("sub"),
+        ustring("mul"),         ustring("div"),          ustring("neg"),
+        ustring("color"),       ustring("sin"),          ustring("compref"),
+        ustring("compassign"),  ustring("if"),           ustring("lt"),
+        ustring("le"),          ustring("eq"),           ustring("ge"),
+        ustring("gt"),          ustring("neq"),          ustring("for"),
+        ustring("while"),       ustring("Dx"),           ustring("Dy"),
+        ustring("point"),       ustring("vector"),       ustring("normal"),
+        ustring("dot"),         ustring("length"),       ustring("normalize"),
+        ustring("filterwidth"), ustring("noise"),        ustring("snoise"),
+        ustring("abs"),         ustring("min"),          ustring("max"),
+        ustring("clamp"),       ustring("mix"),          ustring("step"),
+        ustring("smoothstep"),  ustring("floor"),        ustring("ceil"),
+        ustring("fmod"),        ustring("cos"),          ustring("sqrt"),
+        ustring("pow"),         ustring("functioncall"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
@@ -423,6 +428,12 @@ ShaderInstance::validate_hart() const
         for (int a = 0; a < op.nargs(); ++a) {
             const Symbol& sym
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+            // Inlined function markers carry a name, not a device string.
+            // The body remains subject to the same per-operation checks.
+            if (op.opname() == ustring("functioncall") && op.nargs() == 1
+                && sym.is_constant() && sym.typespec().is_string()
+                && !op.argwrite(a))
+                continue;
             if (!validate_type(sym))
                 return false;
             if (sym.symtype() == SymTypeGlobal) {

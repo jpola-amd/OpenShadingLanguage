@@ -451,10 +451,18 @@ Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color/point/vector/normal construction,
 `sin`, `dot`, `length`, `normalize`, numeric `noise`/`snoise`, component
 reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
-`for`/`while`, `Dx`, `Dy`, and `filterwidth`
+`for`/`while`, `Dx`, `Dy`, and `filterwidth`. Procedural math also supports
+`abs`, `min`, `max`, `clamp`, `mix`, `step`, `smoothstep`, `floor`, `ceil`,
+`fmod`, `cos`, `sqrt`, and `pow`, with the usual OSL scalar/triple overloads
 (plus internal structural operations). Only reads of the listed shader
 globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
+Inlined numeric function bodies, including standard-library wrappers such
+as `clamp`, undergo the same checks. Their internal function-name markers
+do not enable general string support. Early function returns remain unsupported.
+Math domain boundaries and derivatives follow existing OSL semantics,
+including zero derivatives for `floor`, `ceil`, and `step`; this does not
+automatically filter discontinuities.
 The supported command-line subset is `--hart-device`, `--hart-no-cache`,
 `--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
 `-d float|half|uint8`, `--groupname`, `--layer`, `--shader`, `--connect`,
@@ -564,9 +572,16 @@ exercise `1x1`, `3x2`, and `37x5` grids, images, cache modes and repeated launch
 Compiler checks verify all plain and derivative shadeop signatures,
 including mixed varying/constant coordinates and connected storage.
 
+`hart-math-runtime` packs scalar/color/vector math and integer remapping
+probes into image comparisons at LLVM levels 10 and 3. Independent analytical
+checks cover values and connected derivatives, negative and zero inputs,
+transition boundaries, and constant-input zero derivatives. A representative
+connected group also exercises cache modes and repeated launches.
+The existing numerical tolerances are unchanged.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
   -R "^hart-(codegen-.*|noise-runtime)$" --output-on-failure
 ```

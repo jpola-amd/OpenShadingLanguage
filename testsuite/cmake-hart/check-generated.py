@@ -28,10 +28,12 @@ suites.add_argument("--filterwidth", action="store_true",
                     help="Run scalar and triple filterwidth runtime cases")
 suites.add_argument("--noise", action="store_true",
                     help="Run numeric Perlin noise runtime cases")
+suites.add_argument("--math", action="store_true",
+                    help="Run scalar and triple math runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
-        or args.noise) and not args.gpu:
-    parser.error("--loops, --derivatives, --surface, --filterwidth and --noise require --gpu")
+        or args.noise or args.math) and not args.gpu:
+    parser.error("--loops, --derivatives, --surface, --filterwidth, --noise and --math require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -375,6 +377,145 @@ def check_noise_suite():
             compare(actual, [0] * 108, 0)
 
 
+def math_arguments(optimize, report=0, constant_inputs=0, specialize="-O2"):
+    producer = ["--llvm_opt", optimize, specialize,
+                "--param", "constant_inputs", str(constant_inputs)]
+    if report == 0:
+        return producer + ["hart_math"]
+    return (producer + ["--shader", "hart_math", "producer",
+                        "--shader", "hart_math_consumer", "consumer",
+                        "--connect", "producer", "Cout", "consumer", "value"])
+
+
+def math_value_gradient(operation, probe, a):
+    # These are OSL's chosen derivatives at discontinuities, not finite
+    # differences across them. In particular min ties select the first operand,
+    # max ties the second, and fmod ignores the divisor's derivatives.
+    lo, hi, dlo, dhi = -1, 1, 0, 0
+    if probe == 3:
+        lo, hi, dlo, dhi = -1 + 0.125 * a, 1 + 0.25 * a, 0.125, 0.25
+    elif probe == 4:
+        lo = hi = 0
+    if operation == 0:
+        return abs(a), 1 if a >= 0 else -1
+    if operation == 1:
+        return (a, 1) if a <= 0.5 * a else (0.5 * a, 0.5)
+    if operation == 2:
+        return (a, 1) if a > 0.5 * a else (0.5 * a, 0.5)
+    if operation == 3:
+        # stdosl implements clamp as max(min(a, hi), lo).
+        value, gradient = (a, 1) if a <= hi else (hi, dhi)
+        return (value, gradient) if value > lo else (lo, dlo)
+    if operation == 4:
+        weight, gradient = ((0.25, 0) if probe == 4 else
+                            (0.5 + 0.125 * a, 0.125))
+        return a * (1 - 0.5 * weight), 1 - 0.5 * weight - 0.5 * a * gradient
+    if operation == 5:
+        return int(a >= 0.5 * a), 0
+    if operation == 6:
+        if a < lo:
+            return 0, 0
+        if a >= hi:
+            return 1, 0
+        t = (a - lo) / (hi - lo)
+        dt = ((1 - dlo) - t * (dhi - dlo)) / (hi - lo)
+        return (3 - 2 * t) * t * t, 6 * t * (1 - t) * dt
+    if operation in (7, 8):
+        return (math.floor(a) if operation == 7 else math.ceil(a)), 0
+    if operation == 9:
+        divisor = -1 if probe == 3 else (0 if probe == 4 else 1 + 0.25 * a)
+        # Even a zero divisor returns the numerator's derivatives.
+        return math.fmod(a, divisor) if divisor else 0, 1
+    if operation == 10:
+        return math.cos(a), -math.sin(a)
+    if operation == 11:
+        return (math.sqrt(a), 0.5 / math.sqrt(a)) if a > 0 else (0, 0)
+    exponent = (2, 3, 1.5, 2 + 0.125 * a, 1.5)[probe]
+    if a == 0 or (a < 0 and exponent != int(exponent)):
+        return 0, 0
+    value = a**exponent
+    gradient = exponent * a**(exponent - 1)
+    if probe == 3 and a > 0:
+        gradient += 0.125 * math.log(a) * value
+    return value, gradient
+
+
+def math_reference(width, height, report=0, constant_inputs=0):
+    def evaluate(u, v):
+        column = int(64 * u)
+        operation, probe = divmod(column, 5)
+        kind = int(32 * v) // 11
+        s = (8 * (u - 5 * operation / 64)
+             + 16 * (v - 11 * kind / 32) - 2.75)
+        if constant_inputs:
+            s = -0.5
+        if probe == 4 and operation < 4:
+            a = int(2 * s)
+            value = (abs(a), min(a, -a), max(a, -a), max(min(a, 2), -2))[operation]
+            return (value, 0, 0) if report else (value, value, value)
+        inputs = ((s, s, s) if kind == 0 else
+                  (s + 0.25, -0.5 * (s + 0.125), 2 * s))
+        # Bound pow's approximation error without widening the image tolerance.
+        # OSL's fast_pow can differ from analytical pow by about 1e-5 relative.
+        if operation == 12:
+            inputs = tuple(0.03125 * a for a in inputs)
+        results = [math_value_gradient(operation, probe, a) for a in inputs]
+        if report == 0:
+            return tuple(value for value, gradient in results)
+        component = probe % 3
+        value, gradient = results[component]
+        scale = 1 if kind == 0 else (1, -0.5, 2)[component]
+        if operation == 12:
+            scale *= 0.03125
+        if constant_inputs:
+            gradient = 0
+        return (value, gradient * scale * 8 / max(1, width - 1),
+                gradient * scale * 16 / max(1, height - 1))
+    return reference(width, height, evaluate)
+
+
+def check_math_render(shader_args, expected, constant_inputs=False):
+    # Each packed case needs one CPU image and one GPU image, not a
+    # cache/warmup/text cross product. All comparisons retain the 2e-6 bound.
+    images = [root / "math-cpu.pfm", root / "math-gpu.pfm"]
+    results = []
+    for flags, image in zip((["-t", "1"], ["--hart", "--hart-no-cache", "-v"]),
+                            images):
+        if image.exists():
+            image.unlink()
+        output = run(flags + ["-g", "65", "33", "-o", "Cout", str(image)]
+                     + shader_args)
+        if "--hart" in flags:
+            assert "HART pipeline cache disabled" in output, output
+            assert output.count("Launching HART grid") == 1, output
+        values = image_pixels(image, 65, 33)
+        compare(values, expected, 2e-6)
+        if constant_inputs:
+            compare(values[1::3], [0] * (65 * 33), 0)
+            compare(values[2::3], [0] * (65 * 33), 0)
+        results.append(values)
+    compare(results[1], results[0], 2e-6)
+
+
+def check_math_suite():
+    for optimize in ("10", "3"):
+        print("Checking HART math at LLVM level " + optimize, flush=True)
+        for report in (0, 1):
+            check_math_render(math_arguments(optimize, report=report),
+                              math_reference(65, 33, report=report))
+        for specialize in ("-O0", "-O2"):
+            check_math_render(
+                math_arguments(optimize, report=1, constant_inputs=1,
+                               specialize=specialize),
+                math_reference(65, 33, report=1, constant_inputs=1),
+                constant_inputs=True,
+            )
+    # The center sample is a connected color smoothstep with nonzero Dx/Dy.
+    # Keep repeated launch and cache coverage on this single representative.
+    check_render(math_arguments("3", report=1), 1, 1,
+                 math_reference(1, 1, report=1))
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         result = subprocess.run(
@@ -618,8 +759,11 @@ try:
                  "--shader", "hart_first", "consumer"], error)
         check_noise_suite()
 
+    if args.math:
+        check_math_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
-                         or args.noise):
+                         or args.noise or args.math):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
