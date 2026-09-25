@@ -210,6 +210,10 @@ public:
     ///    string hart_arch       AMDGPU architecture for a renderer supporting
     ///                              "HART". Set before group optimization.
     ///                              Cannot change after selection. ("")
+    ///    int max_hart_groupdata_alloc
+    ///                           Maximum private group-data bytes in a fused
+    ///                              HART callable. Nonnegative; 0 disables.
+    ///                              Affects subsequently compiled groups. (0)
     ///    string[] raytypes      Array of ray type names
     ///    string[] renderer_outputs
     ///                           Array of names of renderer outputs (AOVs)
@@ -569,6 +573,9 @@ public:
     ///   uint64 hart_bitcode_size  Byte count of hart_bitcode, including zeros.
     ///                             Both HART queries return false before
     ///                             successful compilation. No CPU fallback.
+    ///   int hart_groupdata_alloc  Logical private group-data bytes in the
+    ///                             compiled fused callable (0 uses caller
+    ///                             storage). False before successful compilation.
     ///   ptr interactive_params     Pointer to the memory block containing
     ///                                 host-side interactive parameter values
     ///                                 for this shader group.

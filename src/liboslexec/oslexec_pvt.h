@@ -1021,6 +1021,7 @@ private:
     bool m_use_optix;        ///< This is an OptiX-based renderer
     bool m_use_hart;         ///< This is a HART-based renderer
     std::string m_hart_arch;
+    int m_max_hart_groupdata_alloc = 0;
     bool m_use_optix_cache;  ///< Renderer-enabled caching for OptiX ptx
     int m_max_optix_groupdata_alloc;  ///< Maximum OptiX groupdata buffer allocation
     bool m_buffer_printf;             ///< Buffer/batch printf output?
@@ -2152,6 +2153,7 @@ private:
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
     std::string m_hart_bitcode;
+    int m_hart_groupdata_alloc = 0;
 
     ParamValueList m_pending_params;          // Pending Parameter() values
     std::vector<ParamHints> m_pending_hints;  // ParamHints of pending params

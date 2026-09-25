@@ -334,6 +334,24 @@ execution. This switch is not supported for external modules; their ABI and
 two fixed callable entries remain unchanged. The fused path is opt-in, not
 an assumed performance improvement.
 
+`--hart-fused --hart-local-groupdata BYTES` additionally permits private
+group storage inside the fused callable when the complete group fits the
+nonnegative byte budget. Zero (the default) disables this allocation;
+larger groups retain renderer scratch, without truncating their storage.
+The threshold includes equality. Split callables always use caller storage.
+Private storage uses the AMDGPU target's alignment and a private-to-generic
+pointer conversion. The generated and external launch-parameter layouts are
+unchanged. Verbose output reports logical group size, alignment, selected
+local bytes and renderer scratch bytes (zero in local mode).
+
+Renderer integrations set `max_hart_groupdata_alloc` before compilation and
+query `hart_groupdata_alloc` on the successfully compiled group. The latter
+is the logical allocation selected for its fused wrapper, not final hardware
+stack usage; subsequent attribute changes do not rewrite compiled groups.
+Only a renderer selecting that fused wrapper may omit its scratch buffer.
+Private storage may become registers or spill, so a larger budget is not
+necessarily faster.
+
 Numeric comparisons and `if`/`else` can also use connected inputs
 conditionally. For example, replace the consumer with:
 
@@ -558,7 +576,8 @@ do not enable general string support. Early function returns remain unsupported.
 Math domain boundaries and derivatives follow existing OSL semantics,
 including zero derivatives for `floor`, `ceil`, and `step`; this does not
 automatically filter discontinuities.
-The supported command-line subset is `--hart-device`, `--hart-no-cache`, `--hart-fused`,
+The supported command-line subset is `--hart-device`, `--hart-no-cache`,
+`--hart-fused`, `--hart-local-groupdata`,
 `--res`/`-g`, `--warmup`, `--iters`, `--print`, `-v`/`--debug`, `-o Cout FILE`,
 `-d float|half|uint8`, `--groupname`, `--layer`, `--shader`, `--connect`,
 uniform `--param`, `-O0`/`-O1`/`-O2`, and `--llvm_opt`.

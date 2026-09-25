@@ -1621,6 +1621,15 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     }
 
     lock_guard guard(m_mutex);  // Thread safety
+    if (name == "max_hart_groupdata_alloc") {
+        if (!use_hart() || type != TypeInt || *(const int*)val < 0) {
+            errorfmt("max_hart_groupdata_alloc requires a HART renderer and "
+                     "a nonnegative integer byte limit");
+            return false;
+        }
+        m_max_hart_groupdata_alloc = *(const int*)val;
+        return true;
+    }
     if (name == "hart_arch" && type == TypeDesc::STRING) {
         const std::string arch = *(const char* const*)val;
         if (!use_hart() || arch.empty()
@@ -1921,6 +1930,7 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
     ATTR_DECODE("llvm_jit_aggressive", int, m_llvm_jit_aggressive);
     ATTR_DECODE_STRING("llvm_jit_target", m_llvm_jit_target);
     ATTR_DECODE_STRING("hart_arch", m_hart_arch);
+    ATTR_DECODE("max_hart_groupdata_alloc", int, m_max_hart_groupdata_alloc);
     ATTR_DECODE("vector_width", int, m_vector_width);
     ATTR_DECODE("opt_passes", int, m_opt_passes);
     ATTR_DECODE("optimize_nondebug", int, m_optimize_nondebug);
@@ -2289,6 +2299,10 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
     }
     if (name == "hart_bitcode_size" && type == TypeUInt64) {
         *(uint64_t*)val = group->m_hart_bitcode.size();
+        return !group->m_hart_bitcode.empty();
+    }
+    if (name == "hart_groupdata_alloc" && type == TypeInt) {
+        *(int*)val = group->m_hart_groupdata_alloc;
         return !group->m_hart_bitcode.empty();
     }
     if (name == "llvm_groupdata_alignment" && type == TypeInt) {

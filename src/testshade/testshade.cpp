@@ -745,6 +745,12 @@ getargs(int argc, const char* argv[])
     ap.arg("--hart-fused", &hart.fused)
       .help("Use one init+entry callable for a generated HART shader group")
       .action([&](cspan<const char*>) { hart.fused = hart_options = true; });
+    ap.arg("--hart-local-groupdata %s:BYTES", &hart.local_groupdata)
+      .help("Maximum private group-data bytes for --hart-fused (default: 0)")
+      .action([&](cspan<const char*> args) {
+          hart.local_groupdata = args[1];
+          hart.has_local_groupdata = hart_options = true;
+      });
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
     ap.arg("--debug2", &debug2)
@@ -1974,9 +1980,11 @@ test_shade(int argc, const char* argv[])
             return EXIT_FAILURE;
         }
 #if OSL_TESTSHADE_HART
-        if (hart.fused && (hart.has_module || shader_setup_args.size() == 1)) {
+        if ((hart.fused || hart.has_local_groupdata)
+            && (hart.has_module || shader_setup_args.size() == 1)) {
             ErrorHandler::default_handler().errorfmt(
-                "--hart-fused requires a generated OSL shader group");
+                "--hart-fused and --hart-local-groupdata require a generated "
+                "OSL shader group");
             return EXIT_FAILURE;
         }
         if (hart.has_module || shader_setup_args.size() == 1)
@@ -2051,7 +2059,11 @@ test_shade(int argc, const char* argv[])
     shadingsys = new ShadingSystem(rend.get(), texturesys, &rend->errhandler());
     rend->init_shadingsys(shadingsys);
 #if OSL_TESTSHADE_HART
-    if (use_hart && !shadingsys->attribute("hart_arch", hart_arch)) {
+    if (use_hart
+        && (!shadingsys->attribute("hart_arch", hart_arch)
+            || !shadingsys->attribute("max_hart_groupdata_alloc",
+                                      OIIO::Strutil::stoi(
+                                          hart.local_groupdata)))) {
         rend->errhandler().errorfmt("Cannot select HART architecture '{}'",
                                     hart_arch);
         delete shadingsys;

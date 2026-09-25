@@ -23,8 +23,9 @@ testshade_generated()
     const uint64_t shadeindex = uint64_t(index.y) * size.x + index.x;
     const auto& params        = testshade_hart_params;
     if (shadeindex >= params.point_count || shadeindex > 0x7fffffff
-        || !params.group_stride
-        || params.point_count > params.scratch_bytes / params.group_stride)
+        || (!Fused && !params.group_stride)
+        || (params.group_stride
+            && params.point_count > params.scratch_bytes / params.group_stride))
         return;
 
     OSL::ShaderGlobals sg { };
@@ -46,7 +47,9 @@ testshade_generated()
     sg.renderstate = const_cast<testshade::HartTextureState*>(params.textures);
     sg.object2common = params.transforms;
     sg.shader2common = params.transforms + 2;
-    void* group    = params.scratch + shadeindex * params.group_stride;
+    void* group      = params.group_stride
+                           ? params.scratch + shadeindex * params.group_stride
+                           : nullptr;
     optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int, void*>(
         0u, &sg, group, nullptr, params.output, int(shadeindex), nullptr);
     if (!Fused)

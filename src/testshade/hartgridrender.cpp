@@ -376,7 +376,7 @@ public:
                 span<float> pixels, size_t group_size = 0,
                 size_t group_alignment = 0, int raytype = 0,
                 HartTextureStore* textures = nullptr,
-                cspan<Matrix44> transforms = { })
+                cspan<Matrix44> transforms = { }, size_t local_groupdata = 0)
     {
         const size_t bytes       = pixels.size() * sizeof(float);
         const size_t params_size = group_alignment
@@ -405,6 +405,7 @@ public:
             const size_t count = pixels.size() / 3;
             if ((group_alignment & (group_alignment - 1))
                 || std::max(size_t(1), group_size) > limit - group_alignment
+                || (local_groupdata && local_groupdata != group_size)
                 || count == 0) {
                 m_err.errorfmt("Invalid generated HART group storage layout");
                 return false;
@@ -412,30 +413,39 @@ public:
             const size_t stride = (std::max(size_t(1), group_size)
                                    + group_alignment - 1)
                                   & ~(group_alignment - 1);
-            if (count > (limit - group_alignment + 1) / stride) {
+            if (!local_groupdata
+                && count > (limit - group_alignment + 1) / stride) {
                 m_err.errorfmt(
                     "HART grid exceeds the group storage size limit");
                 return false;
             }
-            const size_t scratch_bytes = count * stride;
-            if (!hip_check(hipMalloc(&m_scratch,
-                                     scratch_bytes + group_alignment - 1),
-                           "hipMalloc group storage")
-                || !hip_check(hipMemset(m_scratch, 0,
-                                        scratch_bytes + group_alignment - 1),
-                              "hipMemset group storage"))
+            const size_t scratch_bytes = local_groupdata ? 0 : count * stride;
+            if (scratch_bytes
+                && (!hip_check(hipMalloc(&m_scratch,
+                                         scratch_bytes + group_alignment - 1),
+                               "hipMalloc group storage")
+                    || !hip_check(hipMemset(m_scratch, 0,
+                                            scratch_bytes + group_alignment - 1),
+                                  "hipMemset group storage")))
                 return false;
-            const uintptr_t aligned = (reinterpret_cast<uintptr_t>(m_scratch)
-                                       + group_alignment - 1)
-                                      & ~(uintptr_t(group_alignment) - 1);
+            const uintptr_t aligned
+                = !m_scratch ? 0
+                             : (reinterpret_cast<uintptr_t>(m_scratch)
+                                + group_alignment - 1)
+                                   & ~(uintptr_t(group_alignment) - 1);
             generated = { static_cast<float*>(m_output),
                           reinterpret_cast<unsigned char*>(aligned),
-                          stride,
+                          local_groupdata ? 0 : stride,
                           scratch_bytes,
                           count,
                           raytype,
                           textures ? textures->device_state() : nullptr,
                           static_cast<const Matrix44*>(m_transforms) };
+            if (m_verbose)
+                m_err.infofmt(
+                    "HART group storage: {} bytes, alignment {}, local {} bytes, scratch {} bytes",
+                    group_size, group_alignment, local_groupdata,
+                    scratch_bytes);
         }
         if (!hip_check(hipMemcpy(m_params,
                                  group_alignment
@@ -607,6 +617,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--hart-device %s:INDEX", &device);
     ap.arg("--hart-no-cache");
     ap.arg("--hart-fused");
+    ap.arg("--hart-local-groupdata %s:BYTES");
     ap.arg("--res %d:WIDTH %d:HEIGHT");
     ap.arg("-g %d:WIDTH %d:HEIGHT");
     ap.arg("--iters %d:COUNT");
@@ -635,6 +646,21 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     if (ap.parse_args(argc, argv) < 0) {
         err.errorfmt("Generated HART mode: unsupported option or argument: {}",
                      ap.geterror());
+        return false;
+    }
+    if (options.has_local_groupdata && !options.fused) {
+        err.errorfmt("--hart-local-groupdata requires --hart-fused");
+        return false;
+    }
+    const auto local_bytes = std::strtoll(options.local_groupdata.c_str(),
+                                          nullptr, 10);
+    if (options.local_groupdata.empty()
+        || options.local_groupdata.find_first_not_of("0123456789")
+               != std::string::npos
+        || local_bytes > std::numeric_limits<int>::max()) {
+        err.errorfmt("Invalid --hart-local-groupdata byte limit '{}'; "
+                     "expected an integer in [0,2147483647]",
+                     options.local_groupdata);
         return false;
     }
     char* device_end        = nullptr;
@@ -784,7 +810,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
 
     const void* data = nullptr;
     uint64_t bytes   = 0;
-    int group_size = -1, group_alignment = 0;
+    int group_size = -1, group_alignment = 0, local_groupdata = 0;
     std::vector<std::string> callables(options.fused ? 1 : 2);
     if (!shadingsys.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &data)
         || !shadingsys.getattribute(&group, "hart_bitcode_size", TypeUInt64,
@@ -793,7 +819,10 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         || !shadingsys.getattribute(&group, "llvm_groupdata_size", group_size)
         || !shadingsys.getattribute(&group, "llvm_groupdata_alignment",
                                     group_alignment)
-        || group_size < 0 || group_alignment <= 0
+        || !shadingsys.getattribute(&group, "hart_groupdata_alloc",
+                                    local_groupdata)
+        || group_size < 0 || group_alignment <= 0 || local_groupdata < 0
+        || (local_groupdata && local_groupdata != group_size)
         || !shadingsys.getattribute(&group,
                                     options.fused ? "group_fused_name"
                                                   : "group_init_name",
@@ -846,10 +875,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
     const Matrix44 transforms[] = { object2common, object2common.inverse(),
                                     shader2common, shader2common.inverse() };
-    const bool rendered = runtime.render(width, height, iterations, warmup,
-                                         pixels, size_t(group_size),
-                                         size_t(group_alignment), raytype,
-                                         &textures, transforms);
+    const bool rendered
+        = runtime.render(width, height, iterations, warmup, pixels,
+                         size_t(group_size), size_t(group_alignment), raytype,
+                         &textures, transforms,
+                         options.fused ? size_t(local_groupdata) : 0);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

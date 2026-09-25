@@ -1553,6 +1553,19 @@ BackendLLVM::build_llvm_fused_callable(void)
                <= shadingsys().m_max_optix_groupdata_alloc)
         llvm_groupdata_ptr = ll.op_alloca(m_llvm_type_groupdata, 1,
                                           "groupdata_buffer", 8);
+    if (use_hart()) {
+        const int bytes                = group().llvm_groupdata_size();
+        group().m_hart_groupdata_alloc = 0;
+        if (shadingsys().m_max_hart_groupdata_alloc > 0
+            && bytes <= shadingsys().m_max_hart_groupdata_alloc) {
+            auto* local = ll.op_alloca(m_llvm_type_groupdata, 1,
+                                       "groupdata_buffer",
+                                       group().m_llvm_groupdata_alignment);
+            llvm_groupdata_ptr = ll.ptr_cast(local, llvm_type_groupdata_ptr());
+            group().m_hart_groupdata_alloc = bytes;
+            m_llvm_local_mem += bytes;
+        }
+    }
 
     llvm::Value* args[] = {
         ll.current_function_arg(0), llvm_groupdata_ptr,

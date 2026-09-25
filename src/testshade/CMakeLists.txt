@@ -357,6 +357,11 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --fused)
             set_tests_properties (hart-fused-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-fused-local-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --fused-local)
+            set_tests_properties (hart-fused-local-runtime PROPERTIES LABELS "hart;gpu")
         endif ()
     endif ()
 endif ()

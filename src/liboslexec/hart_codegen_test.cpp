@@ -118,6 +118,9 @@ void
 check_rejected_group(ShadingSystem& ss, ShaderGroup& group,
                      const Diagnostics& errors, string_view expected)
 {
+    int allocated = 0;
+    OIIO_CHECK_ASSERT(
+        !ss.getattribute(&group, "hart_groupdata_alloc", allocated));
     ss.optimize_group(&group, nullptr);
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -125,6 +128,8 @@ check_rejected_group(ShadingSystem& ss, ShaderGroup& group,
         !ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
     OIIO_CHECK_ASSERT(
         !ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    OIIO_CHECK_ASSERT(
+        !ss.getattribute(&group, "hart_groupdata_alloc", allocated));
     OIIO_CHECK_ASSERT(bytes == nullptr && size == 0);
     OIIO_CHECK_ASSERT(errors.errors > 0);
     const bool matched = OIIO::Strutil::contains(errors.last_error, expected);
@@ -138,10 +143,14 @@ check_rejected_group(ShadingSystem& ss, ShaderGroup& group,
 
 ShaderGroupRef
 make_connected_group(ShadingSystem& ss, string_view producer,
-                     string_view consumer)
+                     string_view consumer, bool load_shaders = true)
 {
-    OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_producer", producer));
-    OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_consumer", consumer));
+    if (load_shaders) {
+        OIIO_CHECK_ASSERT(
+            ss.LoadMemoryCompiledShader("hart_producer", producer));
+        OIIO_CHECK_ASSERT(
+            ss.LoadMemoryCompiledShader("hart_consumer", consumer));
+    }
     auto group = ss.ShaderGroupBegin("hart_test_group");
     OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_producer", "producer"));
     OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_consumer", "consumer"));
@@ -179,18 +188,43 @@ check_function_abi(const llvm::Function& function, string_view arch)
 
 void
 check_wrapper(const llvm::Function* wrapper,
-              std::initializer_list<const llvm::Function*> targets)
+              std::initializer_list<const llvm::Function*> targets,
+              const llvm::StructType* storage = nullptr, int alignment = 0)
 {
     OIIO_CHECK_ASSERT(wrapper);
     if (!wrapper)
         return;
     OIIO_CHECK_EQUAL(wrapper->size(), 1);
-    size_t calls = 0;
+    const llvm::AllocaInst* allocation  = nullptr;
+    const llvm::AddrSpaceCastInst* cast = nullptr;
+    const llvm::Value* groupdata        = wrapper->getArg(1);
+    size_t calls                        = 0;
     for (const auto& block : *wrapper)
         for (const auto& inst : block) {
+            if (const auto* local = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+                OIIO_CHECK_ASSERT(storage && !allocation);
+                OIIO_CHECK_EQUAL(local->getAllocatedType(), storage);
+                OIIO_CHECK_EQUAL(local->getAddressSpace(), 5);
+                OIIO_CHECK_EQUAL(local->getAlign().value(),
+                                 uint64_t(alignment));
+                const auto* count = llvm::dyn_cast<llvm::ConstantInt>(
+                    local->getArraySize());
+                OIIO_CHECK_ASSERT(count && count->isOne());
+                allocation = local;
+                continue;
+            }
+            if (const auto* flat = llvm::dyn_cast<llvm::AddrSpaceCastInst>(
+                    &inst)) {
+                OIIO_CHECK_ASSERT(storage && allocation && !cast);
+                OIIO_CHECK_EQUAL(flat->getOperand(0), allocation);
+                OIIO_CHECK_EQUAL(flat->getSrcAddressSpace(), 5);
+                OIIO_CHECK_EQUAL(flat->getDestAddressSpace(), 0);
+                cast      = flat;
+                groupdata = flat;
+                continue;
+            }
             const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
             if (!call) {
-                // No local groupdata allocation or other wrapper-side work.
                 OIIO_CHECK_ASSERT(llvm::isa<llvm::ReturnInst>(inst));
                 continue;
             }
@@ -209,12 +243,16 @@ check_wrapper(const llvm::Function* wrapper,
                                  target->getFunctionType());
             }
             OIIO_CHECK_EQUAL(call->arg_size(), 6);
+            if (storage)
+                OIIO_CHECK_ASSERT(cast);
             for (unsigned int arg = 0;
                  arg < call->arg_size() && arg < wrapper->arg_size(); ++arg)
                 OIIO_CHECK_EQUAL(call->getArgOperand(arg),
-                                 wrapper->getArg(arg));
+                                 arg == 1 ? groupdata : wrapper->getArg(arg));
         }
     OIIO_CHECK_EQUAL(calls, targets.size());
+    OIIO_CHECK_EQUAL(allocation != nullptr, storage != nullptr);
+    OIIO_CHECK_EQUAL(cast != nullptr, storage != nullptr);
 }
 
 
@@ -258,6 +296,16 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     for (const auto& global : module.globals())
         provenance |= global.getName().contains("__hart_device_storage_abi");
     OIIO_CHECK_ASSERT(provenance);
+    int size_bytes = 0, alignment = 0, allocated = -1;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "llvm_groupdata_size", size_bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "llvm_groupdata_alignment", alignment));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_groupdata_alloc", allocated));
+    OIIO_CHECK_ASSERT(size_bytes > 0 && alignment > 0);
+    OIIO_CHECK_EQUAL(size_bytes % alignment, 0);
+    OIIO_CHECK_ASSERT(allocated == 0 || allocated == size_bytes);
     const char* queries[]       = { "group_init_name", "group_entry_name",
                                     "group_fused_name" };
     llvm::Function* wrappers[3] = { };
@@ -306,7 +354,20 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         }
         check_wrapper(wrappers[0], { bodies[0] });
         check_wrapper(wrappers[1], { bodies[1] });
-        check_wrapper(wrappers[2], { bodies[0], bodies[1] });
+        auto* storage = allocated > 0
+                            ? llvm::StructType::getTypeByName(context,
+                                                              "Groupdata")
+                            : nullptr;
+        if (allocated > 0) {
+            OIIO_CHECK_ASSERT(storage);
+            if (storage)
+                OIIO_CHECK_EQUAL(module.getDataLayout()
+                                     .getTypeAllocSize(storage)
+                                     .getFixedValue(),
+                                 uint64_t(allocated));
+        }
+        check_wrapper(wrappers[2], { bodies[0], bodies[1] }, storage,
+                      alignment);
     }
     auto* init    = bodies[0];
     auto* entry   = bodies[1];
@@ -468,13 +529,6 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             OIIO_CHECK_ASSERT(dual_storage);
         }
     }
-    int size_bytes = 0, alignment = 0;
-    OIIO_CHECK_ASSERT(
-        ss.getattribute(&group, "llvm_groupdata_size", size_bytes));
-    OIIO_CHECK_ASSERT(
-        ss.getattribute(&group, "llvm_groupdata_alignment", alignment));
-    OIIO_CHECK_ASSERT(size_bytes > 0 && alignment > 0);
-    OIIO_CHECK_EQUAL(size_bytes % alignment, 0);
     if (used_layers && optimize == 10) {
         auto* storage = llvm::StructType::getTypeByName(context, "Groupdata");
         OIIO_CHECK_ASSERT(storage);
@@ -627,6 +681,179 @@ check_rejection(string_view arch, string_view oso, string_view expected,
         ss.attribute("debug_nan", 1);
     auto group = make_group(ss, oso, layers);
     check_rejected_group(ss, *group, errors, expected);
+}
+
+
+
+void
+check_groupdata_alloc_settings()
+{
+    const string_view option("max_hart_groupdata_alloc");
+    {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("error_repeats", 1));
+        int budget = -1;
+        OIIO_CHECK_ASSERT(ss.getattribute(option, budget));
+        OIIO_CHECK_EQUAL(budget, 0);
+        OIIO_CHECK_ASSERT(ss.attribute(option, 64));
+        OIIO_CHECK_ASSERT(ss.getattribute(option, budget));
+        OIIO_CHECK_EQUAL(budget, 64);
+        auto reject = [&](TypeDesc type, const void* value) {
+            const int previous_errors = errors.errors;
+            OIIO_CHECK_ASSERT(!ss.attribute(option, type, value));
+            OIIO_CHECK_EQUAL(errors.errors, previous_errors + 1);
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error, option));
+            OIIO_CHECK_ASSERT(ss.getattribute(option, budget));
+            OIIO_CHECK_EQUAL(budget, 64);
+        };
+        const int negative   = -1;
+        const float floating = 64.0f;
+        const char* text     = "64";
+        const int array[]    = { 64, 64 };
+        reject(TypeDesc::INT, &negative);
+        reject(TypeDesc::FLOAT, &floating);
+        reject(TypeDesc::STRING, &text);
+        reject(TypeDesc(TypeDesc::INT, 2), array);
+        OIIO_CHECK_ASSERT(ss.attribute(option, 0));
+        OIIO_CHECK_ASSERT(ss.getattribute(option, budget));
+        OIIO_CHECK_EQUAL(budget, 0);
+        float wrong_type = -1.0f;
+        OIIO_CHECK_ASSERT(!ss.getattribute(option, wrong_type));
+    }
+    {
+        RendererServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("error_repeats", 1));
+        for (int budget : { 0, 64 }) {
+            const int previous_errors = errors.errors;
+            OIIO_CHECK_ASSERT(!ss.attribute(option, budget));
+            OIIO_CHECK_EQUAL(errors.errors, previous_errors + 1);
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error, option));
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error, "HART"));
+            int unchanged = -1;
+            OIIO_CHECK_ASSERT(ss.getattribute(option, unchanged));
+            OIIO_CHECK_EQUAL(unchanged, 0);
+        }
+    }
+}
+
+
+
+void
+check_groupdata_alloc_modules(string_view arch, string_view producer,
+                              string_view consumer)
+{
+    for (int osl_optimize : { 0, 2 })
+        for (int optimize : { 10, 3 }) {
+            int required = 0;
+            {
+                HartServices renderer;
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+                OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+                OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+                auto group    = make_connected_group(ss, producer, consumer);
+                int allocated = -1;
+                OIIO_CHECK_ASSERT(!ss.getattribute(group.get(),
+                                                   "hart_groupdata_alloc",
+                                                   allocated));
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr, "{}\n", errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "llvm_groupdata_size",
+                                                  required));
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "hart_groupdata_alloc",
+                                                  allocated));
+                OIIO_CHECK_EQUAL(allocated, 0);
+                check_module(ss, *group, arch, { "osl_sin_dfdf" }, optimize,
+                             true, false, false, 2);
+            }
+            OIIO_CHECK_ASSERT(required > 0);
+            if (required <= 0)
+                continue;
+            for (int budget : { 0, required - 1, required, required + 1 }) {
+                HartServices renderer;
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+                OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+                OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+                OIIO_CHECK_ASSERT(
+                    ss.attribute("max_hart_groupdata_alloc", budget));
+                int configured = -1;
+                OIIO_CHECK_ASSERT(
+                    ss.getattribute("max_hart_groupdata_alloc", configured));
+                OIIO_CHECK_EQUAL(configured, budget);
+                const int expected = budget > 0 && required <= budget ? required
+                                                                      : 0;
+                auto check_compiled = [&](ShaderGroup& group, int allocation) {
+                    if (errors.errors)
+                        print(stderr, "{}\n", errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    int size = 0, allocated = -1;
+                    OIIO_CHECK_ASSERT(
+                        ss.getattribute(&group, "llvm_groupdata_size", size));
+                    OIIO_CHECK_EQUAL(size, required);
+                    OIIO_CHECK_ASSERT(ss.getattribute(&group,
+                                                      "hart_groupdata_alloc",
+                                                      allocated));
+                    OIIO_CHECK_EQUAL(allocated, allocation);
+                    float wrong_type = -1.0f;
+                    OIIO_CHECK_ASSERT(!ss.getattribute(&group,
+                                                       "hart_groupdata_alloc",
+                                                       wrong_type));
+                    check_module(ss, group, arch, { "osl_sin_dfdf" }, optimize,
+                                 true, false, false, 2);
+                };
+                auto group    = make_connected_group(ss, producer, consumer);
+                int allocated = -1;
+                OIIO_CHECK_ASSERT(!ss.getattribute(group.get(),
+                                                   "hart_groupdata_alloc",
+                                                   allocated));
+                ss.optimize_group(group.get(), nullptr);
+                check_compiled(*group, expected);
+                const void* bytes = nullptr;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                                  TypeDesc::PTR, &bytes));
+                auto future_group = make_connected_group(ss, producer, consumer,
+                                                         false);
+                OIIO_CHECK_ASSERT(!ss.getattribute(future_group.get(),
+                                                   "hart_groupdata_alloc",
+                                                   allocated));
+                const int future_budget = expected ? 0 : required;
+                OIIO_CHECK_ASSERT(
+                    ss.attribute("max_hart_groupdata_alloc", future_budget));
+                OIIO_CHECK_ASSERT(
+                    ss.getattribute("max_hart_groupdata_alloc", configured));
+                OIIO_CHECK_EQUAL(configured, future_budget);
+                // A budget change affects compilation, not an existing module.
+                ss.optimize_group(group.get(), nullptr);
+                check_compiled(*group, expected);
+                OIIO_CHECK_ASSERT(!ss.getattribute(future_group.get(),
+                                                   "hart_groupdata_alloc",
+                                                   allocated));
+                ss.optimize_group(future_group.get(), nullptr);
+                check_compiled(*future_group, future_budget);
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "hart_groupdata_alloc",
+                                                  allocated));
+                OIIO_CHECK_EQUAL(allocated, expected);
+                const void* again = nullptr;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                                  TypeDesc::PTR, &again));
+                OIIO_CHECK_EQUAL(bytes, again);
+            }
+        }
 }
 
 
@@ -1682,6 +1909,8 @@ main(int argc, char* argv[])
                          optimize, true);
         }
     }
+    check_groupdata_alloc_settings();
+    check_groupdata_alloc_modules(arch, oso[24], oso[25]);
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
     check_rejection(arch, oso[2], "unsupported operation 'printf'", 3);
     check_rejection(arch, oso[0], "instrumentation", 1, true);

@@ -22,6 +22,8 @@ struct HartOptions {
     int device        = 0;
     bool no_cache     = false;
     bool fused        = false;
+    std::string local_groupdata = "0";
+    bool has_local_groupdata    = false;
     bool has_module = false, has_callables = false, has_entry = false;
 };
 

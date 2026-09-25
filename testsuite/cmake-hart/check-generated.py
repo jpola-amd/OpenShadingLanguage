@@ -50,12 +50,15 @@ suites.add_argument("--materials", action="store_true",
                     help="Run composed multilayer material runtime cases")
 suites.add_argument("--fused", action="store_true",
                     help="Compare split and fused generated HART callables")
+suites.add_argument("--fused-local", action="store_true",
+                    help="Compare scratch and callable-local HART group storage")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
         or args.spaces or args.geometry or args.groups
-        or args.topology or args.materials or args.fused) and not args.gpu:
+        or args.topology or args.materials or args.fused
+        or args.fused_local) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1664,6 +1667,97 @@ def check_fused_suite():
         assert "HART callable mode: " + mode in output, output
 
 
+def check_fused_local_suite():
+    levels = prepare_texture_images()[0]
+
+    def render(shader_args, width, height, mode="split", budget=None,
+               repeat=False, error=None):
+        image = root / "fused-local-gpu.pfm"
+        if image.exists():
+            image.unlink()
+        flags = ["--hart", "--hart-no-cache", "-v",
+                 "-g", str(width), str(height), "-o", "Cout", str(image)]
+        if mode == "fused":
+            flags += ["--hart-fused"]
+        if budget is not None:
+            flags += ["--hart-local-groupdata", str(budget)]
+        if repeat:
+            flags += ["--warmup", "--iters", "3"]
+        output = run(flags + shader_args, error,
+                     error_after_launch=error is not None)
+        assert "HART callable mode: " + mode in output, output
+        assert "HART pipeline cache disabled" in output, output
+        assert output.count("Launching HART grid") == (4 if repeat else 1), output
+        storage = re.findall(
+            r"HART group storage: (\d+) bytes, alignment (\d+), "
+            r"local (\d+) bytes, scratch (\d+) bytes", output,
+        )
+        assert len(storage) == 1, output
+        size, alignment, local, scratch = map(int, storage[0])
+        assert size > 0 and alignment > 0, storage
+        assert alignment & (alignment - 1) == 0, storage
+        expected_local = (size if mode == "fused" and budget is not None
+                          and budget >= size else 0)
+        assert local == expected_local, (budget, storage)
+        stride = ((size + alignment - 1) // alignment) * alignment
+        assert scratch == (0 if local else width * height * stride), storage
+        if error:
+            assert not image.exists(), "Failed render wrote an output image"
+            return None, (size, alignment)
+        return image_pixels(image, width, height), (size, alignment)
+
+    def check_case(shader_args, width, height, expected, thresholds=False,
+                   scratch=True, local_budget=None):
+        cpu = noise_cpu_image(shader_args, width, height)
+        compare(cpu, expected)
+        split, layout = render(shader_args, width, height)
+        compare(split, expected)
+        compare(split, cpu)
+        size, _ = layout
+        if thresholds:
+            # The omitted option and explicit zero must both preserve scratch.
+            budgets = [None, 0, size - 1, size, size + 1]
+        else:
+            budgets = ([0] if scratch else []) + [
+                size if local_budget is None else local_budget
+            ]
+        for budget in budgets:
+            actual, actual_layout = render(
+                shader_args, width, height, "fused", budget,
+                repeat=budget == size,
+            )
+            assert actual_layout == layout, (layout, actual_layout)
+            compare(actual, expected)
+            compare(actual, cpu)
+            compare(actual, split)
+
+    # Twenty GPU processes cover the thresholds once, both LLVM modes, and
+    # local execution without multiplying every case in the split/fused suite.
+    print("Checking HART callable-local group storage", flush=True)
+    check_case(group_arguments(9, "10", "-O0"), 7, 5,
+               group_reference(9, 7, 5), thresholds=True)
+    check_case(group_arguments(9, "3"), 7, 5,
+               group_reference(9, 7, 5), scratch=False)
+    check_case(topology_arguments("3"), 9, 9, topology_reference(9, 9))
+    noise = material_noise_signal("3")
+    check_case(material_arguments("3", report=1), 17, 9,
+               material_reference(levels, noise, 0.75)[1],
+               local_budget=2147483647)
+    check_case(
+        topology_arguments("3", mode=0, reuse_all=0, textures=True),
+        9, 9, topology_reference(9, 9, mode=0, reuse_all=0, textures=True),
+    )
+
+    # This graph can have a different optimized layout from the lazy success
+    # case, so derive its exact threshold from its own failing split launch.
+    shader_args = topology_arguments("3", mode=0, reuse_all=1, textures=True)
+    error = "nonfinite coordinates/gradients"
+    _, layout = render(shader_args, 9, 9, error=error)
+    for budget in (0, layout[0]):
+        _, actual_layout = render(shader_args, 9, 9, "fused", budget, error=error)
+        assert actual_layout == layout, (layout, actual_layout)
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1686,6 +1780,18 @@ try:
     run(["--hart-fused", "-v", "hart_first"], "require --hart")
     run(["--hart", "--hart-fused", "-v", "--hart-module", "other.bc"],
         "generated")
+    run(["--hart-local-groupdata", "0", "-v", "hart_first"], "require --hart")
+    run(base + ["--hart-local-groupdata", "0", "-v"], "--hart-fused")
+    run(["--hart", "--hart-local-groupdata", "0", "-v",
+         "--hart-module", "other.bc"], "generated")
+    run(["--hart", "--hart-fused", "--hart-local-groupdata", "0", "-v",
+         "--hart-module", "other.bc"], "generated")
+    for budget in ("-1", "1x", "2147483648", "+1", "1.0", "0x1", "", " 1", "1 "):
+        for fused in ([], ["--hart-fused"]):
+            run(["--hart", "-v"] + fused
+                + ["--hart-local-groupdata", budget, "hart_first"],
+                "Invalid --hart-local-groupdata" if fused else
+                "requires --hart-fused")
     run(base + ["-o", "other", "null"], "one RGB output")
     run(base + ["-o", "Cout", "null", "-o", "Cout", "null"], "one RGB output")
     run(base + ["-g", "0", "1"], "must be positive")
@@ -1946,11 +2052,15 @@ try:
     if args.fused:
         check_fused_suite()
 
+    if args.fused_local:
+        check_fused_local_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.matrices
                          or args.spaces or args.geometry or args.groups
-                         or args.topology or args.materials or args.fused):
+                         or args.topology or args.materials or args.fused
+                         or args.fused_local):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -2042,7 +2152,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.fused:
+if args.fused_local:
+    suite = "callable-local group storage"
+elif args.fused:
     suite = "split/fused callable"
 elif args.noise:
     suite = "noise"
