@@ -1,0 +1,15 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_filterwidth_vector_consumer(vector value = 0, int derivative = 0,
+                                       output color Cout = 0)
+{
+    vector w = filterwidth(value);
+    if (derivative == 1)
+        Cout = color(Dx(w));
+    else if (derivative == 2)
+        Cout = color(Dy(w));
+    else
+        Cout = color(w);
+}

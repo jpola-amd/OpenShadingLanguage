@@ -393,6 +393,23 @@ can read `Dx(value)` and `Dy(value)`; OSL propagates derivative requirements
 upstream and copies value/dx/dy through group storage. Constant and uniform
 parameter derivatives are zero. No new callable or launch ABI is needed.
 
+`filterwidth` computes `sqrt(Dx(x)*Dx(x) + Dy(x)*Dy(x))` for a float input,
+or the same expression component-wise for a color, point, vector, or normal.
+It uses propagated derivatives, including those copied across layer
+connections. Constants and inputs without derivatives have zero width.
+`Dx` and `Dy` of the width itself are zero: OSL does not compute the
+second-order derivatives needed to differentiate it. This exposes a
+footprint for shader filtering; it does not automatically antialias a shader.
+For example:
+
+```osl
+float w = filterwidth(sin(u * v));
+Cout = color(w, Dx(w), Dy(w));
+```
+
+Here the red channel is `abs(cos(u*v))*sqrt((v*dudx)^2+(u*dvdy)^2)`;
+green and blue are zero.
+
 Read-only surface geometry is also available: `P`, `N`, `Ng`, `dPdu`, and
 `dPdv`, in addition to `u` and `v`. The test grid is still a synthetic flat
 patch, not a ray-traced scene. It supplies `P=(u,v,1)`, `N=Ng=(0,0,1)`,
@@ -412,7 +429,7 @@ Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color/point/vector/normal construction,
 `sin`, `dot`, `length`, `normalize`, component
 reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
-`for`/`while`, `Dx`, and `Dy`
+`for`/`while`, `Dx`, `Dy`, and `filterwidth`
 (plus internal structural operations). Only reads of the listed shader
 globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
@@ -431,7 +448,7 @@ testshade, JPEG/GIF/PNG images are converted to sRGB.
 Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
-`Dz`, `filterwidth`, `break`, `continue`, `do`/`while`, textures, closures,
+`Dz`, noise, `break`, `continue`, `do`/`while`, textures, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
 coordinate transforms,
@@ -481,8 +498,8 @@ arithmetic and color derivatives and zero derivatives for uniform parameters
 and constant-valued connections. It uses the same numerical/image,
 cold/cache-enabled and repeated-launch checks. The `hart-codegen-*` tests
 verify linked scalar/color derivative-aware sine calls and derivative-sized
-connected storage at level 10, and reject the still-unsupported `Dz` and
-`filterwidth` operations.
+connected storage at level 10, and reject the still-unsupported `Dz`
+operation.
 
 `hart-surface-runtime` checks all supported geometry globals, position
 derivatives, and value-only and derivative-aware vector math. A connected
@@ -497,11 +514,22 @@ repeated-launch checks. The compiler tests verify the linked shadeop variants,
 vector value/dx/dy storage and unchanged callable ABI on every configured
 architecture.
 
+`hart-filterwidth-runtime` checks scalar and component-wise triple footprints
+against analytical values and CPU execution. It covers standalone scalar
+shaders and scalar/vector connections on `1x1`, `3x2`, and `37x5` grids,
+all four triple types, negative input derivatives, zero widths for uniform
+parameters and constant-valued connections, and zero derivatives of the
+width result. Tests run at LLVM levels 10 and 3, retaining the existing
+numerical tolerances, image comparisons, cache modes and repeated launches.
+Compiler checks verify the linked scalar/triple shadeops and connected
+derivative storage on every configured architecture. Noise, textures and
+unlisted globals remain rejected.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(codegen-.*|surface-runtime)$" --output-on-failure
+  -R "^hart-(codegen-.*|filterwidth-runtime)$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

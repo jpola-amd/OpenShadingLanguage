@@ -320,8 +320,11 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         const auto* shadeop = module.getFunction(std::string(name));
         OIIO_CHECK_ASSERT(shadeop && !shadeop->isDeclaration()
                           && !shadeop->use_empty());
-        if (connected
-            && (name == "osl_sin_dfdf" || name == "osl_normalize_dvdv")) {
+        const bool scalar_derivs = name == "osl_sin_dfdf"
+                                   || name == "osl_filterwidth_fdf";
+        const bool vector_derivs = name == "osl_normalize_dvdv"
+                                   || name == "osl_filterwidth_vdv";
+        if (connected && (scalar_derivs || vector_derivs)) {
             const auto* storage = llvm::StructType::getTypeByName(context,
                                                                   "Groupdata");
             OIIO_CHECK_ASSERT(storage);
@@ -339,9 +342,8 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                               && triple->getElementType(1)->isFloatTy()
                               && triple->getElementType(2)->isFloatTy();
                         dual_storage |= array->getNumElements() == 3
-                                        && (name == "osl_sin_dfdf"
-                                                ? element->isFloatTy()
-                                                : vector);
+                                        && (scalar_derivs ? element->isFloatTy()
+                                                          : vector);
                     }
             OIIO_CHECK_ASSERT(dual_storage);
         }
@@ -440,6 +442,22 @@ main(int argc, char* argv[])
         "if(enable) N=normal(u,v,1); Cout=color(u,v,0); }",
         "shader hart_surface_write_position(output color Cout=0) { P[0]=u; Cout=color(P); }",
         "shader hart_surface_transform(output color Cout=0) { Cout=color(transform(\"object\",P)); }",
+        "shader hart_filterwidth_scalar(output color Cout=0) { "
+        "float w=filterwidth(sin(u*v)); Cout=color(w,Dx(w),Dy(w)); }",
+        "shader hart_filterwidth_consumer(float value=42, output color Cout=0) { "
+        "float w=filterwidth(value); Cout=color(w,Dx(w),Dy(w)); }",
+        "shader hart_filterwidth_triple(int kind=0, output color Cout=0) { "
+        "vector q=vector(P[0]+P[1],P[0]-P[1],P[0]*P[1]); "
+        "if(kind==0) Cout=color(filterwidth(q)); "
+        "else if(kind==1) Cout=filterwidth(color(q)); "
+        "else if(kind==2) Cout=color(filterwidth(point(q))); "
+        "else if(kind==3) Cout=color(filterwidth(normal(q))); "
+        "else if(kind==4) Cout=color(filterwidth(N)); else Cout=color(filterwidth(P)); }",
+        "shader hart_filterwidth_vector_consumer(vector value=0, int derivative=0, output color Cout=0) { "
+        "vector w=filterwidth(value); if(derivative==1) Cout=color(Dx(w)); "
+        "else if(derivative==2) Cout=color(Dy(w)); else Cout=color(w); }",
+        "shader hart_filterwidth_noise(output color Cout=0) { Cout=color(filterwidth(noise(P))); }",
+        "shader hart_filterwidth_incident(output color Cout=0) { Cout=color(filterwidth(I)); }",
     };
     std::vector<std::string> oso(std::size(sources));
     for (size_t i = 0; i < oso.size(); ++i) {
@@ -449,7 +467,8 @@ main(int argc, char* argv[])
     }
     // OSL level 10 skips passes; even O0 inlines alwaysinline HIP shadeops.
     for (int optimize : { 10, 3 }) {
-        for (int i : { 0, 1, 4, 12, 13, 16, 17, 23, 25, 27, 30, 31, 32, 34 }) {
+        for (int i : { 0, 1, 4, 12, 13, 16, 17, 23, 25, 27, 29, 30, 31, 32, 34,
+                       39, 40, 41, 42 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -469,6 +488,16 @@ main(int argc, char* argv[])
                 check_module(ss, *group, arch,
                              { "osl_dot_fvv", "osl_length_fv",
                                "osl_normalize_vv" },
+                             optimize);
+            else if (i == 29)
+                check_module(ss, *group, arch, { "osl_filterwidth_fdf" },
+                             optimize);
+            else if (i == 39)
+                check_module(ss, *group, arch,
+                             { "osl_sin_dfdf", "osl_filterwidth_fdf" },
+                             optimize);
+            else if (i == 41)
+                check_module(ss, *group, arch, { "osl_filterwidth_vdv" },
                              optimize);
             else
                 check_module(ss, *group, arch, { sine_function }, optimize,
@@ -528,6 +557,23 @@ main(int argc, char* argv[])
                            "osl_dot_dfdvdv", "osl_dot_dfdvv", "osl_dot_dfvdv" },
                          optimize, true);
         }
+        for (bool scalar : { true, false }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            ss.attribute("llvm_optimize", optimize);
+            auto group = make_connected_group(ss, oso[scalar ? 24 : 33],
+                                              oso[scalar ? 40 : 42]);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "{}\n", errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch,
+                         { scalar ? "osl_filterwidth_fdf"
+                                  : "osl_filterwidth_vdv" },
+                         optimize, true);
+        }
     }
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
     check_rejection(arch, oso[0], "one or two shader layers", 3);
@@ -543,7 +589,8 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[21], "unsupported operation 'printf'");
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
     check_rejection(arch, oso[28], "unsupported operation 'Dz'");
-    check_rejection(arch, oso[29], "unsupported operation 'filterwidth'");
+    check_rejection(arch, oso[43], "unsupported operation 'noise'");
+    check_rejection(arch, oso[44], "unsupported shader global 'I'");
     check_rejection(arch, oso[35], "unsupported shader global 'I'");
     check_rejection(arch, oso[36], "writing shader global 'N'");
     check_rejection(arch, oso[37], "writing shader global 'P'");

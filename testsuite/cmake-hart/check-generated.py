@@ -24,9 +24,11 @@ suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
                     help="Run surface globals and vector math runtime cases")
+suites.add_argument("--filterwidth", action="store_true",
+                    help="Run scalar and triple filterwidth runtime cases")
 args = parser.parse_args()
-if (args.loops or args.derivatives or args.surface) and not args.gpu:
-    parser.error("--loops, --derivatives and --surface require --gpu")
+if (args.loops or args.derivatives or args.surface or args.filterwidth) and not args.gpu:
+    parser.error("--loops, --derivatives, --surface and --filterwidth require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -157,6 +159,12 @@ def derivative_result(u, v, width, height, count=1):
     gradient = sum(math.cos(u * v + i) for i in range(count))
     return (value, gradient * v / max(1, width - 1),
             gradient * u / max(1, height - 1))
+
+
+def filterwidth_scalar_result(u, v, width, height, scale=1):
+    gradient = abs(scale * math.cos(scale * u * v))
+    footprint = math.hypot(v / max(1, width - 1), u / max(1, height - 1))
+    return (gradient * footprint, 0, 0)
 
 
 def surface_globals(u, v, width, height, field=-1):
@@ -373,7 +381,64 @@ try:
                 compare(gpu, expected, 2e-6)
                 compare(gpu, cpu, 6e-6)
 
-    if args.gpu and not (args.loops or args.derivatives or args.surface):
+    if args.filterwidth:
+        scalar = connected_group("hart_filterwidth_consumer",
+                                 producer="hart_deriv_producer")
+        vector = connected_group("hart_filterwidth_vector_consumer",
+                                 producer="hart_surface_producer")
+        for optimize in ("10", "3"):
+            flags = ["--llvm_opt", optimize]
+            for width, height in ((1, 1), (3, 2), (37, 5)):
+                expected = reference(
+                    width, height,
+                    lambda u, v: filterwidth_scalar_result(u, v, width, height))
+                for shader_args in (["hart_filterwidth_scalar"], scalar):
+                    check_render(flags + shader_args, width, height, expected)
+                check_render(flags + vector, width, height, reference(
+                    width, height,
+                    lambda u, v: (1 / max(1, width - 1),
+                                  2 / max(1, height - 1),
+                                  math.hypot(v / max(1, width - 1),
+                                             u / max(1, height - 1)))))
+            cases = [
+                (["-O0", "--param", "kind", str(kind), "hart_filterwidth_triple"],
+                 lambda u, v, kind=kind: (
+                     (0, 0, 0) if kind == 4 else
+                     (0.5, 1, 0) if kind == 5 else
+                     (math.hypot(0.5, 1), math.hypot(0.5, 1), math.hypot(v * 0.5, u))))
+                for kind in range(6)
+            ]
+            cases.append((
+                ["-O0", "--param:type=float", "scale", "-3"] + scalar,
+                lambda u, v: filterwidth_scalar_result(u, v, 3, 2, scale=-3),
+            ))
+            for derivative in (1, 2):
+                cases.append((
+                    ["-O0"] + connected_group(
+                        "hart_filterwidth_vector_consumer",
+                        ["--param", "derivative", str(derivative)],
+                        producer="hart_surface_producer"),
+                    lambda u, v: (0, 0, 0),
+                ))
+            for specialize in ("-O0", "-O2"):
+                for shader_args in (
+                    ["--param:type=float", "value", "3", "hart_filterwidth_consumer"],
+                    ["--param:type=vector", "value", "1,2,3",
+                     "hart_filterwidth_vector_consumer"],
+                    ["--param:type=float", "scale", "0"] + scalar,
+                ):
+                    cases.append(([specialize] + shader_args, lambda u, v: (0, 0, 0)))
+            for shader_args, evaluate in cases:
+                text_flags = flags + ["-g", "3", "2", "--print"]
+                expected = reference(3, 2, evaluate)
+                cpu = pixels(run(text_flags + shader_args), 3, 2)
+                gpu = pixels(run(["--hart", "--hart-no-cache", "--warmup",
+                                  "--iters", "3"] + text_flags + shader_args), 3, 2)
+                compare(cpu, expected, 6e-6)
+                compare(gpu, expected, 2e-6)
+                compare(gpu, cpu, 6e-6)
+
+    if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -462,8 +527,11 @@ try:
 finally:
     shutil.rmtree(root)
 
-suite = ("surface" if args.surface else
-         ("derivative" if args.derivatives else ("loop" if args.loops else "CLI")))
+if args.filterwidth:
+    suite = "filterwidth"
+else:
+    suite = ("surface" if args.surface else
+             ("derivative" if args.derivatives else ("loop" if args.loops else "CLI")))
 print("Generated HART " + suite + " checks passed"
       + ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
          if args.gpu else ""))
