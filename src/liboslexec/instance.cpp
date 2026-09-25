@@ -451,24 +451,36 @@ ShaderInstance::validate_hart() const
         }
     }
     static const ustring supported[] = {
-        ustring("nop"),         ustring("end"),          ustring("useparam"),
-        ustring("assign"),      ustring("add"),          ustring("sub"),
-        ustring("mul"),         ustring("div"),          ustring("neg"),
-        ustring("color"),       ustring("sin"),          ustring("compref"),
-        ustring("compassign"),  ustring("if"),           ustring("lt"),
-        ustring("le"),          ustring("eq"),           ustring("ge"),
-        ustring("gt"),          ustring("neq"),          ustring("for"),
-        ustring("while"),       ustring("Dx"),           ustring("Dy"),
-        ustring("point"),       ustring("vector"),       ustring("normal"),
-        ustring("dot"),         ustring("length"),       ustring("normalize"),
-        ustring("filterwidth"), ustring("noise"),        ustring("snoise"),
-        ustring("abs"),         ustring("min"),          ustring("max"),
-        ustring("clamp"),       ustring("mix"),          ustring("step"),
-        ustring("smoothstep"),  ustring("floor"),        ustring("ceil"),
-        ustring("fmod"),        ustring("cos"),          ustring("sqrt"),
-        ustring("pow"),         ustring("functioncall"), ustring("pnoise"),
-        ustring("psnoise"),     ustring("cellnoise"),    ustring("hashnoise"),
-        ustring("texture"),
+        ustring("nop"),          ustring("end"),
+        ustring("useparam"),     ustring("assign"),
+        ustring("add"),          ustring("sub"),
+        ustring("mul"),          ustring("div"),
+        ustring("neg"),          ustring("color"),
+        ustring("sin"),          ustring("compref"),
+        ustring("compassign"),   ustring("if"),
+        ustring("lt"),           ustring("le"),
+        ustring("eq"),           ustring("ge"),
+        ustring("gt"),           ustring("neq"),
+        ustring("for"),          ustring("while"),
+        ustring("Dx"),           ustring("Dy"),
+        ustring("point"),        ustring("vector"),
+        ustring("normal"),       ustring("dot"),
+        ustring("length"),       ustring("normalize"),
+        ustring("filterwidth"),  ustring("noise"),
+        ustring("snoise"),       ustring("abs"),
+        ustring("min"),          ustring("max"),
+        ustring("clamp"),        ustring("mix"),
+        ustring("step"),         ustring("smoothstep"),
+        ustring("floor"),        ustring("ceil"),
+        ustring("fmod"),         ustring("cos"),
+        ustring("sqrt"),         ustring("pow"),
+        ustring("functioncall"), ustring("pnoise"),
+        ustring("psnoise"),      ustring("cellnoise"),
+        ustring("hashnoise"),    ustring("texture"),
+        ustring("matrix"),       ustring("mxcompref"),
+        ustring("mxcompassign"), ustring("transpose"),
+        ustring("determinant"),  ustring("transform"),
+        ustring("transformv"),   ustring("transformn"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
@@ -485,6 +497,22 @@ ShaderInstance::validate_hart() const
         }
         if (op.opname() == ustring("texture") && !validate_texture(op))
             return false;
+        if (op.opname() == ustring("mxcompref")
+            || op.opname() == ustring("mxcompassign")) {
+            const int first = op.opname() == ustring("mxcompref") ? 2 : 1;
+            for (int a = first; a < first + 2; ++a) {
+                const Symbol& index
+                    = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                if (!index.is_constant() || !index.typespec().is_int()
+                    || index.get_int() < 0 || index.get_int() >= 4) {
+                    shadingsys().errorfmt(
+                        "HART: matrix indices must be literal integers in [0,3] "
+                        "in shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+            }
+        }
         for (int a = 0; a < op.nargs(); ++a) {
             const Symbol& sym
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];

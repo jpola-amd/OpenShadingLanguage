@@ -36,10 +36,12 @@ suites.add_argument("--procedural", action="store_true",
                     help="Run connected procedural material runtime cases")
 suites.add_argument("--textures", action="store_true",
                     help="Run explicit HART texture sampler runtime cases")
+suites.add_argument("--matrices", action="store_true",
+                    help="Run numeric matrix and matrix-transform runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
-        or args.procedural or args.textures) and not args.gpu:
+        or args.procedural or args.textures or args.matrices) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -874,7 +876,7 @@ def check_texture_cpu(shader_args, expected, image, report):
 
 
 def check_texture_render(shader_args, width, height, expected, repeat=False,
-                         cache_hit=False):
+                         cache_hit=False, compare_device=compare):
     image = root / "texture-gpu.pfm"
     if image.exists():
         image.unlink()
@@ -887,7 +889,7 @@ def check_texture_render(shader_args, width, height, expected, repeat=False,
     if cache_hit:
         assert "cache hit for key" in output, output
     actual = image_pixels(image, width, height)
-    compare(actual, expected, 2e-6)
+    compare_device(actual, expected)
     return actual
 
 
@@ -983,6 +985,184 @@ def check_texture_suite():
         shader_args = ([name] if case != 5 else
                        ["--shader", name, "unused", "--shader", "hart_first", "surface"])
         run(["--hart", "-v"] + shader_args, error)
+
+
+def matrix_identity(scale=1):
+    return [[scale if i == j else 0 for j in range(4)] for i in range(4)]
+
+
+def matrix_product(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(4))
+             for j in range(4)] for i in range(4)]
+
+
+def matrix_inverse(matrix):
+    rows = [list(row) + identity
+            for row, identity in zip(matrix, matrix_identity())]
+    for col in range(4):
+        pivot = max(range(col, 4), key=lambda i: abs(rows[i][col]))
+        if rows[pivot][col] == 0:
+            # Imath's non-throwing singular inverse returns identity.
+            return matrix_identity()
+        rows[col], rows[pivot] = rows[pivot], rows[col]
+        factor = rows[col][col]
+        rows[col] = [value / factor for value in rows[col]]
+        for i in range(4):
+            if i != col:
+                factor = rows[i][col]
+                rows[i] = [a - factor * b for a, b in zip(rows[i], rows[col])]
+    return [row[4:] for row in rows]
+
+
+def matrix_determinant(matrix):
+    if len(matrix) == 1:
+        return matrix[0][0]
+    return sum((-1)**j * matrix[0][j] * matrix_determinant(
+        [row[:j] + row[j + 1:] for row in matrix[1:]]) for j in range(len(matrix)))
+
+
+def matrix_case(operation, u, v, specialize):
+    scale = matrix_identity()
+    scale[0][0], scale[1][1], scale[2][2] = 2, 0.5, 4
+    translation = matrix_identity()
+    translation[3][:3] = [0.5, -0.25, 0.75]
+    shear = matrix_identity()
+    shear[1][0], shear[2][1] = 0.5, 0.25
+    if operation == 0:
+        return matrix_identity()
+    if operation == 1:
+        return matrix_identity(1 + u)
+    if operation == 2:
+        return translation
+    if operation in (3, 8, 10):
+        return scale
+    if operation == 4:
+        return shear
+    if operation == 5:
+        return matrix_product(scale, translation)
+    if operation == 6:
+        return matrix_product(translation, scale)
+    if operation == 7:
+        return matrix_inverse(matrix_product(scale, translation))
+    if operation == 9:
+        return [list(row) for row in zip(*shear)]
+    if operation == 11:
+        result = matrix_identity()
+        result[0][0], result[1][1] = 1 + u, 2 + v
+        result[0][1], result[3][0] = 0.25, u - v
+        return result
+    if operation in (12, 13):
+        result = matrix_identity()
+        result[0][3], result[1][3], result[3][3] = (
+            (0.5, 0.25, 1) if operation == 12 else (1, 0, 0))
+        return result
+    if operation == 14:
+        return matrix_identity(0)
+    if operation == 15:
+        return matrix_identity()
+    assert operation == 16
+    # Preserve CPU behavior, including OSL O2's constant-zero division fold.
+    if specialize == "-O2":
+        return matrix_identity(0)
+    return [[math.inf if i == j else math.nan for j in range(4)] for i in range(4)]
+
+
+def matrix_reference(report=0, constant_input=0, specialize="-O2", supplied=None):
+    result = []
+    for row in range(9):
+        v, kind = row / 8, row // 3
+        for col in range(65):
+            u = col / 64
+            operation, probe = divmod(col, 4)
+            matrix = (supplied if supplied is not None else
+                      matrix_case(operation, u, v, specialize))
+            if report == 2:
+                value = (matrix_determinant(matrix) if kind == 0 else
+                         matrix[3][0] if kind == 1 else matrix[1][1])
+                result.extend((value, 0, 0))
+                continue
+            x, y = 16 * u - operation - 0.5, 2 * v - 1
+            q = [x, y, 1 + 0.5 * x * y]
+            dx, dy = [0.25, 0, 0.125 * y], [0, 0.25, 0.125 * x]
+            if constant_input:
+                q, dx, dy = [0.25, -0.5, 1], [0, 0, 0], [0, 0, 0]
+            if operation == 16:
+                values = [matrix[0][0], matrix[0][1], matrix[3][3]]
+                derivatives = [[0, 0, 0], [0, 0, 0]]
+            else:
+                if kind == 2:
+                    matrix = [list(row) for row in zip(*matrix_inverse(matrix))]
+                # OSL uses row vectors. Matrix elements never contribute
+                # derivatives, even when their values vary across the grid.
+                values = [sum(q[i] * matrix[i][j] for i in range(3))
+                          + (matrix[3][j] if kind == 0 else 0) for j in range(3)]
+                derivatives = [[sum(d[i] * matrix[i][j] for i in range(3))
+                                for j in range(3)] for d in (dx, dy)]
+                if kind == 0:
+                    w = sum(q[i] * matrix[i][3] for i in range(3)) + matrix[3][3]
+                    if w == 0:
+                        values, derivatives = [0, 0, 0], [[0, 0, 0], [0, 0, 0]]
+                    else:
+                        for axis, d in enumerate((dx, dy)):
+                            dw = sum(d[i] * matrix[i][3] for i in range(3))
+                            derivatives[axis] = [
+                                (gradient * w - value * dw) / (w * w)
+                                for gradient, value in zip(derivatives[axis], values)]
+                        values = [value / w for value in values]
+            component = probe % 3
+            result.extend((values[component], derivatives[0][component],
+                           derivatives[1][component]) if report else values)
+    return result
+
+
+def compare_matrices(actual, expected):
+    assert len(actual) == len(expected)
+    finite = []
+    for i, (a, b) in enumerate(zip(actual, expected)):
+        if math.isnan(b):
+            assert math.isnan(a), (i, a, b)
+        elif math.isinf(b):
+            assert a == b, (i, a, b)
+        else:
+            finite.append(i)
+    compare([actual[i] for i in finite], [expected[i] for i in finite])
+
+
+def matrix_arguments(optimize, report=0, constant_input=0, specialize="-O2",
+                     supplied=None):
+    parameters = ["--param", "report", str(report),
+                  "--param", "constant_input", str(constant_input)]
+    if supplied is None:
+        shader_args = connected_group("hart_matrix_consumer", parameters,
+                                      producer="hart_matrix_producer")
+    else:
+        values = ",".join(str(value) for row in supplied for value in row)
+        shader_args = parameters + ["--param:type=matrix", "value", values,
+                                    "hart_matrix_consumer"]
+    return ["--llvm_opt", optimize, specialize] + shader_args
+
+
+def check_matrix_suite():
+    supplied = [[1.5, 0.25, 0, 0], [0, 0.5, 0, 0],
+                [0, 0, 2, 0], [0.25, -0.5, 0.75, 1]]
+    cases = [dict(report=report) for report in (0, 1, 2)]
+    cases += [dict(report=report, specialize="-O0") for report in (0, 1)]
+    cases += [dict(report=1, constant_input=1), dict(report=1, supplied=supplied)]
+    for optimize in ("10", "3"):
+        print("Checking HART numeric matrices at LLVM level " + optimize,
+              flush=True)
+        for options in cases:
+            shader_args = matrix_arguments(optimize, **options)
+            expected = matrix_reference(**options)
+            cpu = noise_cpu_image(shader_args, 65, 9)
+            compare_matrices(cpu, expected)
+            actual = check_texture_render(shader_args, 65, 9, expected,
+                                          compare_device=compare_matrices)
+            compare_matrices(actual, cpu)
+            if options.get("constant_input") or options["report"] == 2:
+                for image in (cpu, actual):
+                    compare(image[1::3], [0] * (65 * 9), 0)
+                    compare(image[2::3], [0] * (65 * 9), 0)
 
 
 try:
@@ -1243,9 +1423,12 @@ try:
     if args.textures:
         check_texture_suite()
 
+    if args.matrices:
+        check_matrix_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
-                         or args.procedural or args.textures):
+                         or args.procedural or args.textures or args.matrices):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

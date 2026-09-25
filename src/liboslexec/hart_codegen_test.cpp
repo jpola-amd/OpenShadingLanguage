@@ -651,6 +651,99 @@ check_noise_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_matrix_modules(string_view arch, string_view stdosl)
+{
+    for (string_view type : { "point", "vector", "normal" }) {
+        const auto body = fmtformat(
+            "matrix m=matrix(1+u,0.25,0,0, 0,2+v,0,0, 0,0,0.5,0, 1,2,3,1); "
+            "m[3][0]=u; matrix q=transpose(m); matrix n=(m*q)/q; "
+            "value=transform(n,{0}(u,v,1))+{0}(determinant(m)/64);",
+            type);
+        const std::string sources[] = {
+            fmtformat("shader hart_matrix_test(output color Cout=0) {{ "
+                      "{} value=0; {} Cout=color(value); }}",
+                      type, body),
+            fmtformat("shader hart_matrix_producer(output {} value=0) {{ {} }}",
+                      type, body),
+            fmtformat(
+                "shader hart_matrix_consumer({0} value=0, output color Cout=0) {{ "
+                "Cout=color(value+Dx(value)+Dy(value)); }}",
+                type),
+        };
+        std::string bytecode[3];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+                return false;
+        }
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 })
+                for (bool connected : { false, true }) {
+                    HartServices renderer;
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("optimize", osl_optimize);
+                    ss.attribute("llvm_optimize", optimize);
+                    auto group = connected
+                                     ? make_connected_group(ss, bytecode[1],
+                                                            bytecode[2])
+                                     : make_group(ss, bytecode[0]);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "Matrix {}: {}\n", type,
+                              errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    const auto transform = fmtformat("osl_transform{}_{}",
+                                                     type == "point"    ? ""
+                                                     : type == "vector" ? "v"
+                                                                        : "n",
+                                                     connected ? "dvmdv"
+                                                               : "vmv");
+                    check_module(ss, *group, arch,
+                                 { transform, "osl_mul_mmm", "osl_div_mmm",
+                                   "osl_transpose_mm", "osl_determinant_fm" },
+                                 optimize, connected);
+                }
+    }
+    const char* sources[] = {
+        "shader hart_matrix_producer(output matrix value=1) { "
+        "value=matrix(1+u,0,0,0, 0,2+v,0,0, 0,0,0.5,0, 1,2,3,1); }",
+        "shader hart_matrix_consumer(matrix value=1, output color Cout=0) { "
+        "point p=transform(value,P); Cout=color(p+Dx(p)+Dy(p)+value[3][1]); }",
+    };
+    std::string bytecode[2];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+            return false;
+    }
+    for (int optimize : { 10, 3 }) {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("llvm_optimize", optimize);
+        auto group = make_connected_group(ss, bytecode[0], bytecode[1]);
+        ss.optimize_group(group.get(), nullptr);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        check_module(ss, *group, arch, { "osl_transform_dvmdv" }, optimize,
+                     true);
+    }
+    OSLCompiler compiler;
+    std::string rejected;
+    if (!compiler.compile_buffer(
+            "shader hart_matrix_index(output color Cout=0) { matrix m=matrix(1); "
+            "if (u<0) m[int(3*u)][1]=v; Cout=color(m[0][0]); }",
+            rejected, { }, stdosl))
+        return false;
+    check_rejection(arch, rejected, "matrix indices must be literal");
+    return true;
+}
+
+
+
+bool
 check_texture_modules(string_view arch, string_view stdosl)
 {
     for (string_view type : { "float", "color" }) {
@@ -1036,7 +1129,7 @@ main(int argc, char* argv[])
         check_rejected_group(ss, *group, errors, "instrumentation");
     }
     // The two-argument transform is a stdosl wrapper.
-    check_rejection(arch, oso[38], "unsupported operation 'transform'");
+    check_rejection(arch, oso[38], "unsupported type 'string'");
     for (string_view type : { "point", "vector", "normal" }) {
         for (string_view space : { "object", "common" }) {
             OSLCompiler compiler;
@@ -1079,6 +1172,7 @@ main(int argc, char* argv[])
     if (!check_math_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
+        || !check_matrix_modules(arch, argv[2])
         || !check_texture_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;

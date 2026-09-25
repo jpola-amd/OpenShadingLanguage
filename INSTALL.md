@@ -393,6 +393,26 @@ can read `Dx(value)` and `Dy(value)`; OSL propagates derivative requirements
 upstream and copies value/dx/dy through group storage. Constant and uniform
 parameter derivatives are zero. No new callable or launch ABI is needed.
 
+Explicit matrix transforms are supported for points, vectors and normals:
+
+```osl
+matrix M = matrix(2,0,0,0, 0,0.5,0,0, 0,0,1,0, 1,2,0,1);
+point p = transform(M, P);
+Cout = color(p);
+```
+
+Points include translation and homogeneous division; vectors ignore translation.
+Normals use the inverse transpose without automatic normalization. Matrix
+construction, multiplication/division, transpose, determinant, assignment,
+uniform matrix parameters and matrix connections are supported. Component
+reads/writes require literal row and column indices in `[0,3]`; runtime
+index/range-check callbacks are not enabled.
+Transforms propagate the input triple's derivatives using existing OSL
+shadeops. OSL does not track matrix-element derivatives, even when matrix
+values vary across the grid. Singular matrices and zero homogeneous
+denominators retain existing OSL behavior rather than introducing a new
+inverse or projection policy. Named spaces remain a separate capability.
+
 `filterwidth` computes `sqrt(Dx(x)*Dx(x) + Dy(x)*Dy(x))` for a float input,
 or the same expression component-wise for a color, point, vector, or normal.
 It uses propagated derivatives, including those copied across layer
@@ -574,7 +594,7 @@ options remain unsupported.
 `Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
-coordinate transforms,
+named coordinate transforms,
 general strings, arrays, interpolated or interactive parameters, other
 renderer-service callbacks, batched execution, instrumentation, more than two
 layers, explicit entry layers, multiple final outputs, and unlisted frontend
@@ -701,6 +721,11 @@ specified mip policy; CPU comparisons use compatible magnifying lookups.
 Three textures coexist in a cached group whose file contents change A-B-A,
 with confirmed cache hits and repeated launches. Rejections cover unsupported
 options in unused code, missing/UDIM resources, and nonfinite device inputs.
+
+`hart-matrix-runtime` checks explicit matrix transforms and arithmetic on the
+GPU, including derivative propagation, non-uniform scale, shear, composition,
+inverse/transpose, projective points, and matrix-valued layer connections.
+It compares analytical cases and CPU results at LLVM levels 10 and 3.
 
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
