@@ -66,7 +66,11 @@ osl_init_texture_options(OpaqueExecContextPtr oec, void* opt)
 }
 
 
-#define OSL_TEXTURE_SET_HOSTDEVICE /* just host */
+#if defined(__HIPCC__)
+#    define OSL_TEXTURE_SET_HOSTDEVICE OSL_HOSTDEVICE
+#else
+#    define OSL_TEXTURE_SET_HOSTDEVICE /* just host; CUDA supplies its own */
+#endif
 
 
 OSL_SHADEOP OSL_TEXTURE_SET_HOSTDEVICE void
@@ -302,7 +306,8 @@ osl_texture(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
 #endif
     // It's actually faster to ask for 4 channels (even if we need fewer)
     // and ensure that they're being put in aligned memory.
-    float4 result_simd, dresultds_simd, dresultdt_simd;
+    // GPU renderers may supply fewer channels; derivative math uses all four.
+    float4 result_simd(0.0f), dresultds_simd(0.0f), dresultdt_simd(0.0f);
     ustringhash em;
     ustringhash name = ustringhash_from(name_);
     bool ok = rs_texture(oec, name, (TextureSystem::TextureHandle*)handle,

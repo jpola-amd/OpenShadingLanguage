@@ -29,6 +29,7 @@
 #include "hartgeneratedparams.h"
 #include "hartgridparams.h"
 #include "hartgridrender.h"
+#include "harttexture.h"
 #include "simplerend.h"
 
 OSL_PRAGMA_WARNING_PUSH
@@ -193,6 +194,29 @@ read_module(HartModuleInput& input, ErrorHandler& err)
 
 
 
+class GeneratedRenderer final : public SimpleRenderer {
+public:
+    GeneratedRenderer() : m_textures(errhandler()) { }
+
+    int supports(string_view feature) const override
+    { return feature == "HART" || feature == "HARTTextures"; }
+
+    TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
+                                      const TextureOpt*) override
+    {
+        return reinterpret_cast<TextureHandle*>(
+            uintptr_t(m_textures.load(filename)));
+    }
+    bool good(TextureHandle* handle) override { return handle != nullptr; }
+
+    HartTextureStore& textures() { return m_textures; }
+
+private:
+    HartTextureStore m_textures;
+};
+
+
+
 class HartGridRenderer {
 public:
     explicit HartGridRenderer(ErrorHandler& err) : m_err(err) { }
@@ -343,7 +367,8 @@ public:
 
     bool render(int width, int height, int iterations, bool warmup,
                 span<float> pixels, size_t group_size = 0,
-                size_t group_alignment = 0, int raytype = 0)
+                size_t group_alignment = 0, int raytype = 0,
+                HartTextureStore* textures = nullptr)
     {
         const size_t bytes       = pixels.size() * sizeof(float);
         const size_t params_size = group_alignment
@@ -388,7 +413,8 @@ public:
                           stride,
                           scratch_bytes,
                           count,
-                          raytype };
+                          raytype,
+                          textures ? textures->device_state() : nullptr };
         }
         if (!hip_check(hipMemcpy(m_params,
                                  group_alignment
@@ -407,6 +433,8 @@ public:
             sbt.callablesRecordCount         = m_group_count - 1;
         }
         auto launch = [&]() {
+            if (textures && !textures->reset_errors())
+                return false;
             // Reset every launch so warmup cannot conceal unwritten output.
             if (!hip_check(hipMemsetAsync(m_output, 0xff, bytes, m_stream),
                            "hipMemsetAsync output"))
@@ -420,7 +448,8 @@ public:
             if (m_verbose)
                 m_err.infofmt("Waiting for HART grid completion");
             return hip_check(hipStreamSynchronize(m_stream),
-                             "hipStreamSynchronize");
+                             "hipStreamSynchronize")
+                   && (!textures || textures->check_errors());
         };
         if (warmup && !launch())
             return false;
@@ -645,11 +674,6 @@ testshade_hart_validate_generated(int argc, const char* argv[],
 std::unique_ptr<SimpleRenderer>
 testshade_hart_renderer(int device, std::string& arch)
 {
-    class GeneratedRenderer final : public SimpleRenderer {
-    public:
-        int supports(string_view feature) const override
-        { return feature == "HART"; }
-    };
     auto renderer = std::make_unique<GeneratedRenderer>();
     hipDeviceProp_t properties { };
     hipError_t status = hipSetDevice(device);
@@ -683,6 +707,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          string_view dataformat)
 {
     auto& err  = renderer.errhandler();
+    auto* generated = dynamic_cast<GeneratedRenderer*>(&renderer);
+    if (!generated) {
+        err.errorfmt("Generated HART mode requires its HART renderer");
+        return false;
+    }
     int layers = 0;
     if (!shadingsys.getattribute(&group, "num_layers", layers) || layers < 1
         || layers > 2) {
@@ -773,6 +802,9 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!validate_module(modules[0], err)
         || !validate_module(modules[1], err, callables))
         return false;
+    auto& textures = generated->textures();
+    if (!textures.prepare())
+        return false;
     HartGridRenderer runtime(err);
     if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
         || !runtime.load(modules, "__raygen__testshade_generated", callables))
@@ -780,7 +812,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
     const bool rendered = runtime.render(width, height, iterations, warmup,
                                          pixels, size_t(group_size),
-                                         size_t(group_alignment), raytype);
+                                         size_t(group_alignment), raytype,
+                                         &textures);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

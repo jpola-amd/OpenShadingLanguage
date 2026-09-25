@@ -8,6 +8,8 @@
 
 namespace testshade {
 
+struct HartTextureState;
+
 // Separate from the stable external HartGridParams ABI.
 struct HartGeneratedParams {
     float* output;
@@ -16,9 +18,10 @@ struct HartGeneratedParams {
     uint64_t scratch_bytes;
     uint64_t point_count;
     int raytype;
+    const HartTextureState* textures;
 };
 
-static_assert(sizeof(void*) == 8 && sizeof(HartGeneratedParams) == 48,
+static_assert(sizeof(void*) == 8 && sizeof(HartGeneratedParams) == 56,
               "The generated HART grid ABI requires 64-bit pointers");
 
 }  // namespace testshade

@@ -2817,12 +2817,19 @@ LLVMGEN(llvm_gen_texture)
                                    errormessage);
 
     RendererServices::TextureHandle* texture_handle = NULL;
-    if (Filename.is_constant() && rop.shadingsys().opt_texture_handle()) {
+    if (Filename.is_constant()
+        && (rop.use_hart() || rop.shadingsys().opt_texture_handle())) {
         texture_handle
             = rop.renderer()->get_texture_handle(Filename.get_string(),
                                                  rop.shadingcontext(), nullptr);
         // FIXME(colorspace): that nullptr should be replaced by a TextureOpt*
         // that has the colorspace set.
+    }
+    if (rop.use_hart()
+        && (!texture_handle || !rop.renderer()->good(texture_handle))) {
+        rop.shadingcontext()->errorfmt("HART: cannot prepare texture '{}'",
+                                       Filename.get_string());
+        return false;
     }
 
     // Now call the osl_texture function, passing the options and all the

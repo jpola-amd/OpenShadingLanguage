@@ -597,6 +597,7 @@ private:
     llvm::PointerType* m_llvm_type_setup_closure_func;
     int m_llvm_local_mem;   // Amount of memory we use for locals
     bool m_name_llvm_syms;  // Whether to name LLVM symbols
+    bool m_llvm_codegen_failed = false;
 
     // A mapping from symbol names to llvm::GlobalVariables
     std::map<std::string, llvm::GlobalVariable*> m_const_map;

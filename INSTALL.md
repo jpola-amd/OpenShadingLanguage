@@ -519,14 +519,66 @@ testshade, JPEG/GIF/PNG images are converted to sRGB.
 Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
-`Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, textures, closures,
+**2D image textures** use the normal OSL `texture()` lowering and a HART
+renderer sampler, without CPU execution:
+
+```osl
+color albedo = texture("albedo.tx", u, v,
+                       "interp", "linear", "wrap", "periodic");
+Cout = albedo;
+```
+
+The filename must be a nonempty literal. An explicit literal `"interp"` of
+`"closest"` or `"linear"` is required, as are explicit wrap modes for both
+axes: `"wrap"` sets both, or use `"swrap"` and `"twrap"`. Each supports
+`"black"`, `"clamp"`, or `"periodic"`. These are the only supported options.
+The default OIIO smart-bicubic/anisotropic filtering is **not** approximated
+silently: omitted filtering/wrap options and unsupported options are errors,
+including in branches or layers that optimization could remove.
+
+The renderer loads raw numeric pixels from the first subimage of a non-deep
+2D image with one to four channels. It performs no colorspace conversion or
+alpha premultiplication. Float lookups read the first channel; color lookups
+read the first three, zero-filling missing channels rather than replicating
+grayscale. Full shifted image windows work; cropped/data-window mismatches
+are rejected. Stored mip levels are preserved, and missing levels are
+box-resized to `max(1, floor(size/2))` down to 1x1.
+
+Filtering uses an isotropic footprint in base-level texels:
+
+```text
+rho = max(length((W*dsdx, H*dtdx)), length((W*dsdy, H*dtdy)))
+lod = clamp(log2(max(rho, 1)), 0, levels-1)
+```
+
+`closest` selects mip `floor(lod+0.5)` and texel
+`(floor(s*width), floor(t*height))`, with zero output derivatives.
+`linear` uses bilinear reconstruction centered at texel centers
+`(s*width-0.5, t*height-0.5)` and linearly blends adjacent mip levels.
+It computes analytical sample derivatives, holding the footprint/LOD fixed.
+The existing OSL shadeop combines those with lookup gradients to produce
+`Dx`/`Dy`; this is distinct from using gradients to select a mip.
+Both implicit coordinate gradients and the four explicit lookup-gradient
+arguments are supported, as are connected/procedural coordinates and sampled
+values. This policy is deliberately not OIIO's anisotropic minification.
+
+GPU texture objects are owned by the renderer. Generated bitcode contains
+stable resource IDs, while each launch binds the current device descriptor
+table, keeping resource addresses out of cached shader code. Required images
+that cannot be loaded fail group compilation; nonfinite coordinates/gradients and invalid runtime
+bindings fail the launch rather than returning a successful black image.
+Dynamic filenames, UDIMs, texture3d/environment, alpha outputs, first-channel
+selection, subimage selection, colorspace, width/blur, and error-message
+options remain unsupported.
+
+`Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
 coordinate transforms,
-general strings, arrays, interpolated or interactive parameters, renderer-service
-callbacks, batched execution, instrumentation, more than two layers, explicit
-entry layers, multiple final outputs, and unlisted frontend options are
-unsupported.
+general strings, arrays, interpolated or interactive parameters, other
+renderer-service callbacks, batched execution, instrumentation, more than two
+layers, explicit entry layers, multiple final outputs, and unlisted frontend
+options are unsupported.
 They fail explicitly; there is **no CPU fallback**.
 `--hart-entry` and `--hart-callable-module` belong only to external-module
 mode and cannot override generated callables.
@@ -593,8 +645,8 @@ parameters and constant-valued connections, and zero derivatives of the
 width result. Tests run at LLVM levels 10 and 3, retaining the existing
 numerical tolerances, image comparisons, cache modes and repeated launches.
 Compiler checks verify the linked scalar/triple shadeops and connected
-derivative storage on every configured architecture. Textures and unlisted
-globals remain rejected.
+derivative storage on every configured architecture. Unlisted globals remain
+rejected.
 
 `hart-noise-runtime` compares numeric Perlin values and derivatives with CPU
 execution at LLVM levels 10 and 3. A packed `12x3` matrix covers 1D-4D inputs,

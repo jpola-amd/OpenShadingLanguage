@@ -382,6 +382,62 @@ ShaderInstance::validate_hart() const
         }
         return true;
     };
+    auto validate_texture = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTTextures"))
+            return fail("unsupported operation 'texture' "
+                        "(renderer lacks HARTTextures)");
+        if (op.nargs() < 4 || !symbol(1).is_constant()
+            || !symbol(1).typespec().is_string()
+            || symbol(1).get_string().empty())
+            return fail("texture requires a literal filename");
+        const int first_option
+            = op.nargs() > 4 && symbol(4).typespec().is_float() ? 8 : 4;
+        if (op.nargs() < first_option || (op.nargs() - first_option) % 2)
+            return fail("invalid texture argument list");
+        bool interp = false, swrap = false, twrap = false;
+        for (int a = first_option; a < op.nargs(); a += 2) {
+            const Symbol& token = symbol(a);
+            const Symbol& value = symbol(a + 1);
+            if (!token.is_constant() || !token.typespec().is_string())
+                return fail("texture option names must be literal strings");
+            const ustring name = token.get_string();
+            if (name != ustring("interp") && name != ustring("wrap")
+                && name != ustring("swrap") && name != ustring("twrap"))
+                return fail(fmtformat("unsupported texture option '{}'", name));
+            if (!value.is_constant() || !value.typespec().is_string())
+                return fail("texture option values must be literal strings");
+            const ustring mode = value.get_string();
+            if (name == ustring("interp")) {
+                if (mode != ustring("closest") && mode != ustring("linear"))
+                    return fail(
+                        fmtformat("unsupported texture interpolation '{}'",
+                                  mode));
+                interp = true;
+            } else {
+                if (mode != ustring("black") && mode != ustring("clamp")
+                    && mode != ustring("periodic"))
+                    return fail(
+                        fmtformat("unsupported texture wrap mode '{}'", mode));
+                swrap |= name != ustring("twrap");
+                twrap |= name != ustring("swrap");
+            }
+        }
+        if (!interp)
+            return fail(
+                "texture requires explicit closest or linear interpolation");
+        if (!swrap || !twrap)
+            return fail("texture requires explicit wrap modes");
+        return true;
+    };
     for (int i = firstparam(); i < lastparam(); ++i) {
         const Symbol& sym = *mastersymbol(i);
         if (!validate_type(sym))
@@ -412,6 +468,7 @@ ShaderInstance::validate_hart() const
         ustring("fmod"),        ustring("cos"),          ustring("sqrt"),
         ustring("pow"),         ustring("functioncall"), ustring("pnoise"),
         ustring("psnoise"),     ustring("cellnoise"),    ustring("hashnoise"),
+        ustring("texture"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
@@ -426,9 +483,13 @@ ShaderInstance::validate_hart() const
                                   op.sourceline());
             return false;
         }
+        if (op.opname() == ustring("texture") && !validate_texture(op))
+            return false;
         for (int a = 0; a < op.nargs(); ++a) {
             const Symbol& sym
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+            if (op.opname() == ustring("texture") && sym.typespec().is_string())
+                continue;
             // Inlined function markers carry a name, not a device string.
             // The body remains subject to the same per-operation checks.
             if (op.opname() == ustring("functioncall") && op.nargs() == 1

@@ -48,8 +48,27 @@ namespace {
 
 class HartServices final : public RendererServices {
 public:
+    explicit HartServices(bool textures = false) : m_textures(textures) { }
     int supports(string_view feature) const override
-    { return feature == "HART"; }
+    { return feature == "HART" || (m_textures && feature == "HARTTextures"); }
+    TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
+                                      const TextureOpt*) override
+    {
+        ++texture_requests;
+        return m_textures && filename == "hart-test-texture.exr"
+                   ? reinterpret_cast<TextureHandle*>(uintptr_t(1))
+                   : nullptr;
+    }
+    bool good(TextureHandle* handle) override
+    {
+        return m_textures
+               && handle == reinterpret_cast<TextureHandle*>(uintptr_t(1));
+    }
+
+    int texture_requests = 0;
+
+private:
+    bool m_textures;
 };
 
 
@@ -370,9 +389,9 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
 
 void
 check_rejection(string_view arch, string_view oso, string_view expected,
-                int layers = 1, bool instrument = false)
+                int layers = 1, bool instrument = false, bool textures = false)
 {
-    HartServices renderer;
+    HartServices renderer(textures);
     Diagnostics errors;
     ShadingSystem ss(&renderer, nullptr, &errors);
     OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
@@ -626,6 +645,120 @@ check_noise_modules(string_view arch, string_view stdosl)
             }
         }
     }
+    return true;
+}
+
+
+
+bool
+check_texture_modules(string_view arch, string_view stdosl)
+{
+    for (string_view type : { "float", "color" }) {
+        const auto body = fmtformat(
+            "{0} a=texture(\"hart-test-texture.exr\",u,v,"
+            "\"interp\",\"linear\",\"wrap\",\"periodic\"); "
+            "{0} b=texture(\"hart-test-texture.exr\",u,v,0.25,0,0,0.5,"
+            "\"interp\",\"closest\",\"swrap\",\"clamp\",\"twrap\",\"black\"); "
+            "value=a+b; ",
+            type);
+        const std::string sources[] = {
+            fmtformat("shader hart_texture_test(output color Cout=0) {{ "
+                      "{} value=0; {} Cout=color(value); }}",
+                      type, body),
+            fmtformat("shader hart_texture_producer(output {} value=0) {{ {} }}",
+                      type, body),
+            fmtformat(
+                "shader hart_texture_consumer({} value=0, output color Cout=0) {{ "
+                "Cout=color(value+Dx(value)+Dy(value)); }}",
+                type),
+        };
+        std::string bytecode[3];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+                return false;
+        }
+        for (int optimize : { 10, 3 }) {
+            for (int handles : { 0, 1 }) {
+                for (bool connected : { false, true }) {
+                    HartServices renderer(true);
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("llvm_optimize", optimize);
+                    ss.attribute("opt_texture_handle", handles);
+                    auto group = connected
+                                     ? make_connected_group(ss, bytecode[1],
+                                                            bytecode[2])
+                                     : make_group(ss, bytecode[0]);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "Texture {}: {}\n", type,
+                              errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    OIIO_CHECK_ASSERT(renderer.texture_requests > 0);
+                    check_module(ss, *group, arch,
+                                 { "osl_texture", "osl_init_texture_options",
+                                   "osl_texture_set_interp_code",
+                                   "osl_texture_set_stwrap_code" },
+                                 optimize, connected);
+                }
+            }
+        }
+    }
+    const struct {
+        string_view expression;
+        string_view error;
+    } rejected[] = {
+        { "texture(\"x.exr\",u,v)", "requires explicit closest or linear" },
+        { "texture(\"x.exr\",u,v,\"interp\",\"linear\")",
+          "requires explicit wrap" },
+        { "texture(\"\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\")",
+          "requires a literal filename" },
+        { "texture(\"x.exr\",u,v,\"interp\",\"cubic\",\"wrap\",\"clamp\")",
+          "unsupported texture interpolation 'cubic'" },
+        { "texture(\"x.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"default\")",
+          "unsupported texture wrap mode 'default'" },
+        { "texture(\"x.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\",\"width\",1)",
+          "unsupported texture option 'width'" },
+        { "texture(\"x.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\",\"alpha\",alpha)",
+          "unsupported texture option 'alpha'" },
+        { "texture(\"missing.exr\",u,v,\"interp\",\"linear\",\"wrap\",\"clamp\")",
+          "cannot prepare texture 'missing.exr'" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source = fmtformat(
+            "shader hart_bad_texture(output color Cout=0) {{ float alpha=0; Cout=color({}); }}",
+            test.expression);
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, test.error, 1, false, true);
+    }
+    for (string_view control :
+         { "if (u > 0.5)", "for (int i=0; i<int(3*u); ++i)" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source = fmtformat(
+            "shader hart_missing_texture(output color Cout=0) {{ {} {{ "
+            "Cout=texture(\"missing.exr\",u,v,\"interp\",\"linear\","
+            "\"wrap\",\"clamp\"); }} }}",
+            control);
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, "cannot prepare texture 'missing.exr'",
+                        1, false, true);
+    }
+    OSLCompiler compiler;
+    std::string bytecode;
+    if (!compiler.compile_buffer(
+            "shader hart_dynamic_texture(string filename=\"x.exr\",output color Cout=0) { "
+            "Cout=texture(filename,u,v,\"interp\",\"linear\",\"wrap\",\"clamp\"); }",
+            bytecode, { }, stdosl))
+        return false;
+    check_rejection(arch, bytecode, "unsupported type 'string'", 1, false,
+                    true);
     return true;
 }
 
@@ -945,7 +1078,8 @@ main(int argc, char* argv[])
     }
     if (!check_math_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
-        || !check_procedural_modules(arch, argv[2]))
+        || !check_procedural_modules(arch, argv[2])
+        || !check_texture_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;
 }

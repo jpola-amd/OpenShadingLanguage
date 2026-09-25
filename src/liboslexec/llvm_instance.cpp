@@ -1286,8 +1286,12 @@ BackendLLVM::build_llvm_code(int beginop, int endop, llvm::BasicBlock* bb)
                 ll.debug_set_location(op.sourcefile(),
                                       std::max(op.sourceline(), 1));
             bool ok = (*opd->llvmgen)(*this, opnum);
-            if (!ok)
+            if (!ok) {
+                // The end marker's dummy generator also returns false.
+                if (op.opname() != op_end)
+                    m_llvm_codegen_failed = true;
                 return false;
+            }
             if (shadingsys().debug_nan() /* debug NaN/Inf */
                 && op.farthest_jump() < 0 /* Jumping ops don't need it */) {
                 llvm_generate_debugnan(op);
@@ -1298,6 +1302,7 @@ BackendLLVM::build_llvm_code(int beginop, int endop, llvm::BasicBlock* bb)
             shadingcontext()->errorfmt(
                 "LLVMOSL: Unsupported op {} in layer {}\n", op.opname(),
                 inst()->layername());
+            m_llvm_codegen_failed = true;
             return false;
         }
 
@@ -2424,6 +2429,12 @@ BackendLLVM::run()
 
 #if OSL_USE_HART
     if (use_hart()) {
+        // Recursive block generation may not propagate an opcode's failure.
+        // Never publish a partial group after a resource binding error.
+        if (m_llvm_codegen_failed) {
+            ll.module(nullptr);
+            return;
+        }
         const llvm::Function* seed = ll.module()->getFunction("osl_sin_ff");
         if (!seed || !seed->getFnAttribute("target-cpu").isStringAttribute()
             || seed->getFnAttribute("target-cpu").getValueAsString()
