@@ -410,7 +410,8 @@ ShaderInstance::validate_hart() const
         ustring("clamp"),       ustring("mix"),          ustring("step"),
         ustring("smoothstep"),  ustring("floor"),        ustring("ceil"),
         ustring("fmod"),        ustring("cos"),          ustring("sqrt"),
-        ustring("pow"),         ustring("functioncall"),
+        ustring("pow"),         ustring("functioncall"), ustring("pnoise"),
+        ustring("psnoise"),     ustring("cellnoise"),    ustring("hashnoise"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
@@ -434,6 +435,26 @@ ShaderInstance::validate_hart() const
                 && sym.is_constant() && sym.typespec().is_string()
                 && !op.argwrite(a))
                 continue;
+            // Resolve only literal noise selectors; no runtime string dispatch
+            // or noise options may enter the device module.
+            if (a == 1 && sym.is_constant() && sym.typespec().is_string()
+                && (op.opname() == ustring("noise")
+                    || op.opname() == ustring("pnoise"))) {
+                const ustring name = sym.get_string();
+                const bool supported_name
+                    = name == ustring("perlin") || name == ustring("uperlin")
+                      || name == ustring("cell") || name == ustring("hash")
+                      || (op.opname() == ustring("noise")
+                          && (name == ustring("simplex")
+                              || name == ustring("usimplex")));
+                if (!supported_name) {
+                    shadingsys().errorfmt(
+                        "HART: unsupported noise type '{}' in shader '{}' ({}:{})",
+                        name, shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+                continue;
+            }
             if (!validate_type(sym))
                 return false;
             if (sym.symtype() == SymTypeGlobal) {

@@ -442,14 +442,36 @@ Values and first-order derivatives can cross layer connections and feed
 `Dx`, `Dy`, and `filterwidth`. Constant coordinates produce constant noise
 values with zero derivatives. This is unfiltered Perlin noise: neither
 derivative support nor `filterwidth` automatically antialiases it.
-String-based selection such as `noise("perlin",P)`, noise options, periodic
-`pnoise`/`psnoise`, cell/hash noise, and other noise families remain unsupported.
-The existing string/operation guards reject them before specialization,
-even if their inputs are constant.
+
+The procedural noise family also includes:
+
+| Family | Non-periodic forms | Periodic forms |
+| --- | --- | --- |
+| Signed Perlin | `snoise(...)`, `noise("perlin",...)` | `psnoise(...)`, `pnoise("perlin",...)` |
+| Unsigned Perlin | `noise(...)`, `noise("uperlin",...)` | `pnoise(...)`, `pnoise("uperlin",...)` |
+| Cell | `cellnoise(...)`, `noise("cell",...)` | `pnoise("cell",...)` |
+| Hash | `hashnoise(...)`, `noise("hash",...)` | `pnoise("hash",...)` |
+| Signed simplex | `noise("simplex",...)` | Unsupported |
+| Unsigned simplex | `noise("usimplex",...)` | Unsupported |
+
+These forms support 1D-4D coordinates and float/color/vector results.
+Periodic calls append matching period arguments: `(x,px)`, `(x,y,px,py)`,
+`(p,pp)`, or `(p,t,pp,tp)`. Period handling follows existing OSL semantics:
+periods are floored to integers with a minimum of one. Period derivatives
+are not propagated. Cell and hash noise have zero output derivatives,
+including at discontinuities. Hash noise depends on the coordinate bit
+patterns, so rounding differences in upstream arithmetic can change its
+value substantially even when the coordinates are numerically close.
+
+Only the literal selectors listed above are accepted, and they resolve
+directly to existing device shadeops. String parameters, computed selectors,
+noise options, Gabor noise, and periodic simplex remain unsupported.
+Original-operation validation rejects them before specialization, even
+for constant inputs or unused layers; general string support is not enabled.
 
 Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color/point/vector/normal construction,
-`sin`, `dot`, `length`, `normalize`, numeric `noise`/`snoise`, component
+`sin`, `dot`, `length`, `normalize`, the noise forms listed above, component
 reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
 `for`/`while`, `Dx`, `Dy`, and `filterwidth`. Procedural math also supports
 `abs`, `min`, `max`, `clamp`, `mix`, `step`, `smoothstep`, `floor`, `ceil`,
@@ -482,7 +504,7 @@ or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 tracing, shader printing, writes to shader globals, other globals such as
 `I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
 coordinate transforms,
-strings, arrays, interpolated or interactive parameters, renderer-service
+general strings, arrays, interpolated or interactive parameters, renderer-service
 callbacks, batched execution, instrumentation, more than two layers, explicit
 entry layers, multiple final outputs, and unlisted frontend options are
 unsupported.
@@ -579,11 +601,23 @@ transition boundaries, and constant-input zero derivatives. A representative
 connected group also exercises cache modes and repeated launches.
 The existing numerical tolerances are unchanged.
 
+`hart-noise-families-runtime` covers periodic Perlin, cell/hash noise, and
+literal-name selection including simplex at LLVM levels 10 and 3.
+Packed float/color/vector cases exercise 1D-4D inputs, connected derivatives,
+named/numeric aliases, signed/unsigned relationships, periodic shifts around
+negative coordinates and tile seams, and period flooring/minimum semantics.
+Cell/hash derivatives are checked against exact zero. Simplex derivatives
+are also checked with CPU central differences away from discontinuities.
+Hash inputs use binary-exact coordinates so the CPU/GPU comparisons test the
+same input bits. Values and simplex derivatives retain `2e-6`; only Perlin
+derivatives use `4e-6`. No production floating-point settings are changed.
+Dynamic/unknown/empty names, options, Gabor, and periodic simplex are rejected.
+
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
   -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(codegen-.*|noise-runtime)$" --output-on-failure
+  -R "^hart-(codegen-.*|noise(-families)?-runtime|math-runtime)$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

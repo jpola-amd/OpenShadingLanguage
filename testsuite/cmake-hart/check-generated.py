@@ -28,12 +28,14 @@ suites.add_argument("--filterwidth", action="store_true",
                     help="Run scalar and triple filterwidth runtime cases")
 suites.add_argument("--noise", action="store_true",
                     help="Run numeric Perlin noise runtime cases")
+suites.add_argument("--noise-families", action="store_true",
+                    help="Run periodic, cell, hash and named noise runtime cases")
 suites.add_argument("--math", action="store_true",
                     help="Run scalar and triple math runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
-        or args.noise or args.math) and not args.gpu:
-    parser.error("--loops, --derivatives, --surface, --filterwidth, --noise and --math require --gpu")
+        or args.noise or args.noise_families or args.math) and not args.gpu:
+    parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -286,11 +288,13 @@ def compare_noise(actual, expected, report):
         compare(actual, expected, 4e-6 if report in (2, 3) else 2e-6)
 
 
-def check_noise_render(shader_args, width, height, expected, report=0, full=False):
+def check_noise_render(shader_args, width, height, expected, report=0, full=False,
+                       compare_device=None):
+    if compare_device is None:
+        compare_device = lambda actual, reference: compare_noise(actual, reference, report)
     if full:
         check_render(shader_args, width, height, expected,
-                     compare_device=lambda actual, reference: compare_noise(
-                         actual, reference, report))
+                     compare_device=compare_device)
         return
     # The dimension/type matrix needs one GPU image per case, not the full
     # cache/image/repeat cross product used for the connected representatives.
@@ -305,7 +309,7 @@ def check_noise_render(shader_args, width, height, expected, report=0, full=Fals
     assert "HART pipeline cache disabled" in output, output
     assert output.count("Launching HART grid") == 1, output
     actual = image_pixels(image, width, height)
-    compare_noise(actual, expected, report)
+    compare_device(actual, expected)
     return actual
 
 
@@ -375,6 +379,110 @@ def check_noise_suite():
                 12, 3, [0] * 108, report=2,
             )
             compare(actual, [0] * 108, 0)
+
+
+def noise_family_arguments(optimize, report=0, periodic=0, named=0, shift=0,
+                           canonical_periods=0, offset_u=0, offset_v=0):
+    producer = ["--llvm_opt", optimize,
+                "--param", "periodic", str(periodic),
+                "--param", "named", str(named),
+                "--param", "shift", str(shift),
+                "--param", "canonical_periods", str(canonical_periods),
+                "--param:type=float", "offset_u", str(offset_u),
+                "--param:type=float", "offset_v", str(offset_v)]
+    if report == 0:
+        return producer + ["hart_noise_families"]
+    return (producer + ["--shader", "hart_noise_families", "producer",
+                        "--param", "report", str(report),
+                        "--shader", "hart_noise_consumer", "consumer",
+                        "--connect", "producer", "Cout", "consumer", "value"])
+
+
+def compare_noise_families(actual, expected, report, periodic):
+    compare(actual[0::3] if report else actual,
+            expected[0::3] if report else expected, 2e-6)
+    if not report:
+        return
+    for row in range(33):
+        family = (row % 11) // (3 if periodic else 2)
+        for channel in (1, 2):
+            values = actual[3 * row * 65 + channel:3 * (row + 1) * 65:3]
+            reference = expected[3 * row * 65 + channel:3 * (row + 1) * 65:3]
+            if family in (2, 3):
+                compare(values, [0] * 65, 0)
+                compare(reference, [0] * 65, 0)
+            else:
+                # Retain Perlin's measured derivative margin; simplex uses
+                # the ordinary image tolerance until measured otherwise.
+                compare(values, reference, 4e-6 if family < 2 else 2e-6)
+
+
+def noise_family_relationships(values, report, periodic):
+    stride = 3 if periodic else 2
+    pairs = [(0, 1)] if periodic else [(0, 1), (4, 5)]
+    for kind in range(3):
+        for signed, unsigned in pairs:
+            rows = [(kind * 11 + family * stride) * 65 * 3
+                    for family in (signed, unsigned)]
+            check_noise_relationship(
+                values[rows[0]:rows[0] + 65 * 3],
+                values[rows[1]:rows[1] + 65 * 3], bool(report),
+            )
+
+
+def noise_family_reference(optimize, periodic, finite_difference=False, **options):
+    arguments = dict(optimize=optimize, periodic=periodic, **options)
+    images = [noise_cpu_image(noise_family_arguments(report=report, **arguments),
+                              65, 33) for report in (0, 1)]
+    indices = noise_component_indices(65, 33)
+    compare(images[1][0::3], [images[0][i] for i in indices], 2e-6)
+    for report, values in enumerate(images):
+        compare_noise_families(values, values, report, periodic)
+        noise_family_relationships(values, report, periodic)
+    if finite_difference:
+        # Cell/hash are intentionally discontinuous. Check only differentiable
+        # families, including simplex probes offset from lattice boundaries.
+        smooth = [i for i in range(65 * 33)
+                  if ((i // 65) % 11) // (3 if periodic else 2) not in (2, 3)]
+        step = 1 / 512
+        for axis, extent, channel in (("offset_u", 65, 1), ("offset_v", 33, 2)):
+            plus, minus = [
+                noise_cpu_image(noise_family_arguments(
+                    **{**arguments, axis: sign * step}), 65, 33)
+                for sign in (1, -1)
+            ]
+            gradient = [(p - m) / (2 * step) for p, m in zip(plus, minus)]
+            compare([images[1][3 * i + channel] * (extent - 1) for i in smooth],
+                    [gradient[indices[i]] for i in smooth], 5e-4)
+    return images
+
+
+def check_noise_family_suite():
+    for optimize in ("10", "3"):
+        print("Checking HART noise families at LLVM level " + optimize, flush=True)
+        for periodic in (0, 1):
+            reference = noise_family_reference(optimize, periodic, finite_difference=True)
+            # One matrix per value/derivative mode covers every dimension,
+            # return type and family. Aliases and periodic shifts reuse it.
+            variants = [({}, reference),
+                        (dict(named=1, canonical_periods=periodic), None)]
+            if periodic:
+                variants.append((dict(shift=1), None))
+            for options, cpu in variants:
+                if cpu is None:
+                    cpu = noise_family_reference(optimize, periodic, **options)
+                for report in (0, 1):
+                    def compare_family(actual, expected):
+                        compare_noise_families(actual, expected, report, periodic)
+                    compare_family(cpu[report], reference[report])
+                    actual = check_noise_render(
+                        noise_family_arguments(optimize, report=report,
+                                               periodic=periodic, **options),
+                        65, 33, cpu[report], report=report,
+                        compare_device=compare_family,
+                    )
+                    compare_family(actual, reference[report])
+                    noise_family_relationships(actual, report, periodic)
 
 
 def math_arguments(optimize, report=0, constant_inputs=0, specialize="-O2"):
@@ -748,22 +856,33 @@ try:
                 compare(gpu, expected, 2e-6)
                 compare(gpu, cpu, 6e-6)
 
-    if args.noise:
+    if args.noise or args.noise_families:
         for shader, error in (
-            ("hart_noise_named", "unsupported type 'string'"),
+            ("hart_noise_named", "unsupported noise type 'gabor'"),
             ("hart_noise_options", "unsupported type 'string'"),
-            ("hart_noise_periodic", "unsupported operation 'pnoise'"),
+            ("hart_noise_periodic", "unsupported noise type 'simplex'"),
         ):
             run(["--hart", "-v", shader], error)
             run(["--hart", "-v", "--shader", shader, "producer",
                  "--shader", "hart_first", "consumer"], error)
-        check_noise_suite()
+        if args.noise:
+            check_noise_suite()
+        else:
+            for shader, error in (
+                ("hart_noise_dynamic", "unsupported type 'string'"),
+                ("hart_noise_unknown", "unsupported noise type 'unknown'"),
+                ("hart_noise_empty", "unsupported noise type ''"),
+            ):
+                run(["--hart", "-v", shader], error)
+                run(["--hart", "-v", "--shader", shader, "producer",
+                     "--shader", "hart_first", "consumer"], error)
+            check_noise_family_suite()
 
     if args.math:
         check_math_suite()
 
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
-                         or args.noise or args.math):
+                         or args.noise or args.noise_families or args.math):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

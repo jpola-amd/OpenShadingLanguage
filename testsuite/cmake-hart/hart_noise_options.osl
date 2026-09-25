@@ -4,5 +4,6 @@
 
 shader hart_noise_options(output color Cout = 0)
 {
-    Cout = noise("gabor", P, "bandwidth", 1.25, "impulses", 8.0);
+    // A supported name does not permit additional string options.
+    Cout = noise("perlin", P, "bandwidth", 1.25, "impulses", 8.0);
 }

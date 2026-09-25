@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
-shader hart_noise_periodic(output color Cout = 0)
+shader hart_noise_dynamic(output color Cout = 0)
 {
-    // Periodic Perlin/cell/hash are supported, but periodic simplex is not.
-    Cout = pnoise("simplex", P, point(2, 4, 8));
+    string name = "perlin";
+    if (u > v)
+        name = "cell";
+    Cout = noise(name, P);
 }

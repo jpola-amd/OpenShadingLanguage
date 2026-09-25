@@ -4,5 +4,6 @@
 
 shader hart_noise_named(output color Cout = 0)
 {
-    Cout = noise("perlin", P);
+    // Supported literal names do not enable gabor's renderer services.
+    Cout = noise("gabor", P);
 }

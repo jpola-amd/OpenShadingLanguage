@@ -323,14 +323,12 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         if (!linked)
             print(stderr, "Expected a linked, used shadeop '{}'\n", name);
         OIIO_CHECK_ASSERT(linked);
-        const bool scalar_derivs
-            = name == "osl_sin_dfdf" || name == "osl_filterwidth_fdf"
-              || OIIO::Strutil::starts_with(name, "osl_noise_df")
-              || OIIO::Strutil::starts_with(name, "osl_snoise_df");
-        const bool vector_derivs
-            = name == "osl_normalize_dvdv" || name == "osl_filterwidth_vdv"
-              || OIIO::Strutil::starts_with(name, "osl_noise_dv")
-              || OIIO::Strutil::starts_with(name, "osl_snoise_dv");
+        const bool scalar_derivs = name == "osl_sin_dfdf"
+                                   || name == "osl_filterwidth_fdf"
+                                   || OIIO::Strutil::contains(name, "noise_df");
+        const bool vector_derivs = name == "osl_normalize_dvdv"
+                                   || name == "osl_filterwidth_vdv"
+                                   || OIIO::Strutil::contains(name, "noise_dv");
         if (connected && (scalar_derivs || vector_derivs)) {
             const auto* storage = llvm::StructType::getTypeByName(context,
                                                                   "Groupdata");
@@ -478,13 +476,33 @@ check_noise_modules(string_view arch, string_view stdosl)
 {
     const string_view coordinates = "float x=1.7*u-0.23; float y=2.3*v+0.31; "
                                     "point p=point(x,y,u*v+0.7); ";
-    for (string_view operation : { "noise", "snoise" }) {
+    const struct {
+        string_view call;
+        string_view shadeop;
+        bool periodic;
+        bool derivatives;
+    } families[] = {
+        { "noise(", "noise", false, true },
+        { "snoise(", "snoise", false, true },
+        { "pnoise(", "pnoise", true, true },
+        { "psnoise(", "psnoise", true, true },
+        { "cellnoise(", "cellnoise", false, false },
+        { "hashnoise(", "hashnoise", false, false },
+        { "noise(\"simplex\",", "simplexnoise", false, true },
+        { "noise(\"usimplex\",", "usimplexnoise", false, true },
+        { "pnoise(\"cell\",", "pcellnoise", true, false },
+        { "pnoise(\"hash\",", "phashnoise", true, false },
+    };
+    for (const auto& family : families) {
         for (string_view type : { "float", "color", "vector" }) {
             const auto assignment = fmtformat(
-                "{0} a={1}(x); {0} b={1}(x,y); {0} c={1}(p); "
-                "{0} d={1}(p,u+v); {0} e={1}(x,0.31); {0} f={1}(p,0.19); "
+                "{0} a={1}x{2}); {0} b={1}x,y{3}); {0} c={1}p{4}); "
+                "{0} d={1}p,u+v{5}); {0} e={1}x,0.31{3}); {0} f={1}p,0.19{5}); "
                 "value=a+b+c+d+e+f; ",
-                type, operation);
+                type, family.call, family.periodic ? ",2.0" : "",
+                family.periodic ? ",2.0,3.0" : "",
+                family.periodic ? ",point(2,3,4)" : "",
+                family.periodic ? ",point(2,3,4),5.0" : "");
             const std::string sources[] = {
                 fmtformat("shader hart_noise_test(output color Cout=0) {{ "
                           "{} {} value=0; {} Cout=color(value); }}",
@@ -517,17 +535,22 @@ check_noise_modules(string_view arch, string_view stdosl)
                                      : make_group(ss, bytecode[0]);
                     ss.optimize_group(group.get(), nullptr);
                     if (errors.errors)
-                        print(stderr, "{} {} (LLVM {}): {}\n", operation, type,
-                              optimize, errors.last_error);
+                        print(stderr, "{} {} (LLVM {}): {}\n", family.call,
+                              type, optimize, errors.last_error);
                     OIIO_CHECK_EQUAL(errors.errors, 0);
-                    const auto prefix = fmtformat("osl_{}_{}{}", operation,
-                                                  connected ? "d" : "",
+                    const bool derivs = connected && family.derivatives;
+                    const auto prefix = fmtformat("osl_{}_{}{}", family.shadeop,
+                                                  derivs ? "d" : "",
                                                   type == "float" ? "f" : "v");
                     const std::string names[] = {
-                        prefix + (connected ? "df" : "f"),
-                        prefix + (connected ? "dfdf" : "ff"),
-                        prefix + (connected ? "dv" : "v"),
-                        prefix + (connected ? "dvdf" : "vf"),
+                        prefix + (derivs ? "df" : "f")
+                            + (family.periodic ? "f" : ""),
+                        prefix + (derivs ? "dfdf" : "ff")
+                            + (family.periodic ? "ff" : ""),
+                        prefix + (derivs ? "dv" : "v")
+                            + (family.periodic ? "v" : ""),
+                        prefix + (derivs ? "dvdf" : "vf")
+                            + (family.periodic ? "vf" : ""),
                     };
                     check_module(ss, *group, arch,
                                  { names[0], names[1], names[2], names[3] },
@@ -540,12 +563,14 @@ check_noise_modules(string_view arch, string_view stdosl)
         string_view expression;
         string_view error;
     } rejected[] = {
-        { "noise(\"perlin\",point(0.25))", "unsupported type 'string'" },
-        { "noise(\"gabor\",P,\"bandwidth\",1.0)", "unsupported type 'string'" },
-        { "pnoise(P,vector(2))", "unsupported operation 'pnoise'" },
-        { "psnoise(P,vector(2))", "unsupported operation 'psnoise'" },
-        { "cellnoise(P)", "unsupported operation 'cellnoise'" },
-        { "hashnoise(P)", "unsupported operation 'hashnoise'" },
+        { "noise(\"gabor\",point(0.25))", "unsupported noise type 'gabor'" },
+        { "noise(\"\",P)", "unsupported noise type ''" },
+        { "noise(\"unknown\",P)", "unsupported noise type 'unknown'" },
+        { "noise(\"perlin\",P,\"bandwidth\",1.0)", "unsupported type 'string'" },
+        { "pnoise(\"simplex\",P,point(2))", "unsupported noise type 'simplex'" },
+        { "pnoise(\"usimplex\",P,point(2))",
+          "unsupported noise type 'usimplex'" },
+        { "pnoise(\"gabor\",P,point(2))", "unsupported noise type 'gabor'" },
         { "noise(I)", "unsupported shader global 'I'" },
     };
     for (const auto& test : rejected) {
@@ -557,6 +582,49 @@ check_noise_modules(string_view arch, string_view stdosl)
         if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
             return false;
         check_rejection(arch, bytecode, test.error);
+    }
+    for (string_view operation : { "noise", "pnoise" }) {
+        const auto source = fmtformat(
+            "shader hart_dynamic_noise(string kind=\"perlin\", output color Cout=0) {{ "
+            "Cout=color({}(kind,P{})); }}",
+            operation, operation == "pnoise" ? ",point(2)" : "");
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, "unsupported type 'string'");
+        for (string_view name : { "perlin", "uperlin", "cell", "hash" }) {
+            OSLCompiler named_compiler;
+            const auto named_source = fmtformat(
+                "shader hart_named_noise(output color Cout=0) {{ "
+                "float n={}(\"{}\",P{}); Cout=color(n,Dx(n),Dy(n)); }}",
+                operation, name, operation == "pnoise" ? ",point(2)" : "");
+            if (!named_compiler.compile_buffer(named_source, bytecode, { },
+                                               stdosl))
+                return false;
+            for (int optimize : { 10, 3 }) {
+                HartServices renderer;
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                ss.attribute("hart_arch", arch);
+                ss.attribute("llvm_optimize", optimize);
+                auto group = make_group(ss, bytecode);
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr, "{}\n", errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                const bool periodic = operation == "pnoise";
+                const bool derivs   = name == "perlin" || name == "uperlin";
+                const auto family   = name == "perlin"    ? "snoise"
+                                      : name == "uperlin" ? "noise"
+                                      : name == "cell"    ? "cellnoise"
+                                                          : "hashnoise";
+                const auto shadeop
+                    = fmtformat("osl_{}{}_{}{}", periodic ? "p" : "", family,
+                                derivs ? "dfdv" : "fv", periodic ? "v" : "");
+                check_module(ss, *group, arch, { shadeop }, optimize);
+            }
+        }
     }
     return true;
 }
