@@ -46,12 +46,14 @@ suites.add_argument("--groups", action="store_true",
                     help="Run numeric multilayer chain runtime cases")
 suites.add_argument("--topology", action="store_true",
                     help="Run diamond, join and lazy dependency runtime cases")
+suites.add_argument("--materials", action="store_true",
+                    help="Run composed multilayer material runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
         or args.spaces or args.geometry or args.groups
-        or args.topology) and not args.gpu:
+        or args.topology or args.materials) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1489,6 +1491,123 @@ def check_topology_suite():
             "nonfinite coordinates/gradients", error_after_launch=True)
 
 
+def material_arguments(optimize, report=0, strength=0.75, specialize="-O2",
+                       noise_report=False):
+    arguments = [
+        "--llvm_opt", optimize, specialize,
+        "--shader", "hart_material_coords", "coords",
+        "--param", "transform_only", "1",
+        "--shader", "hart_material_coords", "space",
+        "--param", "noise_report", str(int(noise_report)),
+        "--shader", "hart_material_uv", "distort",
+    ]
+    connections = [("coords", "value", "space", "position"),
+                   ("space", "value", "distort", "position")]
+    if not noise_report:
+        arguments += [
+            "--shader", "hart_material_texture", "texture",
+            "--shader", "hart_material_mask", "mask",
+            "--param:type=float", "strength", str(strength),
+            "--param", "report", str(report),
+            "--shader", "hart_material_mix", "surface",
+        ]
+        connections += [
+            ("distort", "value", "texture", "position"),
+            ("space", "value", "mask", "position"),
+            ("coords", "value", "surface", "position"),
+            ("texture", "value", "surface", "texture_value"),
+            ("mask", "value", "surface", "mask_value"),
+        ]
+    for connection in connections:
+        arguments += ["--connect", *connection]
+    return arguments
+
+
+def material_noise_signal(optimize):
+    image = root / "material-noise.pfm"
+    if image.exists():
+        image.unlink()
+    run(["-t", "1", "-g", "17", "9", "-o", "value", str(image)]
+        + material_arguments(optimize, noise_report=True))
+    return image_pixels(image, 17, 9)
+
+
+def material_reference(levels, noise, strength):
+    spaces = space_to_common()
+    matrix = matrix_product(spaces[2], matrix_inverse(spaces[1]))
+    images = [[], [], []]
+    for i in range(17 * 9):
+        u, v = (i % 17) / 16, (i // 17) / 8
+        coordinates = (0.25 + 0.375 * u, 0.125 + 0.5 * v, 0.5)
+        position = [sum(coordinates[k] * matrix[k][j] for k in range(3))
+                    + matrix[3][j] for j in range(3)]
+        derivatives = [[sum(d[k] * matrix[k][j] for k in range(3))
+                        for j in range(3)]
+                       for d in ((0.375 / 16, 0, 0), (0, 0.5 / 8, 0))]
+        n, ndx, ndy = noise[3 * i:3 * i + 3]
+        s = 0.875 + 0.375 * position[0] + 0.03125 * n
+        t = 0.875 + 0.375 * position[1] - 0.015625 * n
+        gradients = tuple(value for d, dn in zip(derivatives, (ndx, ndy))
+                          for value in (0.375 * d[0] + 0.03125 * dn,
+                                        0.375 * d[1] - 0.015625 * dn))
+        assert max(math.hypot(8 * gradients[0], 4 * gradients[1]),
+                   math.hypot(8 * gradients[2], 4 * gradients[3])) < 1
+        texture = texture_sample(levels, s, t, gradients, True, ("clamp", "clamp"))
+        signal = 1 + 0.5 * position[0] + 0.25 * position[1]
+        h = min(1, max(0, (signal - 0.375) / 0.25))
+        weight = strength * h * h * (3 - 2 * h)
+        dweight = [strength * 24 * h * (1 - h) * (0.5 * d[0] + 0.25 * d[1])
+                   for d in derivatives]
+        background = (0.125 + 0.25 * coordinates[0],
+                      0.25 + 0.125 * coordinates[1], 0.5)
+        dbackground = ((0.25 * 0.375 / 16, 0, 0), (0, 0.125 * 0.5 / 8, 0))
+        value = [(1 - weight) * a + weight * b for a, b in zip(background, texture[0])]
+        derivs = [[(1 - weight) * da + weight * db + (b - a) * dw
+                   for a, b, da, db in zip(background, texture[0], dbackground[axis],
+                                           texture[axis + 1])]
+                  for axis, dw in enumerate(dweight)]
+        component = int(8 * u) % 3
+        images[0].extend(value)
+        images[1].extend((value[component], derivs[0][component], derivs[1][component]))
+        images[2].extend(values[component] for values in texture)
+    return images
+
+
+def check_material_suite():
+    levels = prepare_texture_images()[0]
+    for optimize in ("10", "3"):
+        print("Checking HART multilayer materials at LLVM level " + optimize,
+              flush=True)
+        # CPU supplies only the Perlin signal; matrix, sampler, smoothstep and
+        # mix derivatives are computed independently, with mip 0 verified above.
+        noise = material_noise_signal(optimize)
+        references = {strength: material_reference(levels, noise, strength)
+                      for strength in (0.75, 0.375)}
+        cases = [(0, 0.75, "-O2"), (1, 0.75, "-O2"),
+                 (2, 0.75, "-O2"), (1, 0.375, "-O2")]
+        if optimize == "10":
+            cases.append((1, 0.75, "-O0"))
+        packed = {}
+        for report, strength, specialize in cases:
+            shader_args = material_arguments(optimize, report, strength, specialize)
+            expected = references[strength][report]
+            cpu = noise_cpu_image(shader_args, 17, 9)
+            compare(cpu, expected)
+            # Repeat the same baseline artifact with caching enabled. A changed
+            # strength can change bitcode, so do not infer a cache hit from it.
+            actual = check_texture_render(
+                shader_args, 17, 9, expected,
+                repeat=optimize == "3" and report == 1 and strength == 0.75,
+            )
+            compare(actual, cpu)
+            if report:
+                assert max(abs(d) for d in actual[1::3]) > 1e-4
+                assert max(abs(d) for d in actual[2::3]) > 1e-4
+                if report == 1 and specialize == "-O2":
+                    packed[strength] = actual
+        assert max(abs(a - b) for a, b in zip(packed[0.75], packed[0.375])) > 1e-3
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1762,11 +1881,14 @@ try:
     if args.topology:
         check_topology_suite()
 
+    if args.materials:
+        check_material_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.matrices
                          or args.spaces or args.geometry or args.groups
-                         or args.topology):
+                         or args.topology or args.materials):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

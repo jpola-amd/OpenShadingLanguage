@@ -692,6 +692,73 @@ check_topology_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_material_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_coord(output point value=0) { value=point(u,v,u*v); }",
+        "shader hart_space(point incoming=0,output point value=0) { "
+        "value=transform(\"object\",\"shader\",incoming); }",
+        "shader hart_warp(point incoming=0,output point value=0) { "
+        "float n=psnoise(incoming,point(2)); "
+        "value=incoming+vector(0.025*n,-0.05*n,0); }",
+        "shader hart_sample(point incoming=0,output color value=0) { "
+        "value=texture(\"hart-test-texture.exr\",incoming[0],incoming[1],"
+        "\"interp\",\"linear\",\"wrap\",\"periodic\"); }",
+        "shader hart_mask(point incoming=0,output float value=0) { "
+        "float n=psnoise(incoming,point(2)); value=smoothstep(-0.1,0.1,n); }",
+        "shader hart_combine(color albedo=0,float mask=0,output color Cout=0) { "
+        "color c=mix(color(0.2),albedo,mask); Cout=c+Dx(c)+Dy(c); }",
+    };
+    const char* names[]
+        = { "coord", "space", "warp", "sample", "mask", "result" };
+    std::string bytecode[6];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+            return false;
+    }
+    for (int osl_optimize : { 0, 2 })
+        for (int optimize : { 10, 3 }) {
+            HartServices renderer(true, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", osl_optimize);
+            ss.attribute("llvm_optimize", optimize);
+            for (size_t i = 0; i < std::size(names); ++i)
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader(names[i], bytecode[i]));
+            auto group = ss.ShaderGroupBegin("hart_test_group");
+            for (const auto* name : names)
+                OIIO_CHECK_ASSERT(ss.Shader("surface", name, name));
+            for (int i = 1; i < 5; ++i)
+                OIIO_CHECK_ASSERT(ss.ConnectShaders(names[i == 4 ? 2 : i - 1],
+                                                    "value", names[i],
+                                                    "incoming"));
+            OIIO_CHECK_ASSERT(
+                ss.ConnectShaders("sample", "value", "result", "albedo"));
+            OIIO_CHECK_ASSERT(
+                ss.ConnectShaders("mask", "value", "result", "mask"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("result.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0,
+                                         3 * sizeof(float));
+            ss.add_symlocs(group.get(), { &output, 1 });
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "{}\n", errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch,
+                         { "osl_transform_triple", "osl_psnoise_dfdvv",
+                           "osl_texture" },
+                         optimize, false, false, false, 6);
+        }
+    return true;
+}
+
+
+
+bool
 check_math_modules(string_view arch, string_view stdosl)
 {
     for (string_view type : { "float", "color", "vector" }) {
@@ -1603,6 +1670,7 @@ main(int argc, char* argv[])
     }
     if (!check_chain_modules(arch, argv[2])
         || !check_topology_modules(arch, argv[2])
+        || !check_material_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])

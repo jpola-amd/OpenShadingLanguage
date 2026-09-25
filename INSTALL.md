@@ -781,6 +781,13 @@ GPU probes put overflowing texture coordinates in unselected producers:
 lazy execution must succeed, while explicitly consuming both branches must
 report a device sampling error. This checks execution, not just matching pixels.
 
+`hart-materials-runtime` composes named transforms, procedural UV distortion,
+texture lookups, masks and mixing across a larger connected material graph.
+It checks values and derivatives against CPU execution and reference sampling,
+including parameter overrides, LLVM levels 10/3 and disabled OSL optimization.
+Compiler checks cover the corresponding six-layer composition on every
+configured architecture.
+
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
 cell/hash pattern, and an explicitly footprint-filtered transition.
@@ -794,7 +801,7 @@ bound, not a backend limit.
 
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|texture|matrix|spaces|transform|geometry|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|math|procedural|texture|matrix|spaces|transform|geometry|groups|topology|materials|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
   -R "^hart-(codegen-.*|texture-(resources|runtime))$" --output-on-failure
 ```

@@ -1,0 +1,14 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_material_uv(point position = point(0), int noise_report = 0,
+                        output point value = point(0))
+{
+    float n = psnoise(position, point(2));
+    if (noise_report)
+        value = point(n, Dx(n), Dy(n));
+    else
+        value = point(0.875 + 0.375 * position[0] + 0.03125 * n,
+                      0.875 + 0.375 * position[1] - 0.015625 * n, 0);
+}
