@@ -63,7 +63,9 @@ public:
                                       const TextureOpt*) override
     {
         ++texture_requests;
-        return m_textures && filename == "hart-test-texture.exr"
+        return m_textures
+                       && (filename == "hart-test-texture.exr"
+                           || filename == "hart_texture_alpha_4.exr")
                    ? reinterpret_cast<TextureHandle*>(uintptr_t(1))
                    : nullptr;
     }
@@ -1010,13 +1012,20 @@ check_material_modules(string_view arch, string_view stdosl)
         "shader hart_warp(point incoming=0,output point value=0) { "
         "float n=psnoise(incoming,point(2)); "
         "value=incoming+vector(0.025*n,-0.05*n,0); }",
-        "shader hart_sample(point incoming=0,output color value=0) { "
-        "value=texture(\"hart-test-texture.exr\",incoming[0],incoming[1],"
-        "\"interp\",\"linear\",\"wrap\",\"periodic\"); }",
+        "shader hart_sample(point incoming=0,output color value=0,"
+        "output float alpha=0) { "
+        "float data=texture(\"hart_texture_alpha_4.exr\",incoming[0],incoming[1],"
+        "\"interp\",\"linear\",\"wrap\",\"clamp\",\"firstchannel\",2,"
+        "\"alpha\",alpha); "
+        "value=texture(\"hart_texture_alpha_4.exr\",incoming[0],incoming[1],"
+        "\"interp\",\"linear\",\"wrap\",\"clamp\",\"firstchannel\",1)"
+        "+color(0.125*data); }",
         "shader hart_mask(point incoming=0,output float value=0) { "
         "float n=psnoise(incoming,point(2)); value=smoothstep(-0.1,0.1,n); }",
-        "shader hart_combine(color albedo=0,float mask=0,output color Cout=0) { "
-        "color c=mix(color(0.2),albedo,mask); Cout=c+Dx(c)+Dy(c); }",
+        "shader hart_combine(color albedo=0,float mask=0,float strength=1,"
+        "float texture_alpha=1,output color Cout=0) { "
+        "color c=mix(color(0.2),albedo,strength*mask*texture_alpha); "
+        "Cout=c+Dx(c)+Dy(c); }",
     };
     const char* names[]
         = { "coord", "space", "warp", "sample", "mask", "result" };
@@ -1034,6 +1043,10 @@ check_material_modules(string_view arch, string_view stdosl)
             ss.attribute("hart_arch", arch);
             ss.attribute("optimize", osl_optimize);
             ss.attribute("llvm_optimize", optimize);
+            const bool local_groupdata = osl_optimize == 0 && optimize == 10;
+            if (local_groupdata)
+                OIIO_CHECK_ASSERT(
+                    ss.attribute("max_hart_groupdata_alloc", 4096));
             for (size_t i = 0; i < std::size(names); ++i)
                 OIIO_CHECK_ASSERT(
                     ss.LoadMemoryCompiledShader(names[i], bytecode[i]));
@@ -1046,6 +1059,8 @@ check_material_modules(string_view arch, string_view stdosl)
                                                     "incoming"));
             OIIO_CHECK_ASSERT(
                 ss.ConnectShaders("sample", "value", "result", "albedo"));
+            OIIO_CHECK_ASSERT(ss.ConnectShaders("sample", "alpha", "result",
+                                                "texture_alpha"));
             OIIO_CHECK_ASSERT(
                 ss.ConnectShaders("mask", "value", "result", "mask"));
             OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
@@ -1057,9 +1072,14 @@ check_material_modules(string_view arch, string_view stdosl)
             if (errors.errors)
                 print(stderr, "{}\n", errors.last_error);
             OIIO_CHECK_EQUAL(errors.errors, 0);
+            int allocated = -1;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_EQUAL(allocated > 0, local_groupdata);
             check_module(ss, *group, arch,
                          { "osl_transform_triple", "osl_psnoise_dfdvv",
-                           "osl_texture" },
+                           "osl_texture", "osl_texture_set_firstchannel" },
                          optimize, false, false, false, 6);
         }
     return true;

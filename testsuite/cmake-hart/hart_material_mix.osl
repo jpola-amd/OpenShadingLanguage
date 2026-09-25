@@ -3,12 +3,14 @@
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 shader hart_material_mix(point position = point(0), color texture_value = 0,
-                         float mask_value = 0, float strength = 0.75,
+                         float mask_value = 0, float texture_alpha = 1,
+                         float strength = 0.75,
                          int report = 0, output color Cout = 0)
 {
     color base_color = color(0.125 + 0.25 * position[0],
                              0.25 + 0.125 * position[1], 0.5);
-    color result = mix(base_color, texture_value, strength * mask_value);
+    color result = mix(base_color, texture_value,
+                       strength * mask_value * texture_alpha);
     if (report == 2)
         result = texture_value;
     if (report == 0)

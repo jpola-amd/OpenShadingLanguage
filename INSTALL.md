@@ -657,10 +657,11 @@ box-resized to `max(1, floor(size/2))` down to 1x1.
 Alpha is the next channel after the returned value: `firstchannel + 1` for a
 float lookup or `firstchannel + 3` for a color lookup (zero-based), not a search
 for a channel named "A". Missing alpha is zero, with zero derivatives; it is not
-implicitly opaque. Alpha's `Dx`/`Dy` follow the same reconstruction and coordinate-gradient
-chain rule as RGB, including across layer connections. Requesting alpha does
-not premultiply or otherwise change the returned color. This raw-channel
-contract does not emulate OIIO's optional grayscale-to-RGB expansion.
+implicitly opaque. Alpha's `Dx`/`Dy` follow the same reconstruction and
+coordinate-gradient chain rule as RGB, including across layer connections.
+Requesting alpha does not premultiply or otherwise change the returned color.
+This raw-channel contract does not emulate OIIO's optional grayscale-to-RGB
+expansion.
 
 Filtering uses an isotropic footprint in base-level texels:
 
@@ -688,6 +689,15 @@ bindings fail the launch rather than returning a successful black image.
 Dynamic filenames, UDIMs, texture3d/environment, dynamic channel selection,
 subimage selection, colorspace, width/blur, fill/missing-color overrides, and
 error-message options remain unsupported.
+
+The GPU-opt-in tests `hart-texture-alpha-runtime`,
+`hart-texture-channels-runtime` and `hart-texture-materials-runtime` cover
+alpha values/derivatives, literal channel boundaries, and a six-layer material
+graph with transformed procedural coordinates, channel-selected data and
+sampled alpha as a blend mask. The material tests compare CPU and independent
+sampling/product-rule references, exercise split and fused storage modes,
+and change alpha image contents across A-B-A cache reuse without changing
+shader code or filenames.
 
 `Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
 tracing, shader printing, writes to shader globals, other globals such as

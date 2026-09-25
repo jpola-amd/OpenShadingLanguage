@@ -42,6 +42,8 @@ suites.add_argument("--texture-alpha", action="store_true",
                     help="Run HART texture alpha value and derivative cases")
 suites.add_argument("--texture-channels", action="store_true",
                     help="Run literal HART texture channel-offset cases")
+suites.add_argument("--texture-materials", action="store_true",
+                    help="Run channel-selecting alpha-blended material cases")
 suites.add_argument("--matrices", action="store_true",
                     help="Run numeric matrix and matrix-transform runtime cases")
 suites.add_argument("--spaces", action="store_true",
@@ -65,7 +67,7 @@ args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.texture_alpha
-        or args.texture_channels or args.matrices
+        or args.texture_channels or args.texture_materials or args.matrices
         or args.spaces or args.geometry or args.groups
         or args.topology or args.materials or args.fused
         or args.fused_local or args.fused_benchmark) and not args.gpu:
@@ -1023,7 +1025,7 @@ def check_texture_suite():
         run(["--hart", "-v"] + shader_args, error)
 
 
-def prepare_texture_alpha_images():
+def prepare_texture_alpha_images(alpha_scale=1):
     oiiotool = shutil.which("oiiotool", path=env.get("PATH"))
     assert oiiotool, "Texture alpha checks require oiiotool on PATH"
 
@@ -1036,7 +1038,7 @@ def prepare_texture_alpha_images():
 
     rgba = [[((x + 1) / 8, 0.1875 + (x + 1) / 32 + (y + 1) / 16,
               0.875 if (x + y) % 2 else 0.125,
-              0 if (x + y) % 4 == 0 else (1 + x + 2 * y) / 16)
+              alpha_scale * (0 if (x + y) % 4 == 0 else (1 + x + 2 * y) / 16))
              for x in range(8)] for y in range(4)]
     planes = []
     for channel in range(4):
@@ -1760,7 +1762,7 @@ def check_topology_suite():
 
 
 def material_arguments(optimize, report=0, strength=0.75, specialize="-O2",
-                       noise_report=False):
+                       noise_report=False, channels=False):
     arguments = [
         "--llvm_opt", optimize, specialize,
         "--shader", "hart_material_coords", "coords",
@@ -1773,7 +1775,8 @@ def material_arguments(optimize, report=0, strength=0.75, specialize="-O2",
                    ("space", "value", "distort", "position")]
     if not noise_report:
         arguments += [
-            "--shader", "hart_material_texture", "texture",
+            "--shader", "hart_material_channels" if channels else
+            "hart_material_texture", "texture",
             "--shader", "hart_material_mask", "mask",
             "--param:type=float", "strength", str(strength),
             "--param", "report", str(report),
@@ -1786,6 +1789,8 @@ def material_arguments(optimize, report=0, strength=0.75, specialize="-O2",
             ("texture", "value", "surface", "texture_value"),
             ("mask", "value", "surface", "mask_value"),
         ]
+        if channels:
+            connections += [("texture", "alpha", "surface", "texture_alpha")]
     for connection in connections:
         arguments += ["--connect", *connection]
     return arguments
@@ -1800,10 +1805,11 @@ def material_noise_signal(optimize):
     return image_pixels(image, 17, 9)
 
 
-def material_reference(levels, noise, strength):
+def material_reference(levels, noise, strength, channels=False):
     spaces = space_to_common()
     matrix = matrix_product(spaces[2], matrix_inverse(spaces[1]))
     images = [[], [], []]
+    alpha_weight_effect = [0, 0]
     for i in range(17 * 9):
         u, v = (i % 17) / 16, (i // 17) / 8
         coordinates = (0.25 + 0.375 * u, 0.125 + 0.5 * v, 0.5)
@@ -1820,12 +1826,23 @@ def material_reference(levels, noise, strength):
                                         0.375 * d[1] - 0.015625 * dn))
         assert max(math.hypot(8 * gradients[0], 4 * gradients[1]),
                    math.hypot(8 * gradients[2], 4 * gradients[3])) < 1
-        texture = texture_sample(levels, s, t, gradients, True, ("clamp", "clamp"))
+        texture = texture_sample(levels, s, t, gradients, True, ("clamp", "clamp"),
+                                 4 if channels else 3)
+        if channels:
+            alpha = tuple(values[3] for values in texture)
+            # A color lookup starts at G, while a scalar lookup adds 1/8 B.
+            texture = tuple(tuple(values[c] + 0.125 * values[2] for c in (1, 2, 3))
+                            for values in texture)
         signal = 1 + 0.5 * position[0] + 0.25 * position[1]
         h = min(1, max(0, (signal - 0.375) / 0.25))
         weight = strength * h * h * (3 - 2 * h)
         dweight = [strength * 24 * h * (1 - h) * (0.5 * d[0] + 0.25 * d[1])
                    for d in derivatives]
+        if channels:
+            alpha_dweight = [weight * da for da in alpha[1:]]
+            dweight = [dw * alpha[0] + da
+                       for dw, da in zip(dweight, alpha_dweight)]
+            weight *= alpha[0]
         background = (0.125 + 0.25 * coordinates[0],
                       0.25 + 0.125 * coordinates[1], 0.5)
         dbackground = ((0.25 * 0.375 / 16, 0, 0), (0, 0.125 * 0.5 / 8, 0))
@@ -1838,6 +1855,16 @@ def material_reference(levels, noise, strength):
         images[0].extend(value)
         images[1].extend((value[component], derivs[0][component], derivs[1][component]))
         images[2].extend(values[component] for values in texture)
+        if channels:
+            for axis, dw in enumerate(alpha_dweight):
+                alpha_weight_effect[axis] = max(
+                    alpha_weight_effect[axis],
+                    abs((texture[0][component] - background[component]) * dw),
+                )
+    if channels:
+        # Dropping the alpha-gradient product-rule term must visibly change the
+        # derivative report, not disappear behind a zero mask or equal colors.
+        assert min(alpha_weight_effect) > 1e-4, alpha_weight_effect
     return images
 
 
@@ -1874,6 +1901,62 @@ def check_material_suite():
                 if report == 1 and specialize == "-O2":
                     packed[strength] = actual
         assert max(abs(a - b) for a, b in zip(packed[0.75], packed[0.375])) > 1e-3
+
+
+def check_texture_material_suite():
+    levels = prepare_texture_alpha_images()[3]
+    for optimize in ("10", "3"):
+        print("Checking HART channel/alpha materials at LLVM level " + optimize,
+              flush=True)
+        noise = material_noise_signal(optimize)
+        references = {strength: material_reference(levels, noise, strength, channels=True)
+                      for strength in (0.75, 0.375)}
+        cases = [(0, 0.75, "-O2"), (1, 0.75, "-O2"),
+                 (2, 0.75, "-O2"), (1, 0.375, "-O2")]
+        if optimize == "10":
+            cases.append((1, 0.75, "-O0"))
+        packed = {}
+        for report, strength, specialize in cases:
+            shader_args = material_arguments(optimize, report, strength, specialize,
+                                              channels=True)
+            expected = references[strength][report]
+            cpu = noise_cpu_image(shader_args, 17, 9)
+            compare(cpu, expected)
+            actual = check_texture_render(shader_args, 17, 9, expected,
+                                          callable_mode="split")
+            compare(actual, cpu)
+            if report:
+                assert max(abs(d) for d in actual[1::3]) > 1e-4
+                assert max(abs(d) for d in actual[2::3]) > 1e-4
+                if report == 1 and specialize == "-O2":
+                    packed[strength] = actual
+        assert max(abs(a - b) for a, b in zip(packed[0.75], packed[0.375])) > 1e-3
+
+    # Thirteen GPU processes: nine split cases, one fused-scratch case and
+    # three cached fused-local runs with only the alpha pixels rebound.
+    shader_args = material_arguments("3", report=1, channels=True)
+    actual = check_texture_render(shader_args, 17, 9, references[0.75][1],
+                                  callable_mode="fused")
+    compare(actual, packed[0.75])
+    rebound = []
+    for index, scale in enumerate((1, 0.5, 1)):
+        updated = prepare_texture_alpha_images(alpha_scale=scale)[3]
+        for original_level, updated_level in zip(levels, updated):
+            for original_row, updated_row in zip(original_level, updated_level):
+                for original, current in zip(original_row, updated_row):
+                    compare(current[:3], original[:3], 0)
+                    assert current[3] == scale * original[3]
+        expected = material_reference(updated, noise, 0.75, channels=True)[1]
+        cpu = noise_cpu_image(shader_args, 17, 9)
+        compare(cpu, expected)
+        actual = check_texture_render(
+            shader_args + ["--hart-local-groupdata", "2147483647"],
+            17, 9, expected, repeat=True, cache_hit=index > 0, callable_mode="fused",
+        )
+        compare(actual, cpu)
+        rebound.append(actual)
+    assert max(abs(a - b) for a, b in zip(rebound[0], rebound[1])) > 1e-3
+    compare(rebound[0], rebound[2])
 
 
 def check_fused_suite():
@@ -2414,6 +2497,9 @@ try:
     if args.texture_channels:
         check_texture_channel_suite()
 
+    if args.texture_materials:
+        check_texture_material_suite()
+
     if args.matrices:
         check_matrix_suite()
 
@@ -2444,7 +2530,8 @@ try:
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.texture_alpha
-                         or args.texture_channels or args.matrices
+                         or args.texture_channels or args.texture_materials
+                         or args.matrices
                          or args.spaces or args.geometry or args.groups
                          or args.topology or args.materials or args.fused
                          or args.fused_local or args.fused_benchmark):
@@ -2539,7 +2626,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.texture_channels:
+if args.texture_materials:
+    suite = "texture materials"
+elif args.texture_channels:
     suite = "texture channels"
 elif args.texture_alpha:
     suite = "texture alpha"
