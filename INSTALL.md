@@ -425,9 +425,31 @@ existing OSL storage and shadeops. For example, a producer can construct
 and extract the result's `Dx` and `Dy`. Normalizing a zero vector returns
 zero, including zero derivatives, following ordinary OSL behavior.
 
+Numeric, non-periodic Perlin noise is supported through `noise` (unsigned)
+and `snoise` (signed). The coordinate forms are `noise(x)`, `noise(x,y)`,
+`noise(p)`, and `noise(p,t)` for 1D through 4D, with the same forms for
+`snoise`. The third form uses a point; the fourth adds a numeric coordinate,
+not a dependency on the still-unsupported `time` global.
+Select float, color, or vector results with an explicitly typed temporary.
+For example:
+
+```osl
+float n = noise(P * 3.7);
+Cout = color(n, Dx(n), filterwidth(n));
+```
+
+Values and first-order derivatives can cross layer connections and feed
+`Dx`, `Dy`, and `filterwidth`. Constant coordinates produce constant noise
+values with zero derivatives. This is unfiltered Perlin noise: neither
+derivative support nor `filterwidth` automatically antialiases it.
+String-based selection such as `noise("perlin",P)`, noise options, periodic
+`pnoise`/`psnoise`, cell/hash noise, and other noise families remain unsupported.
+The existing string/operation guards reject them before specialization,
+even if their inputs are constant.
+
 Its numeric instruction subset is assignment, addition, subtraction,
 multiplication, division, negation, color/point/vector/normal construction,
-`sin`, `dot`, `length`, `normalize`, component
+`sin`, `dot`, `length`, `normalize`, numeric `noise`/`snoise`, component
 reads/writes, comparisons (`<`, `<=`, `==`, `!=`, `>=`, `>`), `if`/`else`,
 `for`/`while`, `Dx`, `Dy`, and `filterwidth`
 (plus internal structural operations). Only reads of the listed shader
@@ -448,7 +470,7 @@ testshade, JPEG/GIF/PNG images are converted to sRGB.
 Parameter types follow the normal frontend: use `--param:type=float scale 2`
 or `--param scale 2.0` for a float parameter; a bare `2` is inferred as int.
 
-`Dz`, noise, `break`, `continue`, `do`/`while`, textures, closures,
+`Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, textures, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `I` and `time`, named coordinate spaces (even explicit `"common"` constructors),
 coordinate transforms,
@@ -522,14 +544,31 @@ parameters and constant-valued connections, and zero derivatives of the
 width result. Tests run at LLVM levels 10 and 3, retaining the existing
 numerical tolerances, image comparisons, cache modes and repeated launches.
 Compiler checks verify the linked scalar/triple shadeops and connected
-derivative storage on every configured architecture. Noise, textures and
-unlisted globals remain rejected.
+derivative storage on every configured architecture. Textures and unlisted
+globals remain rejected.
+
+`hart-noise-runtime` compares numeric Perlin values and derivatives with CPU
+execution at LLVM levels 10 and 3. A packed `12x3` matrix covers 1D-4D inputs,
+float/color/vector results, and all three result components for both signed
+and unsigned noise. Checks include the signed/unsigned relationship,
+constant-input derivatives, and composition with `filterwidth`.
+Noise values retain the `2e-6` comparison tolerance. Only noise derivatives
+and footprints use `4e-6`: CPU SIMD and scalar HIP interpolate corners in
+different orders, and measured rounding differences reached `3.16e-6` after
+connected arithmetic. Production floating-point settings are unchanged.
+Independent derivative checks use full-precision CPU central differences
+with coordinate offsets of `1/512`; their separate `5e-4` approximation
+tolerance is in unscaled u/v derivative units, not the direct CPU/GPU
+comparison tolerance. Representative connected 4D arithmetic groups also
+exercise `1x1`, `3x2`, and `37x5` grids, images, cache modes and repeated launches.
+Compiler checks verify all plain and derivative shadeop signatures,
+including mixed varying/constant coordinates and connected storage.
 
 ```powershell
 ctest --test-dir build\hart-validation -C Release `
-  -R "hart-(generated|loops|derivatives|surface|filterwidth|grid)" --output-on-failure
+  -R "hart-(generated|loops|derivatives|surface|filterwidth|noise|grid)" --output-on-failure
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(codegen-.*|filterwidth-runtime)$" --output-on-failure
+  -R "^hart-(codegen-.*|noise-runtime)$" --output-on-failure
 ```
 
 Use an OptiX-disabled build for runtime checks on a machine without an

@@ -26,9 +26,12 @@ suites.add_argument("--surface", action="store_true",
                     help="Run surface globals and vector math runtime cases")
 suites.add_argument("--filterwidth", action="store_true",
                     help="Run scalar and triple filterwidth runtime cases")
+suites.add_argument("--noise", action="store_true",
+                    help="Run numeric Perlin noise runtime cases")
 args = parser.parse_args()
-if (args.loops or args.derivatives or args.surface or args.filterwidth) and not args.gpu:
-    parser.error("--loops, --derivatives, --surface and --filterwidth require --gpu")
+if (args.loops or args.derivatives or args.surface or args.filterwidth
+        or args.noise) and not args.gpu:
+    parser.error("--loops, --derivatives, --surface, --filterwidth and --noise require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
@@ -78,7 +81,7 @@ def reference(width, height, evaluate):
     return result
 
 
-def compare(actual, expected, tolerance):
+def compare(actual, expected, tolerance=2e-6):
     assert len(actual) == len(expected)
     for index, (a, b) in enumerate(zip(actual, expected)):
         assert math.isclose(a, b, abs_tol=tolerance, rel_tol=1e-6), (
@@ -100,7 +103,7 @@ def image_pixels(path, width, height):
             for value in data[y * width * 3:(y + 1) * width * 3]]
 
 
-def check_render(shader_args, width, height, expected):
+def check_render(shader_args, width, height, expected, compare_device=compare):
     grid = ["-g", str(width), str(height)]
     cpu = pixels(run(["-t", "1"] + grid + ["--print"] + shader_args),
                  width, height)
@@ -115,7 +118,7 @@ def check_render(shader_args, width, height, expected):
             assert "HART pipeline cache disabled" in output, output
         assert output.count("Launching HART grid") == 4, output
         gpu = pixels(output, width, height)
-        compare(gpu, expected, 2e-6)
+        compare_device(gpu, expected)
         compare(gpu, cpu, 6e-6)
 
         cpu_image, gpu_image = root / "cpu.pfm", root / "gpu.pfm"
@@ -128,8 +131,8 @@ def check_render(shader_args, width, height, expected):
         host_pixels = image_pixels(cpu_image, width, height)
         device_pixels = image_pixels(gpu_image, width, height)
         compare(host_pixels, expected, 2e-6)
-        compare(device_pixels, expected, 2e-6)
-        compare(device_pixels, host_pixels, 2e-6)
+        compare_device(device_pixels, expected)
+        compare_device(device_pixels, host_pixels)
 
 
 def connected_group(consumer, parameters=None, producer="hart_group_producer"):
@@ -204,6 +207,172 @@ def surface_result(u, v, width, height, operation=-1, planar=False, value=None):
     if operation == 2:
         return (square, *(2 * p for p in projections))
     return (value[2], dx[2], dy[2])
+
+
+def noise_arguments(optimize, report=0, dimension=0, kind=-1, signed_noise=1,
+                    constant_inputs=0, arithmetic=0, offset_u=0, offset_v=0,
+                    specialize="-O2"):
+    offsets = ["--param:type=float", "offset_u", str(offset_u),
+               "--param:type=float", "offset_v", str(offset_v)]
+    producer = ["--llvm_opt", optimize, specialize,
+                "--param", "dimension", str(dimension),
+                "--param", "kind", str(kind),
+                "--param", "signed_noise", str(signed_noise),
+                "--param", "constant_inputs", str(constant_inputs)] + offsets
+    if report == 0 and not arithmetic:
+        return producer + ["hart_noise"]
+    return (producer + ["--shader", "hart_noise", "producer"]
+            + ["--param", "report", str(report),
+               "--param", "arithmetic", str(arithmetic)] + offsets
+            + ["--shader", "hart_noise_consumer", "consumer",
+               "--connect", "producer", "Cout", "consumer", "value"])
+
+
+def noise_component_indices(width, height):
+    return [3 * (y * width + x)
+            + int(11.99 * (0.5 if width == 1 else x / (width - 1))) % 3
+            for y in range(height) for x in range(width)]
+
+
+def noise_cpu_image(shader_args, width, height):
+    image = root / "noise-cpu.pfm"
+    if image.exists():
+        image.unlink()
+    run(["-t", "1", "-g", str(width), str(height),
+         "-o", "Cout", str(image)] + shader_args)
+    return image_pixels(image, width, height)
+
+
+def noise_reference(width, height, **options):
+    values = noise_cpu_image(noise_arguments(**options), width, height)
+    derivatives = noise_cpu_image(noise_arguments(report=1, **options),
+                                  width, height)
+    indices = noise_component_indices(width, height)
+    compare(derivatives[0::3], [values[i] for i in indices], 2e-6)
+    if options.get("constant_inputs"):
+        compare(derivatives[1::3], [0] * (width * height), 0)
+        compare(derivatives[2::3], [0] * (width * height), 0)
+        return values, derivatives, ([0] * len(values), [0] * len(values))
+
+    # Binary-exact h avoids decimal step error. Central differences have
+    # O(h^2) truncation and O(float_epsilon/h) cancellation error. A separate
+    # 5e-4 absolute bound on dF/du and dF/dv covers both for these unit-scale
+    # coordinates; it is NOT the direct CPU/GPU rounding tolerance.
+    step = 1 / 512
+    gradients = []
+    for axis, extent, packed in (("offset_u", width, 1), ("offset_v", height, 2)):
+        plus = noise_cpu_image(noise_arguments(**{**options, axis: step}),
+                               width, height)
+        minus = noise_cpu_image(noise_arguments(**{**options, axis: -step}),
+                                width, height)
+        finite_difference = [(p - m) / (2 * step) for p, m in zip(plus, minus)]
+        spacing = 1 / max(1, extent - 1)
+        compare([d / spacing for d in derivatives[packed::3]],
+                [finite_difference[i] for i in indices], 5e-4)
+        gradients.append([d * spacing for d in finite_difference])
+    return values, derivatives, gradients
+
+
+def compare_noise(actual, expected, report):
+    # CPU SIMD and scalar HIP interpolate Perlin's corners in different orders.
+    # Only derivatives/footprints need the extra rounding margin.
+    if report == 1:
+        compare(actual[0::3], expected[0::3], 2e-6)
+        compare(actual[1::3], expected[1::3], 4e-6)
+        compare(actual[2::3], expected[2::3], 4e-6)
+    else:
+        compare(actual, expected, 4e-6 if report in (2, 3) else 2e-6)
+
+
+def check_noise_render(shader_args, width, height, expected, report=0, full=False):
+    if full:
+        check_render(shader_args, width, height, expected,
+                     compare_device=lambda actual, reference: compare_noise(
+                         actual, reference, report))
+        return
+    # The dimension/type matrix needs one GPU image per case, not the full
+    # cache/image/repeat cross product used for the connected representatives.
+    grid = ["-g", str(width), str(height)]
+    compare(pixels(run(["-t", "1", "--print"] + grid + shader_args),
+                   width, height), expected, 6e-6)
+    image = root / "noise-gpu.pfm"
+    if image.exists():
+        image.unlink()
+    output = run(["--hart", "--hart-no-cache", "-v"] + grid
+                 + ["-o", "Cout", str(image)] + shader_args)
+    assert "HART pipeline cache disabled" in output, output
+    assert output.count("Launching HART grid") == 1, output
+    actual = image_pixels(image, width, height)
+    compare_noise(actual, expected, report)
+    return actual
+
+
+def check_noise_relationship(signed, unsigned, packed=False):
+    compare(unsigned, [0.5 * (value + (not packed or i % 3 == 0))
+                       for i, value in enumerate(signed)], 2e-6)
+
+
+def check_noise_suite():
+    for optimize in ("10", "3"):
+        print("Checking HART noise at LLVM level " + optimize, flush=True)
+        cpu, gpu = {}, {}
+        # Four dimensions, three return types, and all three triple components
+        # fit in 36 samples. Two launches per sign check value-only RGB and
+        # connected (value, Dx, Dy), including all components without reduction.
+        for signed in (1, 0):
+            options = dict(optimize=optimize, signed_noise=signed)
+            cpu[signed] = noise_reference(12, 3, **options)
+            gpu[signed] = [
+                check_noise_render(noise_arguments(report=report, **options),
+                                   12, 3, cpu[signed][report], report=report)
+                for report in (0, 1)
+            ]
+        for report in (0, 1):
+            check_noise_relationship(cpu[1][report], cpu[0][report], bool(report))
+            check_noise_relationship(gpu[1][report], gpu[0][report], bool(report))
+        assert max(abs(d) for d in cpu[1][1][1::3]) > 0.01
+        assert max(abs(d) for d in cpu[1][1][2::3]) > 0.01
+
+        # Compose scalar and triple filterwidth with all noise dimensions/types.
+        # Selected components also have an exact independent hypot(Dx,Dy) check;
+        # the remaining RGB components have the finite-difference cross-check.
+        indices = noise_component_indices(12, 3)
+        footprint = [math.hypot(x, y) for x, y in zip(*cpu[1][2])]
+        selected = [math.hypot(x, y)
+                    for x, y in zip(cpu[1][1][1::3], cpu[1][1][2::3])]
+        for report in (2, 3):
+            shader_args = noise_arguments(optimize, report=report)
+            expected = noise_cpu_image(shader_args, 12, 3)
+            if report == 2:
+                compare(expected, footprint, 5e-4)
+                compare([expected[i] for i in indices], selected, 2e-6)
+            else:
+                compare(expected, [v for w in selected for v in (w, 0, 0)], 2e-6)
+            check_noise_render(shader_args, 12, 3, expected, report=report)
+
+        # Keep expensive cold/cache-enabled, image and repeated-launch coverage
+        # on a connected 4D vector case with arithmetic on both sides of noise.
+        for width, height in ((1, 1), (3, 2), (37, 5)):
+            options = dict(optimize=optimize, dimension=4, kind=2, arithmetic=1)
+            _, derivatives, _ = noise_reference(width, height, **options)
+            check_noise_render(noise_arguments(report=1, **options),
+                               width, height, derivatives, report=1, full=True)
+
+        for specialize in ("-O0", "-O2"):
+            for signed in (1, 0):
+                options = dict(optimize=optimize, specialize=specialize,
+                               signed_noise=signed, constant_inputs=1)
+                _, derivatives, _ = noise_reference(12, 3, **options)
+                actual = check_noise_render(noise_arguments(report=1, **options),
+                                            12, 3, derivatives, report=1)
+                compare(actual[1::3], [0] * 36, 0)
+                compare(actual[2::3], [0] * 36, 0)
+            actual = check_noise_render(
+                noise_arguments(optimize, specialize=specialize,
+                                report=2, constant_inputs=1),
+                12, 3, [0] * 108, report=2,
+            )
+            compare(actual, [0] * 108, 0)
 
 
 try:
@@ -438,7 +607,19 @@ try:
                 compare(gpu, expected, 2e-6)
                 compare(gpu, cpu, 6e-6)
 
-    if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth):
+    if args.noise:
+        for shader, error in (
+            ("hart_noise_named", "unsupported type 'string'"),
+            ("hart_noise_options", "unsupported type 'string'"),
+            ("hart_noise_periodic", "unsupported operation 'pnoise'"),
+        ):
+            run(["--hart", "-v", shader], error)
+            run(["--hart", "-v", "--shader", shader, "producer",
+                 "--shader", "hart_first", "consumer"], error)
+        check_noise_suite()
+
+    if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
+                         or args.noise):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
@@ -527,7 +708,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.filterwidth:
+if args.noise:
+    suite = "noise"
+elif args.filterwidth:
     suite = "filterwidth"
 else:
     suite = ("surface" if args.surface else

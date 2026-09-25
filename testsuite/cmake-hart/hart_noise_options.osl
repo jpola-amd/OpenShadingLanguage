@@ -1,0 +1,8 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_noise_options(output color Cout = 0)
+{
+    Cout = noise("gabor", P, "bandwidth", 1.25, "impulses", 8.0);
+}

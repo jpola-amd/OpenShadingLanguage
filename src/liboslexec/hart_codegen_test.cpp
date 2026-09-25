@@ -318,12 +318,19 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         if (name.empty() || optimize != 10)
             continue;
         const auto* shadeop = module.getFunction(std::string(name));
-        OIIO_CHECK_ASSERT(shadeop && !shadeop->isDeclaration()
-                          && !shadeop->use_empty());
-        const bool scalar_derivs = name == "osl_sin_dfdf"
-                                   || name == "osl_filterwidth_fdf";
-        const bool vector_derivs = name == "osl_normalize_dvdv"
-                                   || name == "osl_filterwidth_vdv";
+        const bool linked   = shadeop && !shadeop->isDeclaration()
+                              && !shadeop->use_empty();
+        if (!linked)
+            print(stderr, "Expected a linked, used shadeop '{}'\n", name);
+        OIIO_CHECK_ASSERT(linked);
+        const bool scalar_derivs
+            = name == "osl_sin_dfdf" || name == "osl_filterwidth_fdf"
+              || OIIO::Strutil::starts_with(name, "osl_noise_df")
+              || OIIO::Strutil::starts_with(name, "osl_snoise_df");
+        const bool vector_derivs
+            = name == "osl_normalize_dvdv" || name == "osl_filterwidth_vdv"
+              || OIIO::Strutil::starts_with(name, "osl_noise_dv")
+              || OIIO::Strutil::starts_with(name, "osl_snoise_dv");
         if (connected && (scalar_derivs || vector_derivs)) {
             const auto* storage = llvm::StructType::getTypeByName(context,
                                                                   "Groupdata");
@@ -375,6 +382,96 @@ check_rejection(string_view arch, string_view oso, string_view expected,
         ss.attribute("debug_nan", 1);
     auto group = make_group(ss, oso, layers);
     check_rejected_group(ss, *group, errors, expected);
+}
+
+
+
+bool
+check_noise_modules(string_view arch, string_view stdosl)
+{
+    const string_view coordinates = "float x=1.7*u-0.23; float y=2.3*v+0.31; "
+                                    "point p=point(x,y,u*v+0.7); ";
+    for (string_view operation : { "noise", "snoise" }) {
+        for (string_view type : { "float", "color", "vector" }) {
+            const auto assignment = fmtformat(
+                "{0} a={1}(x); {0} b={1}(x,y); {0} c={1}(p); "
+                "{0} d={1}(p,u+v); {0} e={1}(x,0.31); {0} f={1}(p,0.19); "
+                "value=a+b+c+d+e+f; ",
+                type, operation);
+            const std::string sources[] = {
+                fmtformat("shader hart_noise_test(output color Cout=0) {{ "
+                          "{} {} value=0; {} Cout=color(value); }}",
+                          coordinates, type, assignment),
+                fmtformat(
+                    "shader hart_noise_producer(output {} value=0) {{ {} {} }}",
+                    type, coordinates, assignment),
+                fmtformat(
+                    "shader hart_noise_consumer({} value=0, output color Cout=0) {{ "
+                    "Cout=color(value+Dx(value)+Dy(value)+filterwidth({})); }}",
+                    type, type == "float" ? "value" : "vector(value)"),
+            };
+            std::string bytecode[3];
+            for (size_t i = 0; i < std::size(sources); ++i) {
+                OSLCompiler compiler;
+                if (!compiler.compile_buffer(sources[i], bytecode[i], { },
+                                             stdosl))
+                    return false;
+            }
+            for (int optimize : { 10, 3 }) {
+                for (bool connected : { false, true }) {
+                    HartServices renderer;
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+                    ss.attribute("llvm_optimize", optimize);
+                    auto group = connected
+                                     ? make_connected_group(ss, bytecode[1],
+                                                            bytecode[2])
+                                     : make_group(ss, bytecode[0]);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "{} {} (LLVM {}): {}\n", operation, type,
+                              optimize, errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    const auto prefix = fmtformat("osl_{}_{}{}", operation,
+                                                  connected ? "d" : "",
+                                                  type == "float" ? "f" : "v");
+                    const std::string names[] = {
+                        prefix + (connected ? "df" : "f"),
+                        prefix + (connected ? "dfdf" : "ff"),
+                        prefix + (connected ? "dv" : "v"),
+                        prefix + (connected ? "dvdf" : "vf"),
+                    };
+                    check_module(ss, *group, arch,
+                                 { names[0], names[1], names[2], names[3] },
+                                 optimize, connected);
+                }
+            }
+        }
+    }
+    const struct {
+        string_view expression;
+        string_view error;
+    } rejected[] = {
+        { "noise(\"perlin\",point(0.25))", "unsupported type 'string'" },
+        { "noise(\"gabor\",P,\"bandwidth\",1.0)", "unsupported type 'string'" },
+        { "pnoise(P,vector(2))", "unsupported operation 'pnoise'" },
+        { "psnoise(P,vector(2))", "unsupported operation 'psnoise'" },
+        { "cellnoise(P)", "unsupported operation 'cellnoise'" },
+        { "hashnoise(P)", "unsupported operation 'hashnoise'" },
+        { "noise(I)", "unsupported shader global 'I'" },
+    };
+    for (const auto& test : rejected) {
+        const auto source = fmtformat(
+            "shader hart_noise_unsupported(output color Cout=0) {{ Cout=color({}); }}",
+            test.expression);
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, test.error);
+    }
+    return true;
 }
 
 }  // namespace
@@ -456,7 +553,7 @@ main(int argc, char* argv[])
         "shader hart_filterwidth_vector_consumer(vector value=0, int derivative=0, output color Cout=0) { "
         "vector w=filterwidth(value); if(derivative==1) Cout=color(Dx(w)); "
         "else if(derivative==2) Cout=color(Dy(w)); else Cout=color(w); }",
-        "shader hart_filterwidth_noise(output color Cout=0) { Cout=color(filterwidth(noise(P))); }",
+        "shader hart_filterwidth_noise(output color Cout=0) { float value=noise(P); Cout=color(filterwidth(value)); }",
         "shader hart_filterwidth_incident(output color Cout=0) { Cout=color(filterwidth(I)); }",
     };
     std::vector<std::string> oso(std::size(sources));
@@ -467,8 +564,8 @@ main(int argc, char* argv[])
     }
     // OSL level 10 skips passes; even O0 inlines alwaysinline HIP shadeops.
     for (int optimize : { 10, 3 }) {
-        for (int i : { 0, 1, 4, 12, 13, 16, 17, 23, 25, 27, 29, 30, 31, 32, 34,
-                       39, 40, 41, 42 }) {
+        for (int i : { 0,  1,  4,  12, 13, 16, 17, 23, 25, 27,
+                       29, 30, 31, 32, 34, 39, 40, 41, 42, 43 }) {
             HartServices renderer;
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
@@ -498,6 +595,10 @@ main(int argc, char* argv[])
                              optimize);
             else if (i == 41)
                 check_module(ss, *group, arch, { "osl_filterwidth_vdv" },
+                             optimize);
+            else if (i == 43)
+                check_module(ss, *group, arch,
+                             { "osl_noise_dfdv", "osl_filterwidth_fdf" },
                              optimize);
             else
                 check_module(ss, *group, arch, { sine_function }, optimize,
@@ -589,11 +690,19 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[21], "unsupported operation 'printf'");
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
     check_rejection(arch, oso[28], "unsupported operation 'Dz'");
-    check_rejection(arch, oso[43], "unsupported operation 'noise'");
     check_rejection(arch, oso[44], "unsupported shader global 'I'");
     check_rejection(arch, oso[35], "unsupported shader global 'I'");
     check_rejection(arch, oso[36], "writing shader global 'N'");
     check_rejection(arch, oso[37], "writing shader global 'P'");
+    {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("profile", 1);
+        auto group = make_group(ss, oso[43]);
+        check_rejected_group(ss, *group, errors, "instrumentation");
+    }
     // The two-argument transform is a stdosl wrapper.
     check_rejection(arch, oso[38], "unsupported operation 'functioncall'");
     for (string_view type : { "point", "vector", "normal" }) {
@@ -635,5 +744,7 @@ main(int argc, char* argv[])
                                        TypeDesc(TypeDesc::STRING, 1), &entry));
         check_rejected_group(ss, *group, errors, "default entry point");
     }
+    if (!check_noise_modules(arch, argv[2]))
+        return 1;
     return unit_test_failures;
 }

@@ -1,0 +1,62 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#define SAMPLE_NOISE(function, result)       \
+    if (d == 1)                             \
+        result = function(x);               \
+    else if (d == 2)                        \
+        result = function(x, y);            \
+    else if (d == 3)                        \
+        result = function(q);               \
+    else                                    \
+        result = function(q, w);
+
+shader hart_noise(int dimension = 0, int kind = -1, int signed_noise = 1,
+                  int constant_inputs = 0, float offset_u = 0,
+                  float offset_v = 0, output color Cout = 0)
+{
+    // The 12x3 matrix has three component probes per dimension and one
+    // row per result type. Offsets perturb coordinates, not probe selection.
+    int d = dimension;
+    if (d == 0)
+        d = 1 + int(u >= 0.25) + int(u >= 0.5) + int(u >= 0.75);
+    int k = kind;
+    if (k < 0)
+        k = int(v >= 0.25) + int(v >= 0.75);
+    float s = u + offset_u;
+    float t = v + offset_v;
+    if (constant_inputs) {
+        s = -0.37;
+        t = 0.61;
+    }
+    float x = 1.37 * s + 0.19 * t - 0.79;
+    float y = 0.91 * t - 0.27 * s - 0.43;
+    point q = point(x, y, 0.57 * s + 0.31 * t - 0.62);
+    float w = 0.73 * s - 1.13 * t + 0.21;
+    if (k == 0) {
+        float n = 0;
+        if (signed_noise) {
+            SAMPLE_NOISE(snoise, n)
+        } else {
+            SAMPLE_NOISE(noise, n)
+        }
+        Cout = color(n);
+    } else if (k == 1) {
+        color n = 0;
+        if (signed_noise) {
+            SAMPLE_NOISE(snoise, n)
+        } else {
+            SAMPLE_NOISE(noise, n)
+        }
+        Cout = n;
+    } else {
+        vector n = 0;
+        if (signed_noise) {
+            SAMPLE_NOISE(snoise, n)
+        } else {
+            SAMPLE_NOISE(noise, n)
+        }
+        Cout = color(n);
+    }
+}

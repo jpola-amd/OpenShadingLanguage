@@ -405,7 +405,7 @@ ShaderInstance::validate_hart() const
         ustring("while"),       ustring("Dx"),     ustring("Dy"),
         ustring("point"),       ustring("vector"), ustring("normal"),
         ustring("dot"),         ustring("length"), ustring("normalize"),
-        ustring("filterwidth"),
+        ustring("filterwidth"), ustring("noise"),  ustring("snoise"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),  ustring("v"),    ustring("P"),    ustring("N"),
