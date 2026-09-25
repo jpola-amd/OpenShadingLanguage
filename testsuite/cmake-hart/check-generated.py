@@ -44,11 +44,14 @@ suites.add_argument("--geometry", action="store_true",
                     help="Run read-only I/time and composed material runtime cases")
 suites.add_argument("--groups", action="store_true",
                     help="Run numeric multilayer chain runtime cases")
+suites.add_argument("--topology", action="store_true",
+                    help="Run diamond, join and lazy dependency runtime cases")
 args = parser.parse_args()
 if (args.loops or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.matrices
-        or args.spaces or args.geometry or args.groups) and not args.gpu:
+        or args.spaces or args.geometry or args.groups
+        or args.topology) and not args.gpu:
     parser.error("Runtime suites require --gpu")
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
@@ -1413,6 +1416,79 @@ def check_group_suite():
                  group_reference(9, 1, 1))
 
 
+def topology_arguments(optimize, mode=-1, reuse_all=1, textures=False,
+                       specialize="-O2"):
+    arguments = ["--llvm_opt", optimize, specialize]
+    if not textures:
+        arguments += ["--shader", "hart_group_producer", "root"]
+    for side, name in enumerate(("left", "right")):
+        if side == 1:
+            arguments += ["--shader", "hart_first", "unused"]
+        arguments += ["--param", "side", str(side)]
+        if textures:
+            arguments += ["--param", "mode", str(mode)]
+        arguments += ["--shader", "hart_topology_texture" if textures else
+                       "hart_topology_branch", name]
+    arguments += ["--param", "mode", str(mode),
+                  "--param", "reuse_all", str(reuse_all),
+                  "--shader", "hart_topology_join", "join"]
+    for name in ("left", "right"):
+        arguments += ["--connect", name, "value", "join", name]
+        if not textures:
+            arguments += ["--connect", "root", "value", name, "root"]
+    if not textures:
+        arguments += ["--connect", "root", "value", "join", "root"]
+    return arguments
+
+
+def topology_reference(width, height, mode=-1, reuse_all=1, textures=False):
+    du, dv = 1 / max(1, width - 1), 1 / max(1, height - 1)
+
+    def evaluate(u, v):
+        selected_mode = min(int(4 * v), 3) if mode < 0 else mode
+        take_left = (u > v, True, False, u == v)[selected_mode]
+        if textures:
+            # The red plane is a linear ramp: mip-0 samples equal s + 1/16.
+            root = (0, 0, 0)
+            left = (0.1875 + 0.5 * u, 0.5 * du, 0)
+            right = (0.3125 + 0.5 * v, 0, 0.5 * dv)
+        else:
+            root = (u + v, du, dv)
+            left = (0.5 * (u + v) + u * u, (0.5 + 2 * u) * du, 0.5 * dv)
+            right = (-0.25 * (u + v) + v * v, -0.25 * du, (-0.25 + 2 * v) * dv)
+        selected = left if take_left else right
+        return tuple(1.5 * s + 0.25 * r + (0.125 * (a + b) if reuse_all else 0)
+                     for s, r, a, b in zip(selected, root, left, right))
+    return reference(width, height, evaluate)
+
+
+def check_topology_suite():
+    prepare_texture_images()
+    for optimize in ("10", "3"):
+        print("Checking HART dependency topology at LLVM level " + optimize,
+              flush=True)
+        # Mixed, all-left, all-right and equality regions share one diamond.
+        # The unused middle node exercises remapped live-layer flag indexes.
+        cases = [(9, 9, -1, 1, False, "-O2"),
+                 (1, 1, 1 if optimize == "10" else 2, 0, False, "-O0"),
+                 (9, 9, 0, 0, True, "-O2"), (9, 9, 3, 0, True, "-O2")]
+        for width, height, mode, reuse_all, textures, specialize in cases:
+            shader_args = topology_arguments(optimize, mode, reuse_all,
+                                             textures, specialize)
+            expected = topology_reference(width, height, mode, reuse_all, textures)
+            cpu = noise_cpu_image(shader_args, width, height)
+            compare(cpu, expected)
+            actual = check_texture_render(
+                shader_args, width, height, expected,
+                repeat=width == 1 and optimize == "3",
+            )
+            compare(actual, cpu)
+        # Forcing the other input after the join must execute its invalid lookup.
+        run(["--hart", "--hart-no-cache", "-v", "-g", "9", "9"]
+            + topology_arguments(optimize, mode=0, reuse_all=1, textures=True),
+            "nonfinite coordinates/gradients", error_after_launch=True)
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -1683,10 +1759,14 @@ try:
     if args.groups:
         check_group_suite()
 
+    if args.topology:
+        check_topology_suite()
+
     if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.matrices
-                         or args.spaces or args.geometry or args.groups):
+                         or args.spaces or args.geometry or args.groups
+                         or args.topology):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),

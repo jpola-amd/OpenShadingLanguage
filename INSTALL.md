@@ -772,6 +772,15 @@ a HART-specific scheduler or fixed layer-count cap. The last layer remains
 the sole default entry point; every original layer is validated before
 optimization, including unused layers.
 
+`hart-topology-runtime` checks fan-in/fan-out graphs, shared producers, and
+conditional inputs reused after branches. Layer execution remains lazy:
+only required dependencies execute, and a shared producer runs at most once
+per shading point. Compiler tests verify distinct execution flags, guarded
+calls and complete initialization, including remapping past unused layers.
+GPU probes put overflowing texture coordinates in unselected producers:
+lazy execution must succeed, while explicitly consuming both branches must
+report a device sampling error. This checks execution, not just matching pixels.
+
 `hart-procedural-runtime` combines these operations in connected groups:
 a bounded multi-octave periodic-noise loop with a color ramp, a repeating
 cell/hash pattern, and an explicitly footprint-filtered transition.

@@ -31,6 +31,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Error.h>
@@ -408,7 +409,30 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             }
         }
         int internal_layers = 0;
-        for (const auto& function : module) {
+        auto flag_index     = [&](const llvm::Value* pointer,
+                                  const llvm::Function& function) {
+            if (pointer->stripPointerCasts() == function.getArg(1))
+                return 0;
+            const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(
+                pointer->stripPointerCasts());
+            if (!gep || gep->getSourceElementType() != storage
+                || gep->getNumIndices() != 3
+                || gep->getPointerOperand()->stripPointerCasts()
+                       != function.getArg(1))
+                return -1;
+            const auto* base = llvm::dyn_cast<llvm::ConstantInt>(
+                gep->getOperand(1));
+            const auto* field = llvm::dyn_cast<llvm::ConstantInt>(
+                gep->getOperand(2));
+            const auto* index = llvm::dyn_cast<llvm::ConstantInt>(
+                gep->getOperand(3));
+            return base && base->isZero() && field && field->isZero() && index
+                           && index->getLimitedValue() < uint64_t(used_layers)
+                       ? int(index->getZExtValue())
+                       : -1;
+        };
+        std::vector<bool> flags_written(used_layers - 1, false);
+        for (auto& function : module) {
             if (function.getName().find("osl_layer_group_hart_test_group_name_")
                 != 0)
                 continue;
@@ -416,9 +440,33 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             OIIO_CHECK_ASSERT(function.hasLocalLinkage());
             OIIO_CHECK_ASSERT(!function.isDeclaration());
             OIIO_CHECK_EQUAL(function.arg_size(), 6);
+            int flag = -1, stores = 0;
+            for (const auto& block : function)
+                for (const auto& inst : block) {
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst);
+                    if (!store)
+                        continue;
+                    const int index = flag_index(store->getPointerOperand(),
+                                                 function);
+                    if (index < 0)
+                        continue;
+                    ++stores;
+                    flag              = index;
+                    const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                        store->getValueOperand());
+                    OIIO_CHECK_ASSERT(value && value->isOne());
+                    OIIO_CHECK_EQUAL(store->getParent(),
+                                     &function.getEntryBlock());
+                }
+            OIIO_CHECK_EQUAL(stores, 1);
+            OIIO_CHECK_ASSERT(flag >= 0 && flag < used_layers - 1);
+            if (flag >= 0 && flag < used_layers - 1) {
+                OIIO_CHECK_ASSERT(!flags_written[flag]);
+                flags_written[flag] = true;
+            }
             int calls = 0;
-            for (const auto* user : function.users()) {
-                const auto* call = llvm::dyn_cast<llvm::CallInst>(user);
+            for (auto* user : function.users()) {
+                auto* call = llvm::dyn_cast<llvm::CallInst>(user);
                 OIIO_CHECK_ASSERT(call);
                 if (!call)
                     continue;
@@ -429,10 +477,53 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                 for (unsigned int arg = 0; arg < 6; ++arg)
                     OIIO_CHECK_EQUAL(call->getArgOperand(arg),
                                      call->getFunction()->getArg(arg));
+                llvm::DominatorTree dominators(*call->getFunction());
+                bool guarded = false;
+                for (const auto& block : *call->getFunction()) {
+                    const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                        block.getTerminator());
+                    if (!branch || !branch->isConditional())
+                        continue;
+                    const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(
+                        branch->getCondition());
+                    if (!cmp || cmp->getPredicate() != llvm::CmpInst::ICMP_NE)
+                        continue;
+                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(
+                        cmp->getOperand(0));
+                    const auto* ran = llvm::dyn_cast<llvm::ConstantInt>(
+                        cmp->getOperand(1));
+                    guarded |= flag >= 0 && load && ran && ran->isOne()
+                               && flag_index(load->getPointerOperand(),
+                                             *call->getFunction())
+                                      == flag
+                               && dominators.dominates(branch->getSuccessor(0),
+                                                       call->getParent());
+                }
+                OIIO_CHECK_ASSERT(guarded);
             }
             OIIO_CHECK_ASSERT(calls > 0);
         }
         OIIO_CHECK_EQUAL(internal_layers, used_layers - 1);
+        ustring init_name;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(&group, "group_init_name", init_name));
+        const auto* init  = module.getFunction(init_name.c_str());
+        bool resets_flags = false;
+        if (init)
+            for (const auto& block : *init)
+                for (const auto& inst : block) {
+                    const auto* clear = llvm::dyn_cast<llvm::MemSetInst>(&inst);
+                    if (!clear || flag_index(clear->getRawDest(), *init) != 0)
+                        continue;
+                    const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                        clear->getValue());
+                    const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                        clear->getLength());
+                    resets_flags |= value && value->isZero() && length
+                                    && length->getZExtValue()
+                                           == uint64_t((used_layers + 3) & ~3);
+                }
+        OIIO_CHECK_ASSERT(resets_flags);
     }
     const void* again = nullptr;
     OIIO_CHECK_ASSERT(
@@ -522,6 +613,79 @@ check_chain_modules(string_view arch, string_view stdosl)
                                  false, layers);
                 }
     }
+    return true;
+}
+
+
+
+bool
+check_topology_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_root(output float value=0) { value=sin(u*v); }",
+        "shader hart_left(float value=0,output float result=0) { result=2*value+v; }",
+        "shader hart_right(float value=0,output float result=0) { result=3*value-u; }",
+        "shader hart_join(float a=0,float b=0,int reuse=0,output color Cout=0) { "
+        "float x=0; if(u>v) x=a; else x=b; if(reuse) x+=a+b; "
+        "Cout=color(x,Dx(x),Dy(x)); }",
+        "shader hart_unused(output float value=0) { value=u*v; }",
+        "shader hart_bad_unused(output float value=0) { "
+        "if (u<0) printf(\"unsupported\"); value=u*v; }",
+    };
+    std::string bytecode[6];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+            return false;
+    }
+    for (int osl_optimize : { 0, 2 })
+        for (int optimize : { 10, 3 })
+            for (int reuse : { 0, 1 })
+                for (bool reject : { false, true }) {
+                    HartServices renderer;
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("optimize", osl_optimize);
+                    ss.attribute("llvm_optimize", optimize);
+                    const char* names[] = { "root", "left", "right", "join",
+                                            "unused" };
+                    for (int i = 0; i < 5; ++i)
+                        OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader(
+                            names[i], bytecode[i == 4 && reject ? 5 : i]));
+                    auto group = ss.ShaderGroupBegin("hart_test_group");
+                    for (int i : { 0, 4, 1, 2, 3 }) {
+                        if (i == 3)
+                            OIIO_CHECK_ASSERT(
+                                ss.Parameter("reuse", TypeDesc::INT, &reuse));
+                        OIIO_CHECK_ASSERT(
+                            ss.Shader("surface", names[i], names[i]));
+                    }
+                    OIIO_CHECK_ASSERT(
+                        ss.ConnectShaders("root", "value", "left", "value"));
+                    OIIO_CHECK_ASSERT(
+                        ss.ConnectShaders("root", "value", "right", "value"));
+                    OIIO_CHECK_ASSERT(
+                        ss.ConnectShaders("left", "result", "join", "a"));
+                    OIIO_CHECK_ASSERT(
+                        ss.ConnectShaders("right", "result", "join", "b"));
+                    OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+                    const SymLocationDesc output("join.Cout", TypeColor, false,
+                                                 SymArena::Outputs, 0,
+                                                 3 * sizeof(float));
+                    ss.add_symlocs(group.get(), { &output, 1 });
+                    if (reject) {
+                        check_rejected_group(ss, *group, errors,
+                                             "unsupported operation 'printf'");
+                        continue;
+                    }
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "{}\n", errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    check_module(ss, *group, arch, { "osl_sin_dfdf" }, optimize,
+                                 false, false, false, 4);
+                }
     return true;
 }
 
@@ -1438,6 +1602,7 @@ main(int argc, char* argv[])
         check_rejected_group(ss, *group, errors, "default entry point");
     }
     if (!check_chain_modules(arch, argv[2])
+        || !check_topology_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
