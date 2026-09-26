@@ -932,6 +932,37 @@ The closure runtime variants are `split`, `fused`, `fused-local` and
 device modules cover all configured architectures. Compilation alone is not
 evidence of execution on Linux, gfx1100, gfx1151 or NVIDIA hardware.
 
+### Testing native HART triangle traversal
+
+`hart_trace_test` exercises the native HART acceleration and pipeline API,
+without HART's OptiX compatibility aliases or NVIDIA runtime dependencies.
+It uploads indexed triangles, builds a triangle acceleration structure, and
+selects a material record through each primitive's SBT offset. Raygen traces
+real rays; closest-hit returns primitive IDs, distance, barycentrics and the
+SBT material ID. The GPU also computes geometric normals from the uploaded
+world-space vertices.
+
+With `OSL_BUILD_TESTS`, `BUILD_TESTING`, `USE_LLVM_BITCODE` and `OSL_USE_HART`
+enabled, set `TESTSUITE_HART=1` when configuring and run:
+
+```powershell
+cmake --build build\hart-validation --config Release `
+  --target hart_trace_test --parallel 8
+ctest --test-dir build\hart-validation -C Release `
+  -R "^hart-raytracer-" --output-on-failure
+```
+
+The runtime test compares the existing CPU scene/BVH with analytical and GPU
+hit/miss results for zero, one and multiple triangles, overlapping geometry,
+near/far clipping, back faces, non-unit directions, sheared geometry normals,
+distinct material records, A-B-A ray rebinding, and an empty scene. Invalid
+geometry produces an explicit error before acceleration construction.
+Codegen tests verify the device module for every configured architecture.
+Only execution on the selected physical device is runtime evidence.
+
+This is a traversal foundation, not yet an OSL material path tracer or a
+`testrender --hart` mode. It is unrelated to the OSL `trace()` renderer service.
+
 ### Testing external HART device code
 
 `testshade --hart --hart-module FILE.bc` preserves the independent external
