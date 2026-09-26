@@ -206,6 +206,7 @@ public:
     {
         return feature == "HART" || feature == "HARTTextures"
                || feature == "HARTTransforms" || feature == "HARTArrayBounds"
+               || feature == "HARTSplineErrors"
                || (m_closures && feature == "HARTClosures");
     }
 

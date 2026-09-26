@@ -19,3 +19,14 @@ rs_hart_range_error(OSL::OpaqueExecContextPtr ec, int, int)
         sg->renderstate);
     atomicOr(state->textures->errors, testshade::HartArrayIndexOutOfBounds);
 }
+
+
+
+OSL_RSOP OSL_HOSTDEVICE void
+rs_hart_spline_error(OSL::OpaqueExecContextPtr ec)
+{
+    const auto* sg    = static_cast<const OSL::ShaderGlobals*>(ec);
+    const auto* state = static_cast<const testshade::HartRenderState*>(
+        sg->renderstate);
+    atomicOr(state->textures->errors, testshade::HartInvalidSpline);
+}

@@ -40,6 +40,8 @@ suites.add_argument("--math", action="store_true",
                     help="Run scalar and triple math runtime cases")
 suites.add_argument("--numeric-math", action="store_true",
                     help="Run transcendental, geometric and IEEE classification cases")
+suites.add_argument("--splines", action="store_true",
+                    help="Run spline derivatives, knot bounds and nonfinite guards")
 suites.add_argument("--procedural", action="store_true",
                     help="Run connected procedural material runtime cases")
 suites.add_argument("--textures", action="store_true",
@@ -71,7 +73,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
 if (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-        or args.noise or args.noise_families or args.math or args.numeric_math
+        or args.noise or args.noise_families or args.math or args.numeric_math or args.splines
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
         or args.spaces or args.geometry or args.groups
@@ -2407,6 +2409,249 @@ def check_aggregate_suite():
             "string")
 
 
+def check_spline_suite():
+    width, height = 17, 3
+    cases = []
+    bases = [("catmull-rom", 1, 7), ("bezier", 3, 7), ("bspline", 1, 7),
+             ("hermite", 2, 8), ("linear", 1, 7), ("constant", 1, 7)]
+    for basis, step, length in bases:
+        for triple, dynamic in ((False, False), (True, False), (False, True)):
+            shader = ("spline_" + basis.replace("-", "_")
+                      + ("_triple" if triple else "_scalar")
+                      + ("_dynamic" if dynamic else ""))
+            kind = "color" if triple else "float"
+            knots = []
+            for i in range(length):
+                tangent = basis == "hermite" and i % 2
+                position = i/3 if basis == "bezier" else i//2 if basis == "hermite" else i
+                value = "b" if tangent else f"(a+b*{position:.9g})"
+                if triple:
+                    value = (f"color({value},2*{value},-{value})" if tangent
+                             else f"color({value},2*{value}+0.5,1-{value})")
+                knots.append(value)
+            count = f"4+{step}*int(v>0.5)," if dynamic else ""
+            selected = "result[int(2*v)]" if triple else "result"
+            source = root / (shader + ".osl")
+            source.write_text(
+                f"shader {shader}(output color Cout=0) {{"
+                f"float a=0.25*v,b=1+0.5*v;{kind} knots[{length}]={{"
+                + ",".join(knots) + "};"
+                f'{kind} result=spline("{basis}",2*u-0.5,{count}knots);'
+                f"float q={selected};Cout=color(q,Dx(q),Dy(q));}}",
+                encoding="ascii")
+            compile_fixture(source)
+
+            def expected(u, v, basis=basis, step=step, length=length,
+                         triple=triple, dynamic=dynamic):
+                count = 4+step*int(v > 0.5) if dynamic else length
+                segments = (count-4)//step+1
+                x = max(0, min(1, 2*u-0.5))
+                position = (1 if step == 1 else 0) + segments*x
+                if basis == "constant":
+                    position = 1+min(int(segments*x), segments-1)
+                value = 0.25*v+(1+0.5*v)*position
+                dx = (2*(1+0.5*v)*segments/(width-1)
+                      if 0 <= 2*u-0.5 <= 1 else 0)
+                dy = (0.25+0.5*position)/(height-1)
+                if basis == "constant":
+                    dx = dy = 0
+                if triple:
+                    scale, offset = ((1, 0), (2, 0.5), (-1, 1))[int(2*v)]
+                    value, dx, dy = scale*value+offset, scale*dx, scale*dy
+                return value, dx, dy
+
+            representative = ((triple and basis in ("catmull-rom", "bezier"))
+                              or (dynamic and basis == "linear"))
+            cases.append(([shader], reference(width, height, expected), representative))
+
+    curves = [
+        ("catmull-rom", lambda t: (1+t)**2, lambda t: 2+2*t, 0.5, 4),
+        ("bspline", lambda t: 4/3+2*t+t*t, lambda t: 2+2*t, 0.5, 4),
+        ("bezier", lambda t: 3*t+6*t*t, lambda t: 3+12*t, -1, 11),
+        ("hermite", lambda t: t+t*t+2*t**3, lambda t: 1+2*t+6*t*t, -0.5, 5),
+        ("linear", lambda t: 1+3*t, lambda t: 3, 0.5, 4),
+        ("constant", lambda t: 1, lambda t: 0, 0, 1),
+    ]
+    for basis, curve, derivative, low, span in curves:
+        shader = "spline_curved_" + basis.replace("-", "_")
+        source = root / (shader + ".osl")
+        source.write_text(
+            f"shader {shader}(output color Cout=0) {{"
+            "float knots[4]={0,1,4,9};"
+            f'float q=spline("{basis}",2*u-0.5,knots);'
+            "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+        compile_fixture(source)
+
+        def expected(u, v, curve=curve, derivative=derivative):
+            x = 2*u-0.5
+            t = max(0, min(1, x))
+            return curve(t), (2*derivative(t)/(width-1) if 0 <= x <= 1 else 0), 0
+
+        cases.append(([shader], reference(width, height, expected), False))
+        if basis in ("linear", "constant"):
+            continue
+        inverse_knots = "0,1,4,9"
+        if basis == "hermite":
+            # Keep this numerical reference inside the existing bounded
+            # solver's convergence range (a monotonic t+t*t curve).
+            inverse_knots = "0,1,2,3"
+            curve, derivative = lambda t: t+t*t, lambda t: 1+2*t
+            low, span = -0.25, 2.5
+        shader = "spline_curved_inverse_" + basis.replace("-", "_")
+        source = root / (shader + ".osl")
+        source.write_text(
+            f"shader {shader}(output color Cout=0) {{"
+            f"float knots[4]={{{inverse_knots}}};"
+            f'float q=splineinverse("{basis}",{low}+{span}*u,knots);'
+            "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+        compile_fixture(source)
+
+        def expected(u, v, basis=basis, curve=curve, derivative=derivative,
+                     low=low, span=span):
+            y = low+span*u
+            # The shared inverse clamps to knot values, not curve endpoints.
+            lower = max(curve(0), 1 if basis in ("catmull-rom", "bspline") else 0)
+            upper = min(curve(1), 4 if basis in ("catmull-rom", "bspline") else 9)
+            if y <= lower:
+                return 0, 0, 0
+            if y >= upper:
+                return 1, 0, 0
+            left, right = 0, 1
+            for _ in range(60):
+                middle = (left+right)/2
+                if curve(middle) < y:
+                    left = middle
+                else:
+                    right = middle
+            t = (left+right)/2
+            return t, span/derivative(t)/(width-1), 0
+
+        cases.append(([shader], reference(width, height, expected), False))
+
+    for varying in (False, True):
+        shader = "spline_inverse_" + ("varying" if varying else "fixed")
+        source = root / (shader + ".osl")
+        position = "2*u-0.5+0.03125" if varying else "2*u-0.5"
+        source.write_text(
+            f"shader {shader}(output color Cout=0) {{"
+            + ("float a=0.25*v,b=1+0.5*v;" if varying else "float a=0,b=1;")
+            + "float knots[7]={a,a+b,a+2*b,a+3*b,a+4*b,a+5*b,a+6*b};"
+            + f'float q=splineinverse("linear",a+b*(1+4*({position})),knots);'
+              "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+        compile_fixture(source)
+
+        def expected(u, v, varying=varying):
+            # Offset varying knots from solver branch boundaries, where float
+            # rounding can select bisection (zero) or the ordinary derivative.
+            x = 2*u-0.5+(0.03125 if varying else 0)
+            if not 0 < x < 1:
+                return max(0, min(1, x)), 0, 0
+            if 4*x == int(4*x):
+                # The existing inverse bisects at exact segment boundaries,
+                # dropping derivatives rather than taking the one-sided slope.
+                return x, 0, 0
+            # The existing inverse helper deliberately ignores knot derivatives.
+            dy = ((0.25+0.5*(1+4*x))/(4*(1+0.5*v))/(height-1)
+                  if varying else 0)
+            return x, 2/(width-1), dy
+
+        cases.append(([shader], reference(width, height, expected), True))
+
+    for shader, parameter in (("spline_parameters", "knots"),
+                              ("spline_connected", "value")):
+        source = root / (shader + ".osl")
+        source.write_text(
+            f"shader {shader}(float {parameter}[]={{0,1,2,3}},output color Cout=0) {{"
+            f'float q=spline("linear",2*u-0.5,{parameter});'
+            "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+        compile_fixture(source)
+    for length in (4, 7, 9):
+        parameters = ["--param:type=float[" + str(length) + "]", "knots",
+                      ",".join(str(i) for i in range(length)), "spline_parameters"]
+
+        def expected(u, v, length=length):
+            x = 2*u-0.5
+            return (1+(length-3)*max(0, min(1, x)),
+                    2*(length-3)/(width-1) if 0 <= x <= 1 else 0, 0)
+
+        cases.append((parameters, reference(width, height, expected), length == 7))
+    source = root / "spline_producer.osl"
+    source.write_text(
+        "shader spline_producer(output float value[7]={0,0,0,0,0,0,0}) {"
+        "for(int i=0;i<7;++i)value[i]=i+0.25*v;}", encoding="ascii")
+    compile_fixture(source)
+    connected = connected_group("spline_connected", producer=source.stem)
+    cases.append((connected, reference(width, height, lambda u, v:
+                  (1+4*max(0, min(1, 2*u-0.5))+0.25*v,
+                   8/(width-1) if 0 <= 2*u-0.5 <= 1 else 0,
+                   0.25/(height-1))), True))
+
+    configurations = [
+        ("-O2", "3", []), ("-O0", "10", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"]),
+    ]
+    for shaders, expected, representative in cases:
+        for osl_opt, llvm_opt, mode in configurations if representative else configurations[:1]:
+            print("Checking spline", shaders, osl_opt, llvm_opt, mode, flush=True)
+            check_image_render(shaders, [osl_opt, "--llvm_opt", llvm_opt],
+                               mode, width, height, expected, tolerance=2e-6)
+
+    for inverse in (False, True):
+        shader = "spline_invalid_" + ("inverse" if inverse else "forward")
+        operation = "splineinverse" if inverse else "spline"
+        source = root / (shader + ".osl")
+        source.write_text(
+            f"shader {shader} [[int range_checking=0]] "
+            "(int offset=0,float special=0,output color Cout=0) {"
+            "float knots[7]={0,1,2,3,4,5,6};int count=4+3*int(u>0.5)+offset;"
+            f'float q={operation}("bezier",u<0.5 ? special : u,count,knots);'
+            "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+        compile_fixture(source)
+        for osl_opt, llvm_opt, mode in (configurations[1], configurations[3]):
+            for text in ("inf", "-inf"):
+                def expected(u, v, inverse=inverse, text=text):
+                    segments = 1+int(u > 0.5)
+                    if u < 0.5:
+                        return (1 if inverse else 3*segments) if text == "inf" else 0, 0, 0
+                    scale = 1/(3*segments) if inverse else 3*segments
+                    return scale*u, scale/4, 0
+
+                check_image_render(
+                    ["--param:type=float", "special", text, shader],
+                    [osl_opt, "--llvm_opt", llvm_opt], mode, 5, 3,
+                    reference(5, 3, expected), tolerance=2e-6)
+        for osl_opt, llvm_opt, mode in configurations:
+            rejected = root / "spline-rejected.pfm"
+            errors = [["--param", "offset", "-1"],
+                      ["--param", "offset", "1"],
+                      ["--param:type=float", "special", "nan"]]
+            if mode == configurations[3][2]:
+                errors += [["--param", "offset", "-2147483648"],
+                           ["--param", "offset", "2147483647"]]
+            for parameters in errors:
+                run(["--hart", "--hart-no-cache", "-v", osl_opt, "--llvm_opt",
+                     llvm_opt, "-g", "5", "3", "-o", "Cout", str(rejected)]
+                    + mode + parameters + [shader], "invalid spline arguments",
+                    error_after_launch=True)
+                assert not rejected.exists()
+    for basis, length, count, error in [
+            ("unknown", 4, 4, "spline basis"), ("linear", 3, 3, "spline knot"),
+            ("linear", 4, 3, "spline knot"), ("bezier", 5, 5, "spline knot")]:
+        source = root / "spline_bad.osl"
+        source.write_text(
+            "shader spline_bad(output color Cout=0) {"
+            f"float k[{length}]={{" + ",".join(str(i) for i in range(length))
+            + f'}};Cout=color(spline("{basis}",u,{count},k));}}', encoding="ascii")
+        compile_fixture(source)
+        rejected = root / "spline-rejected.pfm"
+        run(["--hart", "-v", "-o", "Cout", str(rejected), "spline_bad"], error)
+        assert not rejected.exists()
+    run(["--hart", "-v", "--param:type=float[3]", "knots", "0,1,2",
+         "-o", "Cout", str(rejected), "spline_parameters"], "spline knot")
+    assert not rejected.exists()
+
+
 def check_numeric_math_suite():
     width, height = 17, 3
     unary = [
@@ -2926,6 +3171,8 @@ try:
 
     if args.numeric_math:
         check_numeric_math_suite()
+    if args.splines:
+        check_spline_suite()
 
     if args.procedural:
         check_procedural_suite()
@@ -2970,7 +3217,7 @@ try:
         check_fused_benchmark()
 
     if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-                         or args.noise or args.noise_families or args.math or args.numeric_math
+                         or args.noise or args.noise_families or args.math or args.numeric_math or args.splines
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
                          or args.matrices
@@ -3068,7 +3315,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.numeric_math:
+if args.splines:
+    suite = "splines"
+elif args.numeric_math:
     suite = "numeric math"
 elif args.aggregates:
     suite = "aggregates"

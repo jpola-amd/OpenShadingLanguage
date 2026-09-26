@@ -53,11 +53,13 @@ namespace {
 class HartServices final : public RendererServices {
 public:
     explicit HartServices(bool textures = false, bool transforms = false,
-                          bool closures = false, bool arrays = false)
+                          bool closures = false, bool arrays = false,
+                          bool splines = false)
         : m_textures(textures)
         , m_transforms(transforms)
         , m_closures(closures)
         , m_arrays(arrays)
+        , m_splines(splines)
     {
     }
     int supports(string_view feature) const override
@@ -65,7 +67,8 @@ public:
         return feature == "HART" || (m_textures && feature == "HARTTextures")
                || (m_transforms && feature == "HARTTransforms")
                || (m_closures && feature == "HARTClosures")
-               || (m_arrays && feature == "HARTArrayBounds");
+               || (m_arrays && feature == "HARTArrayBounds")
+               || (m_splines && feature == "HARTSplineErrors");
     }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -90,6 +93,7 @@ private:
     bool m_transforms;
     bool m_closures;
     bool m_arrays;
+    bool m_splines;
 };
 
 
@@ -306,7 +310,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
              bool looping = false, int used_layers = 0, bool closures = false,
-             bool aggregates = false)
+             bool aggregates = false, int spline_arraylen = 0)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -578,6 +582,52 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     for (const auto& function : module) {
         if (function.getName().find("__direct_callable__") == 0)
             ++callables;
+        if (function.getName().find("osl_") == 0 && !function.use_empty()) {
+            if (function.isDeclaration())
+                print("Undefined used shadeop '{}' (arch {}, LLVM {})\n",
+                      function.getName().str(), arch, optimize);
+            OIIO_CHECK_ASSERT(!function.isDeclaration());
+        }
+        const bool spline = function.getName().find("osl_spline_") == 0
+                            || function.getName().find("osl_splineinverse_")
+                                   == 0;
+        const bool spline_validator = function.getName()
+                                      == "osl_hart_spline_validate";
+        const bool spline_error = function.getName() == "rs_hart_spline_error";
+        bool original_spline_call = false;
+        if (optimize == 10 && (spline || spline_validator))
+            for (const auto* user : function.users())
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
+                    if (call->getCalledFunction() == &function) {
+                        const auto caller = call->getFunction()->getName();
+                        original_spline_call
+                            |= caller.find("osl_layer_group_") == 0
+                               || caller.find("osl_init_group_") == 0;
+                    }
+        // Optimized internal specializations may drop arguments. Only the
+        // original shadeop calls have this ABI; renderer callbacks always do.
+        if (!function.use_empty() && (original_spline_call || spline_error)) {
+            OIIO_CHECK_EQUAL(function.isDeclaration(), spline_error);
+            OIIO_CHECK_ASSERT(!function.isVarArg());
+            OIIO_CHECK_ASSERT(spline_validator
+                                  ? function.getReturnType()->isIntegerTy(32)
+                                  : function.getReturnType()->isVoidTy());
+            OIIO_CHECK_EQUAL(function.arg_size(),
+                             spline ? 6 : (spline_validator ? 5 : 1));
+            for (const auto& arg : function.args()) {
+                const unsigned int n = arg.getArgNo();
+                if (spline && n == 1)
+                    OIIO_CHECK_ASSERT(arg.getType()->isIntegerTy(64));
+                else if ((spline && n >= 4) || (spline_validator && n < 3))
+                    OIIO_CHECK_ASSERT(arg.getType()->isIntegerTy(32));
+                else if (spline_validator && n == 3)
+                    OIIO_CHECK_ASSERT(arg.getType()->isFloatTy());
+                else
+                    OIIO_CHECK_ASSERT(arg.getType()->isPointerTy()
+                                      && arg.getType()->getPointerAddressSpace()
+                                             == 0);
+            }
+        }
         OIIO_CHECK_ASSERT(!function.hasFnAttribute("nvptx-f32ftz"));
         const auto cpu = function.getFnAttribute("target-cpu");
         if (cpu.isStringAttribute())
@@ -598,6 +648,50 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
             }
     }
     OIIO_CHECK_EQUAL(callables, 3);
+    if (spline_arraylen && optimize == 10) {
+        int spline_calls = 0;
+        for (auto& function : module) {
+            if (function.getName().find("osl_layer_group_") != 0)
+                continue;
+            llvm::DominatorTree dominators(function);
+            for (const auto& block : function)
+                for (const auto& inst : block) {
+                    const auto* call   = llvm::dyn_cast<llvm::CallBase>(&inst);
+                    const auto* callee = call ? call->getCalledFunction()
+                                              : nullptr;
+                    if (!callee
+                        || (callee->getName().find("osl_spline_") != 0
+                            && callee->getName().find("osl_splineinverse_")
+                                   != 0))
+                        continue;
+                    ++spline_calls;
+                    OIIO_CHECK_EQUAL(call->arg_size(), 6);
+                    if (call->arg_size() != 6)
+                        continue;
+                    const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(5));
+                    OIIO_CHECK_ASSERT(length);
+                    if (length)
+                        OIIO_CHECK_EQUAL(length->getSExtValue(),
+                                         spline_arraylen);
+                    bool guarded = false;
+                    for (const auto& candidate : function) {
+                        const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                            candidate.getTerminator());
+                        if (!branch || !branch->isConditional()
+                            || !dominators.dominates(&candidate, &block))
+                            continue;
+                        guarded
+                            |= dominators.dominates(branch->getSuccessor(0),
+                                                    &block)
+                               != dominators.dominates(branch->getSuccessor(1),
+                                                       &block);
+                    }
+                    OIIO_CHECK_ASSERT(guarded);
+                }
+        }
+        OIIO_CHECK_ASSERT(spline_calls > 0);
+    }
     if (looping && optimize == 10) {
         OIIO_CHECK_ASSERT(entry);
         if (entry) {
@@ -697,10 +791,15 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         const bool callback = OIIO::Strutil::starts_with(name, "rs_");
         const bool used     = shadeop && shadeop->isDeclaration() == callback
                               && !shadeop->use_empty();
-        if (!used)
-            print(stderr, "Expected a used {} '{}'\n",
+        if (!used) {
+            const char* state = !shadeop ? "missing"
+                                : shadeop->isDeclaration() != callback
+                                    ? "wrong declaration/definition kind"
+                                    : "unused";
+            print("Expected a used {} '{}': {} (arch {}, LLVM {})\n",
                   callback ? "renderer callback declaration" : "linked shadeop",
-                  name);
+                  name, state, arch, optimize);
+        }
         OIIO_CHECK_ASSERT(used);
         const bool scalar_derivs = name == "osl_sin_dfdf"
                                    || name == "osl_filterwidth_fdf"
@@ -3134,6 +3233,351 @@ check_aggregate_modules(string_view arch, string_view stdosl,
 
 
 bool
+check_spline_modules(string_view arch, string_view stdosl)
+{
+    auto check = [&](string_view label, string_view producer,
+                     string_view consumer,
+                     std::initializer_list<string_view> shadeops,
+                     int osl_optimize, int optimize, int arraylen, bool local) {
+        HartServices renderer(false, false, false, true, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", local ? 4096 : 0));
+        const bool connected = !consumer.empty();
+        auto group = connected ? make_connected_group(ss, producer, consumer)
+                               : make_group(ss, producer);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Spline {} (OSL {}, LLVM {}): {}\n", label,
+                  osl_optimize, optimize, errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, local ? size : 0);
+        check_module(ss, *group, arch, shadeops, optimize, connected, false,
+                     false, connected ? 2 : 0, false, true, arraylen);
+    };
+    const struct {
+        const char* name;
+        int step;
+        const char* type;
+    } bases[] = {
+        { "catmull-rom", 1, "color" }, { "bezier", 3, "vector" },
+        { "bspline", 1, "color" },     { "hermite", 2, "vector" },
+        { "linear", 1, "color" },      { "constant", 1, "vector" },
+    };
+    // Inverse calls with knot derivatives cover the ABI only: the existing
+    // inverse implementation deliberately ignores those gradients.
+    for (const auto& basis : bases) {
+        std::string fixed, moving, fixed_triple, moving_triple;
+        for (int i = 0; i < 10; ++i) {
+            const char* comma = i ? "," : "";
+            fixed += fmtformat("{}{}", comma, i);
+            moving += fmtformat("{}{}+0.02*{}*v", comma, i, i + 1);
+            fixed_triple += fmtformat("{}{}({},{},{})", comma, basis.type, i,
+                                      i + 1, i + 2);
+            moving_triple += fmtformat("{}{}({}+0.02*u,{}+0.03*v,{}+0.01*u*v)",
+                                       comma, basis.type, i, i + 1, i + 2);
+        }
+        // Ten knots fit every basis step. Explicit and dynamic counts use
+        // fewer knots, retaining the full array length for derivative offsets.
+        const auto source = fmtformat(
+            "shader spline_family(int count=4, output color Cout=0) {{ "
+            "float fixed[10]={{{2}}}, moving[10]={{{3}}}; "
+            "{1} fixedt[10]={{{4}}}, movingt[10]={{{5}}}; "
+            "int n=count+{6}*int(u>v); "
+            "float plain=spline(\"{0}\",u,fixed); "
+            "float coord=spline(\"{0}\",u,count,fixed); "
+            "float knot=spline(\"{0}\",time,4,moving); "
+            "float both=spline(\"{0}\",u,n,moving); "
+            "{1} vplain=spline(\"{0}\",u,fixedt); "
+            "{1} vcoord=spline(\"{0}\",u,4,fixedt); "
+            "{1} vknot=spline(\"{0}\",time,4,movingt); "
+            "{1} vboth=spline(\"{0}\",u,n,movingt); "
+            "float ip=splineinverse(\"{0}\",1.2+0.4*u,fixed); "
+            "float ix=splineinverse(\"{0}\",1.2+0.4*u,4,fixed); "
+            "float ik=splineinverse(\"{0}\",time,4,moving); "
+            "float ib=splineinverse(\"{0}\",1.2+0.4*u,n,moving); "
+            "float f=coord+knot+both, inv=ix+ik+ib; "
+            "{1} t=vcoord+vknot+vboth; "
+            "Cout=color(plain+ip+f+Dx(f)+Dy(f)+inv+Dx(inv)+Dy(inv))"
+            "+color(vplain+t+Dx(t)+Dy(t)); }}",
+            basis.name, basis.type, fixed, moving, fixed_triple, moving_triple,
+            basis.step);
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        for (int optimize : { 10, 3 })
+            check(basis.name, bytecode, "",
+                  { "osl_spline_fff", "osl_spline_dffdf", "osl_spline_dfdfdf",
+                    "osl_spline_vfv", "osl_spline_dvfdv", "osl_spline_dvdfdv",
+                    "osl_splineinverse_fff", "osl_splineinverse_dffdf",
+                    "osl_splineinverse_dfdfdf", "rs_hart_spline_error" },
+                  optimize == 10 ? 0 : 2, optimize, 10, optimize == 3);
+        // At OSL0 even constant-initialized knot arrays carry derivatives.
+        // Forwarding helpers can inline in HIP, so check the direct dual-knot
+        // calls above and the constant-knot overloads after OSL specialization.
+        if (string_view(basis.name) == "bezier")
+            check("specialized bezier", bytecode, "",
+                  { "osl_spline_dfdff", "osl_spline_dvdfv",
+                    "osl_splineinverse_dfdff", "rs_hart_spline_error" },
+                  2, 10, 10, true);
+    }
+
+    const struct {
+        int osl_optimize;
+        int llvm_optimize;
+        bool local;
+    } variants[] = {
+        { 0, 10, false },
+        { 2, 10, true },
+        { 2, 3, true },
+    };
+    for (string_view type : { "float", "vector" }) {
+        const auto producer_source
+            = fmtformat("shader spline_knots(output {0} value[10]="
+                        "{{0,0,0,0,0,0,0,0,0,0}}) {{ "
+                        "for(int i=0;i<10;++i) value[i]={0}(i)+{0}(u*v); }}",
+                        type);
+        const auto consumer_source
+            = fmtformat("shader spline_consumer({0} value[]={{0,0,0,0}}, "
+                        "output color Cout=0) {{ int n=4+3*int(u>v); "
+                        "{0} q=spline(\"bezier\",u,value)"
+                        "+spline(\"bezier\",u,n,value); "
+                        "Cout=color(q+Dx(q)+Dy(q)); }}",
+                        type);
+        OSLCompiler producer_compiler, consumer_compiler;
+        std::string producer, consumer;
+        if (!producer_compiler.compile_buffer(producer_source, producer, { },
+                                              stdosl)
+            || !consumer_compiler.compile_buffer(consumer_source, consumer, { },
+                                                 stdosl))
+            return false;
+        for (const auto& variant : variants)
+            check(fmtformat("connected {}", type), producer, consumer,
+                  { type == "float" ? "osl_spline_dfdfdf" : "osl_spline_dvdfdv",
+                    "rs_hart_spline_error" },
+                  variant.osl_optimize, variant.llvm_optimize, 10,
+                  variant.local);
+    }
+
+    const char* override_source
+        = "shader spline_overrides(float k[]={0,1,2,3}, int count=4, "
+          "output color Cout=0) { float f=spline(\"bezier\",u,count,k)"
+          "+splineinverse(\"bezier\",1.2+0.4*u,count,k); "
+          "Cout=color(f,Dx(f),Dy(f)); }";
+    OSLCompiler override_compiler;
+    std::string override_bytecode;
+    if (!override_compiler.compile_buffer(override_source, override_bytecode,
+                                          { }, stdosl))
+        return false;
+    const struct {
+        int arraylen;
+        int count;
+        int optimize;
+        bool local;
+    } overrides[] = {
+        { 7, 7, 10, true },
+        { 7, 7, 3, false },
+        { 7, 3, 3, false },
+        { 3, 4, 10, false },
+    };
+    for (const auto& test : overrides) {
+        HartServices renderer(false, false, false, true, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", test.optimize == 10 ? 0 : 2);
+        ss.attribute("llvm_optimize", test.optimize);
+        ss.attribute("max_hart_groupdata_alloc", test.local ? 4096 : 0);
+        OIIO_CHECK_ASSERT(
+            ss.LoadMemoryCompiledShader("hart_test", override_bytecode));
+        auto group          = ss.ShaderGroupBegin("hart_test_group");
+        const float knots[] = { 0, 1, 2, 3, 4, 5, 6 };
+        OIIO_CHECK_ASSERT(
+            ss.Parameter("k", TypeDesc(TypeDesc::FLOAT, test.arraylen), knots));
+        OIIO_CHECK_ASSERT(ss.Parameter("count", TypeInt, &test.count));
+        OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+        OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+        const SymLocationDesc output("Cout", TypeColor, false,
+                                     SymArena::Outputs, 0, 3 * sizeof(float));
+        ss.add_symlocs(group.get(), { &output, 1 });
+        if (test.count != 7) {
+            // The uniform count override is diagnosed after OSL2 specializes
+            // it; at OSL0 a guarded runtime count remains valid codegen.
+            check_rejected_group(ss, *group, errors, "spline knot");
+            continue;
+        }
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Spline overrides: {}\n", errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (test.local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, test.local ? size : 0);
+        check_module(ss, *group, arch,
+                     { "osl_spline_dfdfdf", "osl_splineinverse_dfdfdf",
+                       "rs_hart_spline_error" },
+                     test.optimize, false, false, false, 0, false, true, 7);
+    }
+
+    // No source-level branches: the conditional around the shadeop must be
+    // the spline validation guard, even with ordinary range checking off.
+    const char* unchecked_source
+        = "shader spline_unchecked [[int range_checking=0]] "
+          "(output color Cout=0) { "
+          "float k[7]={0,1,2,3,4,5,6}; int n=4+3*int(u>v); "
+          "float f=spline(\"bezier\",u,n,k); "
+          "Cout=color(f,Dx(f),Dy(f)); }";
+    OSLCompiler unchecked_compiler;
+    std::string unchecked;
+    if (!unchecked_compiler.compile_buffer(unchecked_source, unchecked, { },
+                                           stdosl))
+        return false;
+    for (const auto& variant : variants)
+        check("unchecked dynamic count", unchecked, "",
+              { variant.osl_optimize == 0 ? "osl_spline_dfdfdf"
+                                          : "osl_spline_dfdff",
+                "rs_hart_spline_error" },
+              variant.osl_optimize, variant.llvm_optimize, 7, variant.local);
+    for (bool spline_capability : { false, true }) {
+        HartServices renderer(false, false, false, !spline_capability,
+                              spline_capability);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, unchecked);
+        check_rejected_group(ss, *group, errors,
+                             spline_capability ? "HARTArrayBounds"
+                                               : "HARTSplineErrors");
+    }
+
+    const struct {
+        const char* source;
+        const char* error;
+    } rejected[] = {
+        { "shader bad(output color Cout=0) { float k[4]={0,1,2,3}; "
+          "Cout=color(spline(\"unknown\",u,k)); }",
+          "spline basis" },
+        { "shader bad(string basis=\"linear\", output color Cout=0) { "
+          "float k[4]={0,1,2,3}; Cout=color(spline(basis,u,k)); }",
+          "unsupported type" },
+        { "shader bad(output color Cout=0) { float k[4]={0,1,2,3}; "
+          "string basis=u>v?\"linear\":\"bezier\"; "
+          "Cout=color(splineinverse(basis,u,k)); }",
+          "unsupported type" },
+        { "shader bad [[int range_checking=0]] (output color Cout=0) { "
+          "float k[4]={0,1,2,3}; Cout=color(spline(\"linear\",u,3,k)); }",
+          "spline knot" },
+        { "shader bad(output color Cout=0) { float k[4]={0,1,2,3}; "
+          "Cout=color(splineinverse(\"linear\",u,5,k)); }",
+          "spline knot" },
+        { "shader bad(output color Cout=0) { float k[7]={0,1,2,3,4,5,6}; "
+          "Cout=color(spline(\"bezier\",u,5,k)); }",
+          "spline knot" },
+        { "shader bad(output color Cout=0) { float k[6]={0,1,2,3,4,5}; "
+          "Cout=color(splineinverse(\"hermite\",u,5,k)); }",
+          "spline knot" },
+        { "shader bad(int count=3, output color Cout=0) { "
+          "float k[4]={0,1,2,3}; Cout=color(spline(\"linear\",u,count,k)); }",
+          "spline knot" },
+        { "shader bad [[int range_checking=0]] (output color Cout=0) { "
+          "float k[3]={0,1,2}; Cout=color(spline(\"linear\",u,k)); }",
+          "spline knot" },
+        { "shader bad(output color Cout=0) { float k[5]={0,1,2,3,4}; "
+          "Cout=color(spline(\"bezier\",u,k)); }",
+          "spline knot" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, false, true, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    {
+        OSLCompiler producer_compiler, consumer_compiler;
+        std::string producer, consumer;
+        if (!producer_compiler.compile_buffer(
+                "shader short_knots(output float value[3]={0,1,2}) { "
+                "value[1]=u; }",
+                producer, { }, stdosl)
+            || !consumer_compiler.compile_buffer(
+                "shader short_consumer(float value[]={0,1,2,3}, "
+                "output color Cout=0) { "
+                "Cout=color(spline(\"linear\",u,value)); }",
+                consumer, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, false, true, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_connected_group(ss, producer, consumer);
+        check_rejected_group(ss, *group, errors, "spline knot");
+    }
+    {
+        // Bypass source type checking to exercise malformed bytecode rejection,
+        // without declaring a nonexistent public splineinverse overload.
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                "shader malformed_spline(output color Cout=0) { "
+                "color k[4]={0,1,2,3}; Cout=spline(\"linear\",u,k); }",
+                bytecode, { }, stdosl))
+            return false;
+        const auto op = bytecode.find("\tspline\t");
+        OIIO_CHECK_ASSERT(op != std::string::npos);
+        if (op == std::string::npos)
+            return false;
+        bytecode.replace(op + 1, 6, "splineinverse");
+        HartServices renderer(false, false, false, true, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, "spline knot");
+    }
+    for (string_view source : {
+             "shader bad(output color Cout=0) { float k=1; "
+             "Cout=color(spline(\"linear\",u,k)); }",
+             "shader bad(output color Cout=0) { int k[4]={0,1,2,3}; "
+             "Cout=color(spline(\"linear\",u,k)); }",
+             "shader bad(output color Cout=0) { color k[4]={0,1,2,3}; "
+             "Cout=color(splineinverse(\"linear\",u,k)); }",
+         }) {
+        Diagnostics errors;
+        OSLCompiler compiler(&errors);
+        std::string bytecode;
+        OIIO_CHECK_ASSERT(
+            !compiler.compile_buffer(source, bytecode, { }, stdosl));
+        OIIO_CHECK_ASSERT(errors.errors > 0);
+    }
+    return true;
+}
+
+
+
+bool
 check_procedural_modules(string_view arch, string_view stdosl)
 {
     const char* sources[] = {
@@ -3452,6 +3896,7 @@ main(int argc, char* argv[])
         || !check_material_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])
         || !check_numeric_math_modules(arch, argv[2])
+        || !check_spline_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])

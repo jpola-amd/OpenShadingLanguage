@@ -536,6 +536,60 @@ ShaderInstance::validate_hart() const
             return fail("texture requires explicit wrap modes");
         return true;
     };
+    auto validate_spline = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTSplineErrors"))
+            return fail("renderer lacks HARTSplineErrors");
+        if (op.nargs() != 4 && op.nargs() != 5)
+            return fail("invalid spline argument list");
+        const Symbol& basis = symbol(1);
+        if (!basis.is_constant() || !basis.typespec().is_string())
+            return fail("spline basis must be a literal string");
+        const ustring name = basis.get_string();
+        if (name != ustring("catmull-rom") && name != ustring("bezier")
+            && name != ustring("bspline") && name != ustring("hermite")
+            && name != ustring("linear") && name != ustring("constant"))
+            return fail(fmtformat("unsupported spline basis '{}'", name));
+        const int step         = name == ustring("bezier")    ? 3
+                                 : name == ustring("hermite") ? 2
+                                                              : 1;
+        const Symbol& knots    = symbol(op.nargs() - 1);
+        const TypeSpec& type   = knots.typespec();
+        const TypeDesc element = type.simpletype().elementtype();
+        const TypeSpec& result = symbol(0).typespec();
+        const bool inverse     = op.opname() == ustring("splineinverse");
+        if (!type.is_array() || element.basetype != TypeDesc::FLOAT
+            || (element.aggregate != TypeDesc::SCALAR
+                && element.aggregate != TypeDesc::VEC3)
+            || result.is_array() || (!result.is_float() && !result.is_triple())
+            || (result.is_float() != (element.aggregate == TypeDesc::SCALAR))
+            || (inverse && !result.is_float())
+            || !symbol(2).typespec().is_float()
+            || (op.nargs() == 5 && !symbol(3).typespec().is_int()))
+            return fail("invalid spline knot/value types");
+        int length      = type.is_unsized_array() ? knots.initializers()
+                                                  : type.arraylength();
+        const int index = m_master->m_args[op.firstarg() + op.nargs() - 1];
+        if (index >= firstparam() && index < lastparam()
+            && m_instoverrides[index].arraylen())
+            length = m_instoverrides[index].arraylen();
+        if (length < 4)
+            return fail("at least four resolved spline knots are required");
+        if (op.nargs() == 4 || symbol(3).is_constant()) {
+            const int count = op.nargs() == 4 ? length : symbol(3).get_int();
+            if (count < 4 || count > length || (count - 4) % step)
+                return fail("invalid spline knot count for array/basis");
+        }
+        return true;
+    };
     for (int i = firstparam(); i < lastparam(); ++i) {
         const Symbol& sym = *mastersymbol(i);
         if (!validate_type(sym))
@@ -605,6 +659,7 @@ ShaderInstance::validate_hart() const
         ustring("fabs"),         ustring("cross"),
         ustring("distance"),     ustring("area"),
         ustring("calculatenormal"),
+        ustring("spline"),       ustring("splineinverse"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),    ustring("v"),  ustring("P"),
@@ -623,6 +678,10 @@ ShaderInstance::validate_hart() const
         if (op.opname() == ustring("texture") && !validate_texture(op))
             return false;
         if (op.opname() == ustring("closure") && !validate_closure(op))
+            return false;
+        if ((op.opname() == ustring("spline")
+             || op.opname() == ustring("splineinverse"))
+            && !validate_spline(op))
             return false;
         if (op.opname() == ustring("mxcompref")
             || op.opname() == ustring("mxcompassign")) {
@@ -681,6 +740,9 @@ ShaderInstance::validate_hart() const
                 continue;  // Validated literal constructor name, not a string.
             if (op.opname() == ustring("texture") && sym.typespec().is_string())
                 continue;
+            if (a == 1 && (op.opname() == ustring("spline")
+                           || op.opname() == ustring("splineinverse")))
+                continue;  // Validated literal basis, not a device string.
             if (sym.typespec().is_string()
                 && (op.opname() == ustring("matrix")
                     || op.opname() == ustring("getmatrix")

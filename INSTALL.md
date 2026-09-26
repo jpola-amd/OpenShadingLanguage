@@ -461,7 +461,22 @@ nonfinite input classification. HIP `asin`/`acos` explicitly retain OSL's domain
 clamp. CPU-only approximation tolerances do not loosen GPU reference or
 derivative checks. The existing shared `atan2` duals' reversed derivative signs
 are preserved for backend parity, not corrected by this change.
-This does not enable spline, color-system or additional noise selectors.
+This does not enable color-system or additional noise selectors.
+
+HART also supports `spline` and `splineinverse` with literal `catmull-rom`,
+`bezier`, `bspline`, `hermite`, `linear` and `constant` bases. Renderers opt in
+with `HARTSplineErrors` and provide `rs_hart_spline_error` in addition to array
+services. Knot arrays must have at least four resolved elements; the selected
+count must fit the array and the basis's segment cardinality. Statically invalid
+arrays/counts are rejected before launch. Dynamic counts are checked even when
+shader range checking is disabled; invalid counts or NaN inputs report a device
+error before evaluation and prevent output publication. Infinite inputs retain
+endpoint clamping. The existing constant basis discards derivatives. Inverse
+evaluation uses OSL's bounded solver, retains knot-based endpoint clamping,
+ignores knot derivatives, and can drop derivatives at solver segment boundaries.
+`hart-spline-runtime` checks nonlinear bases, derivatives, connected/resized
+arrays, endpoints and pre/post-launch failures. Path-tracer tests also compose
+spline weights with textures and verify device failure propagation.
 
 `Dx` and `Dy` expose OSL's propagated first-order derivatives. For example:
 

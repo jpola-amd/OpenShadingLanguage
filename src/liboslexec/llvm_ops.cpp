@@ -992,6 +992,22 @@ osl_range_check_err(int indexvalue, int length, ustringhash_pod symname,
 extern "C" OSL_HOSTDEVICE void
 rs_hart_range_error(OpaqueExecContextPtr ec, int index, int length);
 
+extern "C" OSL_HOSTDEVICE void
+rs_hart_spline_error(OpaqueExecContextPtr ec);
+
+
+OSL_SHADEOP int
+osl_hart_spline_validate(int count, int length, int step, float value,
+                         OpaqueExecContextPtr ec)
+{
+    if (count < 4 || count > length || (count - 4) % step
+        || std::isnan(value)) {
+        rs_hart_spline_error(ec);
+        return 0;
+    }
+    return 1;
+}
+
 
 OSL_SHADEOP_NOINLINE int
 osl_range_check_err(int indexvalue, int length, ustringhash_pod,

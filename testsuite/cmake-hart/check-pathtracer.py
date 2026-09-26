@@ -72,14 +72,20 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
             Ci = copy[i] + copy[1-i];
         }""",
         "path_producer": """shader path_producer(output color weight = 0) {
+            float knots[4] = {0, 0.5, 1, 2};
             weight = color(0.2 + 0.1*u, 0.3 + 0.1*v, 0.4)
                    * texture("path_texture.pfm", u, v, "wrap", "clamp",
-                             "interp", "linear");
+                             "interp", "linear")
+                   * spline("bspline", u, knots);
         }""",
         "path_connected": """shader path_connected(color weight = 0) {
             Ci = weight * emission();
         }""",
         "path_bad": """shader path_bad() { Ci = background(); }""",
+        "path_spline_bad": """shader path_spline_bad() {
+            float knots[4] = {0,1,2,3};
+            Ci = spline("linear", u, 4+int(u>=0), knots) * emission();
+        }""",
         "path_overflow": """shader path_overflow() {
             Ci = 0;
             for (int i = 0; i < 48; ++i)
@@ -125,6 +131,9 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
                 <Quad corner="-2,-2,0" edge_x="4,0,0" edge_y="0,4,0"/>
                 </World>"""}
     scenes["overflow"] = scenes["bad"].replace("path_bad", "path_overflow")
+    scenes["spline-error"] = scenes["bad"].replace("path_bad", "path_spline_bad").replace(
+        'corner="-2,-2,0" edge_x="4,0,0" edge_y="0,4,0"',
+        'corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"')
     for name, scale in (("tiny", 0.001), ("large", 1000.0)):
         world = ET.fromstring(scenes["seams"])
         for node in world:
@@ -193,5 +202,10 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     out = run([renderer, "--hart", "-v"] + flags
               + ["--res", "2", "2", "overflow.xml", str(image)], root, 1)
     assert "closure pool allocation failed" in out and not image.exists()
+    out = run([renderer, "--hart", "-v"] + flags
+              + ["--res", "2", "2", "spline-error.xml", str(image)], root, 1)
+    assert "HART device services failed (error bits 256)" in out
+    assert "invalid spline arguments" in out and "HART path tracer rendered" not in out
+    assert not image.exists()
 
 print("HART path tracer verified: " + mode)

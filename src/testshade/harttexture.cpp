@@ -382,7 +382,7 @@ HartTextureStore::check_errors()
     if (!errors)
         return true;
     impl.err.errorfmt(
-        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}",
+        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}",
         errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
@@ -404,7 +404,9 @@ HartTextureStore::check_errors()
         errors & testshade::HartArrayIndexOutOfBounds
             ? "array/component index out of range; "
             : "",
-        errors & ~255u ? "unknown error; " : "");
+        errors & testshade::HartInvalidSpline ? "invalid spline arguments; "
+                                              : "",
+        errors & ~511u ? "unknown error; " : "");
     return false;
 }
 

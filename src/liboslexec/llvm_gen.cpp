@@ -3710,6 +3710,30 @@ LLVMGEN(llvm_gen_spline)
                 && (!has_knot_count
                     || (has_knot_count && Knot_count.typespec().is_int())));
 
+    const int length = Knots.typespec().arraylength();
+    int step         = 1;
+    if (rop.use_hart()) {
+        if (length < 4 || !Spline.is_constant()) {
+            rop.shadingcontext()->errorfmt(
+                "HART: spline requires a literal basis and at least four "
+                "resolved spline knots in '{}'",
+                Knots.name());
+            return false;
+        }
+        step = Spline.get_string() == ustring("bezier")    ? 3
+               : Spline.get_string() == ustring("hermite") ? 2
+                                                           : 1;
+        if (!has_knot_count || Knot_count.is_constant()) {
+            const int count = has_knot_count ? Knot_count.get_int() : length;
+            if (count < 4 || count > length || (count - 4) % step) {
+                rop.shadingcontext()->errorfmt(
+                    "HART: invalid spline knot count for array/basis in '{}'",
+                    Knots.name());
+                return false;
+            }
+        }
+    }
+
     std::string name = fmtformat("osl_{}_", op.opname());
     // only use derivatives for result if:
     //   result has derivs and (value || knots) have derivs
@@ -3747,10 +3771,30 @@ LLVMGEN(llvm_gen_spline)
                        : rop.ll.constant((int)Knots.typespec().arraylength()),
         rop.ll.constant((int)Knots.typespec().arraylength()),
     };
+    llvm::BasicBlock* after_block = nullptr;
+    if (rop.use_hart()) {
+        llvm::Value* checks[] = { args[4], args[5], rop.ll.constant(step),
+                                  rop.llvm_load_value(Value),
+                                  rop.sg_void_ptr() };
+        llvm::Value* valid    = rop.ll.call_function("osl_hart_spline_validate",
+                                                     checks);
+        auto* valid_block     = rop.ll.new_basic_block("spline_valid");
+        auto* error_block     = rop.ll.new_basic_block("spline_error");
+        after_block           = rop.ll.new_basic_block("spline_done");
+        rop.ll.op_branch(rop.ll.op_eq(valid, rop.ll.constant(0)), error_block,
+                         valid_block);
+        // Only the error branch may skip evaluation; the device error was
+        // recorded by the guard and prevents the renderer publishing output.
+        rop.llvm_assign_zero(Result);
+        rop.ll.op_branch(after_block);
+        rop.ll.set_insert_point(valid_block);
+    }
     rop.ll.call_function(name.c_str(), args);
 
     if (Result.has_derivs() && !result_derivs)
         rop.llvm_zero_derivs(Result);
+    if (after_block)
+        rop.ll.op_branch(after_block);
 
     return true;
 }
