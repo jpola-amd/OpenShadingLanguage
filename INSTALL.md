@@ -447,6 +447,22 @@ It covers OSL 0 / LLVM 10 and optimized split, fused and callable-local storage.
 The existing `hart-loops-runtime` additionally checks loop-carried values and
 zero/one/multiple iterations.
 
+The numeric HART subset also includes trigonometric and hyperbolic functions,
+logarithms, exponentials, error functions, cube root, inverse square root,
+rounding, sign and IEEE finite/Inf/NaN classification. Available scalar and triple
+overloads reuse OSL's existing safe/fast math and derivative implementations.
+Cross products, distance, area and `calculatenormal` are supported, along with
+standard-library reflection, refraction, faceforward and rotation. Area and
+`calculatenormal` retain OSL's zero output-derivative convention; the latter
+does not normalize the resulting normal. `hart-numeric-math-runtime` compares
+full-precision values and derivatives against CPU and independent references,
+including connected groups, sincos output aliasing, domain boundaries and actual
+nonfinite input classification. HIP `asin`/`acos` explicitly retain OSL's domain
+clamp. CPU-only approximation tolerances do not loosen GPU reference or
+derivative checks. The existing shared `atan2` duals' reversed derivative signs
+are preserved for backend parity, not corrected by this change.
+This does not enable spline, color-system or additional noise selectors.
+
 `Dx` and `Dy` expose OSL's propagated first-order derivatives. For example:
 
 ```osl

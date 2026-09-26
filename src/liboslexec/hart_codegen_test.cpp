@@ -1373,6 +1373,240 @@ check_math_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_numeric_math_modules(string_view arch, string_view stdosl)
+{
+    const struct {
+        int osl_optimize;
+        int llvm_optimize;
+        bool connected;
+        bool local;
+    } variants[] = {
+        { 0, 10, false, false },
+        { 2, 10, true, true },
+        { 2, 3, true, false },
+    };
+    auto check = [&](string_view label, string_view producer,
+                     string_view consumer,
+                     std::initializer_list<string_view> shadeops,
+                     int osl_optimize, int optimize, bool local = false) {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", local ? 4096 : 0));
+        const bool connected = !consumer.empty();
+        auto group = connected ? make_connected_group(ss, producer, consumer)
+                               : make_group(ss, producer);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr,
+                  "Numeric math {} (OSL {}, LLVM {}, connected {}): {}\n",
+                  label, osl_optimize, optimize, connected, errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int allocated = -1, size = 0;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, local ? size : 0);
+        check_module(ss, *group, arch, shadeops, optimize, connected, false,
+                     false, connected ? 2 : 0);
+    };
+
+    // Three representative modes, not a Cartesian product for every opcode.
+    for (string_view type : { "float", "color", "vector" }) {
+        const auto coordinate
+            = type == "float"
+                  ? std::string("0.7*u-0.35")
+                  : fmtformat("{}(0.7*u-0.35,0.5*v-0.2,0.4*u*v-0.1)", type);
+        const auto body = fmtformat(
+            "{0} x={1}, y={0}(v+0.8), p=fabs(x)+{0}(0.75); "
+            "value=tan(x)+asin(x)+acos(x+{0}(0.1))+atan(y)+atan2(x,y)"
+            "+atan2(x,{0}(1.25))+atan2({0}(0.3),y)"
+            "+sinh(x)+cosh(y)+tanh(x+y)"
+            "+log(p)+log2(p+{0}(0.1))+log10(p+{0}(0.2))"
+            "+exp(x)+exp2(y)+expm1(x-y)+cbrt(x-{0}(0.6))"
+            "+inversesqrt(p)+fabs(x-{0}(0.2))"
+            "+0.01*degrees(x)+2*radians(y); "
+            "{0} z=logb(p)+round(4*x)+trunc(3*y)+sign(x); "
+            "value+=z+Dx(z)+Dy(z); ",
+            type, coordinate);
+        const std::string sources[] = {
+            fmtformat("shader numeric_components(output color Cout=0) {{ "
+                      "{} value=0; {} Cout=color(value); }}",
+                      type, body),
+            fmtformat("shader numeric_producer(output {} value=0) {{ {} }}",
+                      type, body),
+            fmtformat(
+                "shader numeric_consumer({0} value=0, output color Cout=0) {{ "
+                "Cout=color(value+Dx(value)+Dy(value))"
+                "+color(filterwidth({1})); }}",
+                type, type == "float" ? "value" : "vector(value)"),
+        };
+        std::string bytecode[3];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+                return false;
+        }
+        for (const auto& variant : variants) {
+            const bool dual   = variant.connected;
+            const auto unary  = type == "float" ? (dual ? "dfdf" : "ff")
+                                                : (dual ? "dvdv" : "vv");
+            const auto binary = type == "float" ? (dual ? "dfdfdf" : "fff")
+                                                : (dual ? "dvdvdv" : "vvv");
+            const auto plain  = type == "float" ? "ff" : "vv";
+            check(type, bytecode[dual ? 1 : 0], dual ? bytecode[2] : "",
+                  { fmtformat("osl_tan_{}", unary),
+                    fmtformat("osl_asin_{}", unary),
+                    fmtformat("osl_acos_{}", unary),
+                    fmtformat("osl_atan_{}", unary),
+                    fmtformat("osl_atan2_{}", binary),
+                    dual ? (type == "float" ? "osl_atan2_dfdff"
+                                            : "osl_atan2_dvdvv")
+                         : "",
+                    dual ? (type == "float" ? "osl_atan2_dffdf"
+                                            : "osl_atan2_dvvdv")
+                         : "",
+                    fmtformat("osl_sinh_{}", unary),
+                    fmtformat("osl_cosh_{}", unary),
+                    fmtformat("osl_tanh_{}", unary),
+                    fmtformat("osl_log_{}", unary),
+                    fmtformat("osl_log2_{}", unary),
+                    fmtformat("osl_log10_{}", unary),
+                    fmtformat("osl_exp_{}", unary),
+                    fmtformat("osl_exp2_{}", unary),
+                    fmtformat("osl_expm1_{}", unary),
+                    fmtformat("osl_cbrt_{}", unary),
+                    fmtformat("osl_inversesqrt_{}", unary),
+                    fmtformat("osl_fabs_{}", unary),
+                    fmtformat("osl_logb_{}", plain),
+                    fmtformat("osl_round_{}", plain),
+                    fmtformat("osl_trunc_{}", plain),
+                    fmtformat("osl_sign_{}", plain),
+                    dual ? (type == "float" ? "osl_filterwidth_fdf"
+                                            : "osl_filterwidth_vdv")
+                         : "" },
+                  variant.osl_optimize, variant.llvm_optimize, variant.local);
+        }
+
+        // Independently demand sine/cosine derivatives, then alias the input
+        // with either output, both outputs together, and all three arguments.
+        const auto sincos_source
+            = fmtformat("shader numeric_sincos(output color Cout=0) {{ "
+                        "{0} x={1}, sv=0, cv=0; sincos(x,sv,cv); "
+                        "{0} xs=x+{0}(0.1), ss=0, cs=0; sincos(xs,ss,cs); "
+                        "{0} xc=x+{0}(0.2), sc=0, cc=0; sincos(xc,sc,cc); "
+                        "{0} a=x+{0}(0.3), b=0; sincos(a,a,b); "
+                        "{0} c=x+{0}(0.4), d=0; sincos(c,d,c); "
+                        "{0} shared=0; sincos(x+{0}(0.5),shared,shared); "
+                        "{0} all=x+{0}(0.6); sincos(all,all,all); "
+                        "{0} zs=0, zc=0; sincos({0}(time),zs,zc); "
+                        "Cout=color(sv+2*cv+ss+3*cs+Dx(ss)+2*sc+cc+Dy(cc)"
+                        "+a+2*b+Dx(a)+Dy(b)+3*c+d+Dx(d)+Dy(c)"
+                        "+shared+Dx(shared)+Dy(shared)+all+Dx(all)+Dy(all)"
+                        "+zs+zc+Dx(zs)+Dy(zc)); }}",
+                        type, coordinate);
+        OSLCompiler sincos_compiler;
+        std::string sincos_bytecode;
+        if (!sincos_compiler.compile_buffer(sincos_source, sincos_bytecode, { },
+                                            stdosl))
+            return false;
+        const auto code = type == "float" ? "f" : "v";
+        for (int optimize : { 10, 3 })
+            check(fmtformat("sincos {}", type), sincos_bytecode, "",
+                  { fmtformat("osl_sincos_{0}{0}{0}", code),
+                    fmtformat("osl_sincos_d{0}d{0}{0}", code),
+                    fmtformat("osl_sincos_d{0}{0}d{0}", code),
+                    fmtformat("osl_sincos_d{0}d{0}d{0}", code) },
+                  optimize == 10 ? 0 : 2, optimize);
+    }
+
+    // Classification, erf/erfc, and hypot have scalar-only public overloads.
+    const char* scalar_source
+        = "shader numeric_scalar(output color Cout=0) { "
+          "float x=u-v, q=erf(x)+erfc(0.5*x)"
+          "+hypot(x,v+0.3)+hypot(x,u+0.2,v-0.4); "
+          "float plain=erf(u+0.2)+erfc(v-0.1)"
+          "+hypot(u+0.1,v+0.2)+hypot(u+0.3,v+0.4,u*v+0.5); "
+          "int flags=isnan(x)+2*isinf(x)+4*isfinite(x)+fabs(int(4*x)); "
+          "float z=flags+round(3*x)+trunc(4*x)+sign(x)"
+          "+logb(fabs(x)+0.5); "
+          "Cout=color(plain+q+z,Dx(q)+Dx(z),Dy(q)+Dy(z)); }";
+    OSLCompiler scalar_compiler;
+    std::string scalar_bytecode;
+    if (!scalar_compiler.compile_buffer(scalar_source, scalar_bytecode, { },
+                                        stdosl))
+        return false;
+    for (int optimize : { 10, 3 })
+        check("scalar classification", scalar_bytecode, "",
+              { "osl_erf_ff", "osl_erfc_ff", "osl_erf_dfdf", "osl_erfc_dfdf",
+                "osl_sqrt_ff", "osl_sqrt_dfdf", "osl_isnan_if", "osl_isinf_if",
+                "osl_isfinite_if", "osl_fabs_ii", "osl_logb_ff", "osl_round_ff",
+                "osl_trunc_ff", "osl_sign_ff" },
+              0, optimize);
+
+    // The stdosl geometric wrappers lower to existing arithmetic, branches,
+    // dot/sqrt, sincos, and matrix transforms, not new wrapper opcodes.
+    const string_view geometry_body
+        = "point q=point(P[0]+u,P[1]+v,P[2]+u*v); "
+          "point r=point(v+0.25,u-0.5,1+u); "
+          "vector a=vector(q), b=vector(r); "
+          "value=cross(a,b)+2*cross(a,N)+3*cross(Ng,b); "
+          "float dist=distance(q,r)+2*distance(q,point(N))"
+          "+3*distance(point(Ng),r); "
+          "float ar=area(q), zero=area(point(time)); "
+          "normal n=calculatenormal(q), zn=calculatenormal(point(N)); "
+          "value+=vector(dist+ar+zero+Dx(ar)+Dy(ar)+Dx(zero)+Dy(zero))"
+          "+vector(n+zn+Dx(n)+Dy(n)+Dx(zn)+Dy(zn)); "
+          "vector nn=normalize(vector(0.2+u,0.3+v,1)); "
+          "vector ii=normalize(I+vector(0.1+u,0.2-v,-1)); "
+          "value+=reflect(ii,nn)+refract(ii,nn,0.6+0.2*u)"
+          "+faceforward(nn,ii)+faceforward(nn,ii,Ng)"
+          "+vector(rotate(q,u+0.3,point(0.1,0.2,0.3),point(0.8,0.9,1.1)))"
+          "+vector(rotate(r,v+0.1,vector(1,0.2+u,0.5))); ";
+    const std::string geometry_sources[] = {
+        fmtformat("shader numeric_geometry(output color Cout=0) {{ "
+                  "vector value=0; {} Cout=color(value); }}",
+                  geometry_body),
+        fmtformat("shader numeric_geometry_producer(output vector value=0) {{ "
+                  "{} }}",
+                  geometry_body),
+        "shader numeric_geometry_consumer(vector value=0, output color Cout=0) "
+        "{ Cout=color(value+Dx(value)+Dy(value)+filterwidth(value)); }",
+    };
+    std::string geometry_bytecode[3];
+    for (size_t i = 0; i < std::size(geometry_sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(geometry_sources[i], geometry_bytecode[i],
+                                     { }, stdosl))
+            return false;
+    }
+    for (const auto& variant : variants) {
+        const bool dual = variant.connected;
+        check("geometry", geometry_bytecode[dual ? 1 : 0],
+              dual ? geometry_bytecode[2] : "",
+              { dual ? "osl_cross_dvdvdv" : "osl_cross_vvv",
+                dual ? "osl_cross_dvdvv" : "", dual ? "osl_cross_dvvdv" : "",
+                dual ? "osl_distance_dfdvdv" : "osl_distance_fvv",
+                dual ? "osl_distance_dfdvv" : "",
+                dual ? "osl_distance_dfvdv" : "", "osl_area",
+                "osl_calculatenormal",
+                dual ? "osl_normalize_dvdv" : "osl_normalize_vv",
+                dual ? "osl_filterwidth_vdv" : "" },
+              variant.osl_optimize, variant.llvm_optimize, variant.local);
+    }
+    return true;
+}
+
+
+
+bool
 check_noise_modules(string_view arch, string_view stdosl)
 {
     const string_view coordinates = "float x=1.7*u-0.23; float y=2.3*v+0.31; "
@@ -3217,6 +3451,7 @@ main(int argc, char* argv[])
         || !check_topology_modules(arch, argv[2])
         || !check_material_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])
+        || !check_numeric_math_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])

@@ -274,8 +274,14 @@ void* __dso_handle = 0;  // necessary to avoid linkage issues in bitcode
 MAKE_UNARY_PERCOMPONENT_OP(sin, OIIO::fast_sin, fast_sin)
 MAKE_UNARY_PERCOMPONENT_OP(cos, OIIO::fast_cos, fast_cos)
 MAKE_UNARY_PERCOMPONENT_OP(tan, OIIO::fast_tan, fast_tan)
+#    if defined(__HIP_DEVICE_COMPILE__)
+// OIIO's HIP fast functions call libm without OSL's required domain clamp.
+MAKE_UNARY_PERCOMPONENT_OP(asin, OIIO::safe_asin, safe_asin)
+MAKE_UNARY_PERCOMPONENT_OP(acos, OIIO::safe_acos, safe_acos)
+#    else
 MAKE_UNARY_PERCOMPONENT_OP(asin, OIIO::fast_asin, fast_asin)
 MAKE_UNARY_PERCOMPONENT_OP(acos, OIIO::fast_acos, fast_acos)
+#    endif
 MAKE_UNARY_PERCOMPONENT_OP(atan, OIIO::fast_atan, fast_atan)
 MAKE_BINARY_PERCOMPONENT_OP(atan2, OIIO::fast_atan2, fast_atan2)
 MAKE_UNARY_PERCOMPONENT_OP(sinh, OIIO::fast_sinh, fast_sinh)

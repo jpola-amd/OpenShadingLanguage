@@ -38,6 +38,8 @@ suites.add_argument("--noise-families", action="store_true",
                     help="Run periodic, cell, hash and named noise runtime cases")
 suites.add_argument("--math", action="store_true",
                     help="Run scalar and triple math runtime cases")
+suites.add_argument("--numeric-math", action="store_true",
+                    help="Run transcendental, geometric and IEEE classification cases")
 suites.add_argument("--procedural", action="store_true",
                     help="Run connected procedural material runtime cases")
 suites.add_argument("--textures", action="store_true",
@@ -69,7 +71,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
 if (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-        or args.noise or args.noise_families or args.math
+        or args.noise or args.noise_families or args.math or args.numeric_math
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
         or args.spaces or args.geometry or args.groups
@@ -2253,7 +2255,8 @@ def check_fused_benchmark():
             }, allow_nan=False), flush=True)
 
 
-def check_exact_render(shaders, flags, mode, width, height, expected):
+def check_image_render(shaders, flags, mode, width, height, expected,
+                       tolerance=None, cpu_value_tolerance=None):
     assert len(expected) == width * height * 3
     host, device = root / "exact-cpu.pfm", root / "exact-gpu.pfm"
     for path in (host, device):
@@ -2268,11 +2271,24 @@ def check_exact_render(shaders, flags, mode, width, height, expected):
     size, alignment, local, scratch = hart_group_storage(output)
     assert local == (size if "--hart-local-groupdata" in mode else 0)
     assert (scratch == 0) == bool(local)
-    # Packed integer results and binary-fraction grids are exact.
+    # Packed integer results and binary-fraction grids remain exact by default.
+    images = []
     for path in (host, device):
-        for i, (actual, target) in enumerate(zip(
-                image_pixels(path, width, height), expected)):
-            assert actual == target, (shaders, path.name, i, actual, target)
+        actual = image_pixels(path, width, height)
+        images.append(actual)
+        if tolerance is None:
+            for i, (value, target) in enumerate(zip(actual, expected)):
+                assert value == target, (shaders, path.name, i, value, target)
+        else:
+            for channel in range(3):
+                limit = (cpu_value_tolerance if path == host and channel == 0
+                         and cpu_value_tolerance is not None else tolerance)
+                compare(actual[channel::3], expected[channel::3], limit)
+    if tolerance is not None:
+        for channel in range(3):
+            limit = (cpu_value_tolerance if channel == 0
+                     and cpu_value_tolerance is not None else tolerance)
+            compare(images[1][channel::3], images[0][channel::3], limit)
 
 
 def check_control_flow_suite():
@@ -2297,7 +2313,7 @@ def check_control_flow_suite():
                 lambda u, v: control_flow_result(u, v, width, height))
             cases.append((connected, width, height, expected))
         for shaders, width, height, expected in cases:
-            check_exact_render(shaders, flags, mode, width, height, expected)
+            check_image_render(shaders, flags, mode, width, height, expected)
         rejected = root / "control-rejected.pfm"
         run(["--hart", "--hart-no-cache", "-v"] + mode + flags
             + ["-g", "5", "5", "--param", "force", "1",
@@ -2374,7 +2390,7 @@ def check_aggregate_suite():
                 (total*(1+u), total*0.125, count+16))
             cases.append((params + ["hart_array_param"], expected))
         for shaders, expected in cases:
-            check_exact_render(shaders, flags, mode, 9, 5, expected)
+            check_image_render(shaders, flags, mode, 9, 5, expected)
         rejected = root / "aggregate-rejected.pfm"
         for shaders in (["hart_array"], ["--param", "write", "1", "hart_array"],
                         ["hart_aggregate_indices"],
@@ -2389,6 +2405,248 @@ def check_aggregate_suite():
                 assert not rejected.exists()
         run(["--hart", "-v"] + mode + flags + ["hart_aggregate_bad"],
             "string")
+
+
+def check_numeric_math_suite():
+    width, height = 17, 3
+    unary = [
+        ("tan", math.tan, lambda x: 1/math.cos(x)**2, "signed"),
+        ("asin", math.asin, lambda x: 1/math.sqrt(1-x*x), "signed"),
+        ("acos", math.acos, lambda x: -1/math.sqrt(1-x*x), "signed"),
+        ("atan", math.atan, lambda x: 1/(1+x*x), "signed"),
+        ("sinh", math.sinh, math.cosh, "signed"),
+        ("cosh", math.cosh, math.sinh, "signed"),
+        ("tanh", math.tanh, lambda x: 1/math.cosh(x)**2, "signed"),
+        ("log", math.log, lambda x: 1/x, "positive"),
+        ("log2", math.log2, lambda x: 1/(math.log(2)*x), "positive"),
+        ("log10", math.log10, lambda x: 1/(math.log(10)*x), "positive"),
+        ("exp", math.exp, math.exp, "signed"),
+        ("exp2", lambda x: 2**x, lambda x: math.log(2)*2**x, "signed"),
+        ("expm1", math.expm1, math.exp, "signed"),
+        ("erf", math.erf, lambda x: 2/math.sqrt(math.pi)*math.exp(-x*x),
+         "signed"),
+        ("erfc", math.erfc, lambda x: -2/math.sqrt(math.pi)*math.exp(-x*x),
+         "signed"),
+        ("cbrt", lambda x: math.copysign(abs(x)**(1/3), x),
+         lambda x: 1/(3*abs(x)**(2/3)), "negative"),
+        ("inversesqrt", lambda x: 1/math.sqrt(x),
+         lambda x: -0.5/x**1.5, "positive"),
+        ("logb", lambda x: math.floor(math.log2(abs(x))), lambda x: 0,
+         "positive"),
+        ("round", lambda x: math.copysign(math.floor(abs(x)+0.5), x),
+         lambda x: 0, "signed"),
+        ("trunc", math.trunc, lambda x: 0, "signed"),
+        ("sign", lambda x: (x > 0)-(x < 0), lambda x: 0, "signed"),
+        ("fabs", abs, lambda x: -1 if x < 0 else 1, "signed"),
+        # Preserve OSL's existing atan2 duals' reversed derivative signs.
+        ("atan2", lambda x: math.atan2(x, 1.25),
+         lambda x: -1.25/(x*x+1.25**2), "signed"),
+        ("sincos", lambda x: math.sin(x)+math.cos(x),
+         lambda x: math.cos(x)-math.sin(x), "signed"),
+        ("degrees", math.degrees, lambda x: 180/math.pi, "signed"),
+        ("radians", math.radians, lambda x: math.pi/180, "signed"),
+    ]
+    cases = []
+    # CPU inverse-trig/tanh limits use OIIO's documented bounds; exp-family
+    # limits cover measured errors on this grid. HIP and derivatives stay 2e-6.
+    cpu_value_tolerances = {
+        "asin": 4.6e-5, "acos": 4.6e-5, "atan": 1e-5, "atan2": 1e-5,
+        "cosh": 5e-6, "tanh": 3.2e-6, "exp": 1.2e-5, "exp2": 1.1e-5,
+        "expm1": 1.2e-5,
+    }
+    for name, value, derivative, domain in unary:
+        for triple in ((False,) if name in ("erf", "erfc") else (False, True)):
+            shader = "numeric_" + name + ("_triple" if triple else "_scalar")
+            base = ("u-0.5+0.25*v" if domain == "signed" else
+                    "0.5+u+0.25*v" if domain == "positive" else
+                    "-0.5-u-0.25*v")
+            kind = "color" if triple else "float"
+            argument = "color(base-0.125,base,base+0.125)" if triple else "base"
+            expression = (f"atan2(x,{kind}(1.25))" if name == "atan2" else
+                          f"{name}(x)")
+            operation = (f"{kind} c=0; sincos(x,x,c); {kind} result=x+c;"
+                         if name == "sincos" else
+                         f"{kind} result={expression};")
+            selected = "result[int(2*v)]" if triple else "result"
+            source = root / (shader + ".osl")
+            source.write_text(
+                f"shader {shader}(output color Cout=0) {{"
+                f"float base={base}; {kind} x={argument}; {operation}"
+                f"float q={selected}; Cout=color(q,Dx(q),Dy(q));}}",
+                encoding="ascii")
+            compile_fixture(source)
+
+            def expected(u, v, triple=triple, domain=domain, value=value,
+                         derivative=derivative):
+                sign = -1 if domain == "negative" else 1
+                x = (u-0.5+0.25*v if domain == "signed"
+                     else sign*(0.5+u+0.25*v))
+                if triple:
+                    x += (int(2*v)-1)*0.125
+                d = derivative(x)
+                return value(x), d*sign/(width-1), d*sign*0.25/(height-1)
+
+            cases.append(([shader], reference(width, height, expected),
+                          name in ("asin", "log", "sincos") and triple,
+                          cpu_value_tolerances.get(name, 2e-6)))
+
+    for name in ("asin", "acos", "inversesqrt", "cbrt"):
+        for triple in (False, True):
+            shader = "numeric_edges_" + name + ("_triple" if triple else "_scalar")
+            kind = "color" if triple else "float"
+            argument = "color(x-0.25,x,x+0.25)" if triple else "x"
+            selected = "result[int(2*v)]" if triple else "result"
+            source = root / (shader + ".osl")
+            source.write_text(
+                f"shader {shader}(output color Cout=0) {{float x=4*u-2;"
+                f"{kind} result={name}({argument});float q={selected};"
+                "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+            compile_fixture(source)
+
+            def expected(u, v, name=name, triple=triple):
+                x = 4*u-2 + ((int(2*v)-1)*0.25 if triple else 0)
+                if name == "inversesqrt":
+                    return ((1/math.sqrt(x), -2/x**1.5/(width-1), 0)
+                            if x > 0 else (0, 0, 0))
+                if name == "cbrt":
+                    return ((math.copysign(abs(x)**(1/3), x),
+                             4/(3*abs(x)**(2/3))/(width-1), 0)
+                            if x != 0 else (0, 0, 0))
+                value = (math.asin if name == "asin" else math.acos)(
+                    max(-1, min(1, x)))
+                derivative = ((4 if name == "asin" else -4)
+                              / math.sqrt(1-x*x)/(width-1) if abs(x) < 1 else 0)
+                return value, derivative, 0
+
+            cases.append(([shader], reference(width, height, expected), triple,
+                          cpu_value_tolerances.get(name, 2e-6)))
+
+    geometry = [
+        ("cross", "vector result=cross(vector(u,v,u*v),vector(1,2,3));",
+         lambda u, v: ((3*v-2*u*v, u*v-3*u, 2*u-v),
+                       (-2*v, v-3, 2), (3-2*u, u, -1))),
+        ("distance", "float q=distance(point(u,v,0),point(1+u,2-v,0));",
+         lambda u, v: (math.sqrt(1+(2*v-2)**2), 0,
+                       (4*v-4)/math.sqrt(1+(2*v-2)**2))),
+        ("reflect", "vector result=reflect(vector(u,v,-1),vector(0,0,1));",
+         lambda u, v: ((u,v,1), (1,0,0), (0,1,0))),
+        ("refract", "vector result=refract(vector(u,v,-1),vector(0,0,1),0.5);",
+         lambda u, v: ((0.5*u,0.5*v,-1), (0.5,0,0), (0,0.5,0))),
+        ("refract_tir",
+         "vector result=refract(vector(0.6,0,-0.8),vector(0,0,1),0.5+1.5*u);",
+         lambda u, v: (((0.6*(0.5+1.5*u), 0,
+                         -math.sqrt(1-0.36*(0.5+1.5*u)**2)),
+                        (0.9, 0, 0.54*(0.5+1.5*u)
+                         / math.sqrt(1-0.36*(0.5+1.5*u)**2)), (0,0,0))
+                       if 1-0.36*(0.5+1.5*u)**2 > 0
+                       else ((0,0,0), (0,0,0), (0,0,0)))),
+        ("faceforward",
+         "vector result=faceforward(vector(u,v,1),vector(0,0,u-0.5),"
+         "vector(0,0,1));",
+         lambda u, v: tuple(tuple(a*(-1 if u > 0.5 else 1) for a in vec)
+                            for vec in ((u,v,1), (1,0,0), (0,1,0)))),
+        ("rotate", "point result=rotate(point(u,v,0.25),1.5707963267948966,"
+         "point(0),point(0,0,1));",
+         lambda u, v: ((-v,u,0.25), (0,1,0), (-1,0,0))),
+        ("calculatenormal",
+         "normal result=calculatenormal(point(2*u,3*v,u*v));",
+         lambda u, v: ((-3*v/32,-2*u/32,6/32), (0,0,0), (0,0,0))),
+        ("area", "float q=area(point(2*u,3*v,u*v));",
+         lambda u, v: (math.sqrt(9*v*v+4*u*u+36)/32, 0, 0)),
+    ]
+    for name, operation, evaluate in geometry:
+        shader = "numeric_" + name
+        scalar = name in ("area", "distance")
+        source = root / (shader + ".osl")
+        source.write_text(
+            f"shader {shader}(output color Cout=0) {{{operation}"
+            + ("" if scalar else "float q=result[int(2*v)];")
+            + "Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+        compile_fixture(source)
+
+        def expected(u, v, scalar=scalar, evaluate=evaluate):
+            values = evaluate(u, v)
+            if not scalar:
+                values = [part[int(2*v)] for part in values]
+            return values[0], values[1]/(width-1), values[2]/(height-1)
+
+        cases.append(([shader], reference(width, height, expected), True, 2e-6))
+
+    source = root / "numeric_sincos_alias.osl"
+    source.write_text(
+        "shader numeric_sincos_alias(output color Cout=0) {"
+        "color x=color(u-0.5,u+0.25*v,u-v),c=x,s=0; sincos(c,s,c);"
+        "color shared=0; sincos(x,shared,shared);"
+        "color all=x; sincos(all,all,all);"
+        "color us=0,uc=0; sincos(color(time+0.25),us,uc);"
+        "color result=s+2*c+3*shared+5*all+us+uc;"
+        "float q=result[int(2*v)];Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+    compile_fixture(source)
+
+    def alias_expected(u, v):
+        x, dx, dy = ((u-0.5, 1, 0), (u+0.25*v, 1, 0.25), (u-v, 1, -1))[int(2*v)]
+        derivative = math.cos(x)-10*math.sin(x)
+        return (math.sin(x)+10*math.cos(x)+math.sin(0.25)+math.cos(0.25),
+                derivative*dx/(width-1), derivative*dy/(height-1))
+
+    cases.append(([source.stem], reference(width, height, alias_expected),
+                  True, 2e-6))
+
+    producer = root / "numeric_connected_source.osl"
+    producer.write_text(
+        "shader numeric_connected_source(output color value=0) {"
+        "color x=color(0.5+u,0.75+v,1+u*v);value=log(x)+sqrt(x);}",
+        encoding="ascii")
+    consumer = root / "numeric_connected_sink.osl"
+    consumer.write_text(
+        "shader numeric_connected_sink(color value=0,output color Cout=0) {"
+        "float q=value[int(2*v)];Cout=color(q,Dx(q),Dy(q));}", encoding="ascii")
+    compile_fixture(producer)
+    compile_fixture(consumer)
+
+    def connected_expected(u, v):
+        x, dx, dy = ((0.5+u, 1, 0), (0.75+v, 0, 1), (1+u*v, v, u))[int(2*v)]
+        derivative = 1/x+0.5/math.sqrt(x)
+        return (math.log(x)+math.sqrt(x), derivative*dx/(width-1),
+                derivative*dy/(height-1))
+
+    connected = connected_group(consumer.stem, producer=producer.stem)
+    cases.append((connected, reference(width, height, connected_expected),
+                  True, 2e-6))
+
+    for shaders, expected, representative, cpu_value_tolerance in cases:
+        configurations = [("-O2", "3", [])]
+        if representative:
+            configurations += [
+                ("-O0", "10", []),
+                ("-O2", "3", ["--hart-fused"]),
+                ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"]),
+            ]
+        for osl_opt, llvm_opt, mode in configurations:
+            print("Checking numeric math", shaders, osl_opt, llvm_opt, mode,
+                  flush=True)
+            check_image_render(shaders, [osl_opt, "--llvm_opt", llvm_opt],
+                               mode, width, height, expected, tolerance=2e-6,
+                               cpu_value_tolerance=cpu_value_tolerance)
+
+    source = root / "numeric_classify.osl"
+    source.write_text(
+        "shader numeric_classify(float special=0, output color Cout=0) {"
+        "float x=u<0.5 ? special : 2*u-1;"
+        "Cout=color(isnan(x),isinf(x),isfinite(x));}", encoding="ascii")
+    compile_fixture(source)
+    for osl_opt, llvm_opt, mode in [
+            ("-O0", "10", []),
+            ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"])]:
+        for text, special in (("0", 0), ("-0", -0.0), ("inf", math.inf),
+                              ("-inf", -math.inf), ("nan", math.nan)):
+            def expected(u, v, special=special):
+                x = special if u < 0.5 else 2*u-1
+                return int(math.isnan(x)), int(math.isinf(x)), int(math.isfinite(x))
+            check_image_render(
+                ["--param:type=float", "special", text, "numeric_classify"],
+                [osl_opt, "--llvm_opt", llvm_opt], mode, 5, 3,
+                reference(5, 3, expected))
 
 
 try:
@@ -2666,6 +2924,9 @@ try:
     if args.math:
         check_math_suite()
 
+    if args.numeric_math:
+        check_numeric_math_suite()
+
     if args.procedural:
         check_procedural_suite()
 
@@ -2709,7 +2970,7 @@ try:
         check_fused_benchmark()
 
     if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-                         or args.noise or args.noise_families or args.math
+                         or args.noise or args.noise_families or args.math or args.numeric_math
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
                          or args.matrices
@@ -2807,7 +3068,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.aggregates:
+if args.numeric_math:
+    suite = "numeric math"
+elif args.aggregates:
     suite = "aggregates"
 elif args.control_flow:
     suite = "control flow"
