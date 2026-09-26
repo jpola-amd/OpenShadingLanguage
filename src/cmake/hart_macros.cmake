@@ -172,6 +172,41 @@ function (osl_hart_target target)
 endfunction ()
 
 
+# Deploy the selected runtime next to each executable, not via Windows PATH.
+function (osl_hart_runtime_target target)
+    if (NOT OSL_USE_HART OR NOT WIN32)
+        return ()
+    endif ()
+    find_package (hiprtc CONFIG REQUIRED
+                  PATHS "${HIP_PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
+    find_package (rocm-kpack CONFIG QUIET
+                  PATHS "${HIP_PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
+    set (hart_comgr_dll "${HIP_PACKAGE_PREFIX_DIR}/bin/amd_comgr.dll")
+    if (NOT EXISTS "${hart_comgr_dll}")
+        message (FATAL_ERROR "Cannot deploy the selected ROCm COMGR: ${hart_comgr_dll}")
+    endif ()
+    set (hart_runtime_files
+        "$<TARGET_FILE:amd::hart>"
+        "$<TARGET_FILE:amd::shader_compiler>"
+        "$<TARGET_FILE:amd::shader_stack_runtime>"
+        "$<TARGET_FILE_DIR:amd::hart>/hart-native-codegen.exe"
+        "$<TARGET_FILE:hip::amdhip64>"
+        "$<TARGET_FILE:hiprtc::hiprtc>"
+        "${hart_comgr_dll}")
+    file (GLOB hart_hiprtc_builtins CONFIGURE_DEPENDS
+          "${HIP_PACKAGE_PREFIX_DIR}/bin/hiprtc-builtins*.dll")
+    list (APPEND hart_runtime_files ${hart_hiprtc_builtins})
+    if (TARGET rocm::rocm_kpack)
+        list (APPEND hart_runtime_files "$<TARGET_FILE:rocm::rocm_kpack>")
+    endif ()
+    add_custom_command (TARGET ${target} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            ${hart_runtime_files} "$<TARGET_FILE_DIR:${target}>"
+        COMMAND_EXPAND_LISTS VERBATIM)
+    install (FILES ${hart_runtime_files} DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endfunction ()
+
+
 # Compile one HIP device translation unit to raw AMDGCN LLVM bitcode.
 function (MAKE_HART_BITCODE src suffix arch generated_bc extra_clang_args include_dirs)
     if (NOT OSL_USE_HART OR NOT USE_LLVM_BITCODE OR NOT LLVM_BC_GENERATOR)

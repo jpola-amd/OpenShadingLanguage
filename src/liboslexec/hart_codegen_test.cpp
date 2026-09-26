@@ -461,9 +461,13 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         }
     }
     bool provenance = false;
-    for (const auto& global : module.globals())
+    for (const auto& global : module.globals()) {
         provenance |= global.getName().contains("__hart_device_storage_abi");
+        OIIO_CHECK_ASSERT(global.isDeclaration()
+                          || !global.hasExternalLinkage());
+    }
     OIIO_CHECK_ASSERT(provenance);
+    OIIO_CHECK_ASSERT(module.getNamedGlobal("llvm.compiler.used"));
     int size_bytes = 0, alignment = 0, allocated = -1;
     OIIO_CHECK_ASSERT(
         ss.getattribute(&group, "llvm_groupdata_size", size_bytes));

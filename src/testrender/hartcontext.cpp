@@ -57,6 +57,16 @@ as_bytes(cspan<T> source)
              source.size() * sizeof(T) };
 }
 
+
+
+bool
+is_bitcode(cspan<unsigned char> bytes)
+{
+    return bytes.data() && bytes.size() >= 4
+           && (std::memcmp(bytes.data(), "BC\xc0\xde", 4) == 0
+               || std::memcmp(bytes.data(), "\xde\xc0\x17\x0b", 4) == 0);
+}
+
 }  // namespace
 
 
@@ -158,7 +168,8 @@ struct HartContext::Impl {
     HartDeviceContext m_context        = nullptr;
     hipStream_t m_stream               = nullptr;
     HartModule m_module                = nullptr;
-    std::array<HartProgramGroup, 3> m_groups { };
+    std::vector<HartModule> m_callable_modules;
+    std::vector<HartProgramGroup> m_groups;
     HartPipeline m_pipeline = nullptr;
     HartShaderBindingTable m_sbt { };
     HartTraversableHandle m_traversable = 0;
@@ -271,6 +282,12 @@ HartContext::alloc(size_t bytes)
     }
     return allocation.pointer;
 }
+
+
+
+bool
+HartContext::make_current()
+{ return m_impl->ready(); }
 
 
 
@@ -453,23 +470,23 @@ HartContext::traversable() const
 
 bool
 HartContext::create_pipeline(cspan<unsigned char> bitcode,
-                             string_view raygen_entry, unsigned material_count)
+                             string_view raygen_entry, unsigned material_count,
+                             cspan<HartCallable> callables)
 {
     auto& ctx = *m_impl;
     if (!ctx.ready())
         return false;
-    if (ctx.m_module || ctx.m_pipeline) {
+    if (ctx.m_module || ctx.m_pipeline || !ctx.m_groups.empty()) {
         ctx.m_err.errorfmt("Clear the HART context before replacing "
                            "a pipeline");
         return false;
     }
-    if (!bitcode.data() || bitcode.size() < 4
-        || (std::memcmp(bitcode.data(), "BC\xc0\xde", 4) != 0
-            && std::memcmp(bitcode.data(), "\xde\xc0\x17\x0b", 4) != 0)
-        || !raygen_entry.data() || raygen_entry.size() <= 10
+    if (!is_bitcode(bitcode) || !raygen_entry.data()
+        || raygen_entry.size() <= 10
         || raygen_entry.find('\0') != string_view::npos
         || raygen_entry.substr(0, 10) != "__raygen__"
-        || material_count > ctx.m_max_sbt_records) {
+        || material_count > ctx.m_max_sbt_records
+        || (!callables.empty() && !callables.data())) {
         ctx.m_err.errorfmt("HART pipeline requires LLVM bitcode, a raygen "
                            "export, and a valid material count");
         return false;
@@ -481,6 +498,29 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                            "must match");
         return false;
     }
+    size_t callable_count = 0;
+    for (const auto& callable : callables) {
+        if (!is_bitcode(callable.bitcode) || callable.entries.empty()
+            || callable.entries.size() > std::numeric_limits<unsigned>::max()
+                                             - 3 - callable_count) {
+            ctx.m_err.errorfmt("Invalid HART callable module or export count");
+            return false;
+        }
+        for (const auto& name : callable.entries) {
+            if (name.size() <= 19
+                || name.compare(0, 19, "__direct_callable__") != 0
+                || name.find('\0') != std::string::npos) {
+                ctx.m_err.errorfmt("Invalid HART direct-callable export '{}'",
+                                   name);
+                return false;
+            }
+        }
+        callable_count += callable.entries.size();
+    }
+    if (!ctx.buffer_size(callable_count, sizeof(EmptyRecord)))
+        return false;
+    ctx.m_groups.resize(3 + callable_count, nullptr);
+    ctx.m_callable_modules.resize(callables.size(), nullptr);
     const std::string entry(raygen_entry.data(), raygen_entry.size());
     HartPipelineCompileOptions options { };
     options.traversableGraphFlags = HART_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
@@ -521,6 +561,36 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
         if (!ctx.compile_check(result, "hartProgramGroupCreate", log, log_size))
             return false;
     }
+    size_t group_index = descriptions.size();
+    for (size_t i = 0; i < callables.size(); ++i) {
+        const auto& callable = callables[i];
+        log.fill(0);
+        log_size = log.size();
+        result   = hartModuleCreate(ctx.m_context, &module_options, &options,
+                                    reinterpret_cast<const char*>(
+                                        callable.bitcode.data()),
+                                    callable.bitcode.size(), log.data(),
+                                    &log_size, &ctx.m_callable_modules[i]);
+        if (!ctx.compile_check(result, "hartModuleCreate callable", log,
+                               log_size))
+            return false;
+        for (const auto& name : callable.entries) {
+            HartProgramGroupDesc description { };
+            description.kind               = HART_PROGRAM_GROUP_KIND_CALLABLES;
+            description.callables.moduleDC = ctx.m_callable_modules[i];
+            description.callables.entryFunctionNameDC = name.c_str();
+            log.fill(0);
+            log_size = log.size();
+            result   = hartProgramGroupCreate(ctx.m_context, &description, 1,
+                                              nullptr, log.data(), &log_size,
+                                              &ctx.m_groups[group_index++]);
+            if (!ctx.compile_check(result, "hartProgramGroupCreate callable",
+                                   log, log_size)) {
+                ctx.m_err.errorfmt("Cannot create HART callable '{}'", name);
+                return false;
+            }
+        }
+    }
     HartPipelineLinkOptions link_options { };
     link_options.maxTraceDepth = 1;
     log.fill(0);
@@ -538,12 +608,11 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                             "hartUtilAccumulateStackSizes"))
             return false;
     unsigned traversal_stack = 0, state_stack = 0, continuation_stack = 0;
-    if (!ctx.hart_check(hartUtilComputeStackSizes(&stack,
-                                                  link_options.maxTraceDepth, 0,
-                                                  0, &traversal_stack,
-                                                  &state_stack,
-                                                  &continuation_stack),
-                        "hartUtilComputeStackSizes")
+    if (!ctx.hart_check(
+            hartUtilComputeStackSizes(&stack, link_options.maxTraceDepth, 0,
+                                      callable_count ? 1 : 0, &traversal_stack,
+                                      &state_stack, &continuation_stack),
+            "hartUtilComputeStackSizes")
         || !ctx.hart_check(hartPipelineSetStackSize(ctx.m_pipeline,
                                                     traversal_stack, state_stack,
                                                     continuation_stack, 1),
@@ -574,16 +643,36 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
             || !upload(device_hits, as_bytes(cspan<HitRecord>(hit_records))))
             return false;
     }
+    void* device_callables = nullptr;
+    if (callable_count) {
+        std::vector<EmptyRecord> callable_records(callable_count);
+        for (size_t i = 0; i < callable_count; ++i)
+            if (!ctx.hart_check(
+                    hartSbtRecordPackHeader(ctx.m_groups[3 + i],
+                                            callable_records[i].header.data()),
+                    "hartSbtRecordPackHeader callable"))
+                return false;
+        device_callables = alloc(callable_count * sizeof(EmptyRecord));
+        if (!device_callables
+            || !upload(device_callables,
+                       as_bytes(cspan<EmptyRecord>(callable_records))))
+            return false;
+    }
     ctx.m_sbt.raygenRecord            = device_records;
     ctx.m_sbt.missRecordBase          = device_records + sizeof(EmptyRecord);
     ctx.m_sbt.missRecordStrideInBytes = sizeof(EmptyRecord);
     ctx.m_sbt.missRecordCount         = 1;
     ctx.m_sbt.hitgroupRecordBase      = device_hits;
-    ctx.m_sbt.hitgroupRecordStrideInBytes = material_count ? sizeof(HitRecord)
-                                                           : 0;
-    ctx.m_sbt.hitgroupRecordCount         = material_count;
-    ctx.m_pipeline_material_count         = material_count;
-    ctx.m_pipeline_ready                  = true;
+    ctx.m_sbt.hitgroupRecordStrideInBytes  = material_count ? sizeof(HitRecord)
+                                                            : 0;
+    ctx.m_sbt.hitgroupRecordCount          = material_count;
+    ctx.m_sbt.callablesRecordBase          = device_callables;
+    ctx.m_sbt.callablesRecordStrideInBytes = callable_count
+                                                 ? sizeof(EmptyRecord)
+                                                 : 0;
+    ctx.m_sbt.callablesRecordCount = static_cast<unsigned>(callable_count);
+    ctx.m_pipeline_material_count  = material_count;
+    ctx.m_pipeline_ready           = true;
     return true;
 }
 
@@ -662,6 +751,19 @@ HartContext::clear()
     }
     if (!ok)
         return false;
+    ctx.m_groups.clear();
+    for (auto& module : ctx.m_callable_modules) {
+        if (module) {
+            if (ctx.hart_check(hartModuleDestroy(module),
+                               "hartModuleDestroy callable"))
+                module = nullptr;
+            else
+                ok = false;
+        }
+    }
+    if (!ok)
+        return false;
+    ctx.m_callable_modules.clear();
     if (ctx.m_module) {
         if (!ctx.hart_check(hartModuleDestroy(ctx.m_module),
                             "hartModuleDestroy"))

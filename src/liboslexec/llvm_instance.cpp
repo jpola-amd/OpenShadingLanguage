@@ -2670,6 +2670,15 @@ BackendLLVM::run()
 
 #if OSL_USE_HART
     if (use_hart()) {
+        // Each group clones the shadeops, including HIP's host-object IDs
+        // and promoted statics. Only callable functions are exported from
+        // these modules. Retain the data and all used/provenance roots.
+        for (auto& global : ll.module()->globals()) {
+            if (global.hasExternalLinkage() && !global.isDeclaration()) {
+                global.setLinkage(llvm::GlobalValue::InternalLinkage);
+                global.setVisibility(llvm::GlobalValue::DefaultVisibility);
+            }
+        }
         std::string diagnostics;
         llvm::raw_string_ostream errors(diagnostics);
         if (llvm::verifyModule(*ll.module(), &errors)) {

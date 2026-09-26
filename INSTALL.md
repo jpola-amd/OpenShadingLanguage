@@ -960,8 +960,50 @@ geometry produces an explicit error before acceleration construction.
 Codegen tests verify the device module for every configured architecture.
 Only execution on the selected physical device is runtime evidence.
 
-This is a traversal foundation, not yet an OSL material path tracer or a
-`testrender --hart` mode. It is unrelated to the OSL `trace()` renderer service.
+### Rendering diffuse/emission scenes with HART
+
+`testrender --hart scene.xml output.exr` uses the existing XML scene parser,
+triangle meshes, camera and sampling helpers with native HART traversal and
+OSL-generated material callables. It supports `diffuse(N)`, `emission()`,
+closure addition/multiplication, connected materials and the existing raw
+2D HART texture interface. Misses return black. Background shaders,
+displacement, other closure families and diagnostic visualization modes are
+explicitly unsupported in this initial renderer.
+
+The integrator samples diffuse closure mixtures and accumulates emission
+along the resulting paths. It has no next-event light sampling or Russian
+roulette yet. `--hart-bounces N` limits diffuse bounces to 0..64 (default 4);
+`-aa N` uses N squared samples per pixel, with N in 1..64. A limit of zero
+shows directly visible emission only. `--no-jitter` fixes primary rays at
+pixel centers while retaining deterministic diffuse sampling.
+
+Hit-point ShaderGlobals use real incident rays, interpolated normals/UVs,
+mesh surface areas, camera/ray-cone differentials and camera/diffuse ray
+flags. Secondary ray origins use triangle-scaled offsets to avoid shared-edge
+self-intersections. The bounded 1024-byte closure pool belongs to the raygen
+caller and is reset only after consuming each material. `--hart-fused` selects fused
+callables; `--hart-local-groupdata BYTES` additionally permits bounded
+callable-local storage. Otherwise Groupdata uses per-pixel caller storage.
+Allocation, compilation, launch and device errors fail without writing an
+image. This traversal does not implement the OSL `trace()` renderer service.
+
+```powershell
+cmake --build build\hart-validation --config Release `
+  --target testrender oslc hart_trace_test --parallel 8
+ctest --test-dir build\hart-validation -C Release `
+  -R "^hart-(pathtracer|raytracer)-" --output-on-failure
+```
+
+The path tests compare connected textured emissive materials and geometry
+derivatives with CPU rendering, verify a diffuse furnace against known RGB values, and
+compare multiple bounded bounces with the CPU integrator with direct-light
+sampling disabled. They cover repeated launches, shared edges at three scene
+scales, rejected empty scenes, and closure-pool exhaustion without image
+publication in split, fused, fused-local and unoptimized (OSL 0 / LLVM 10)
+modes. Groupdata queries verify caller versus callable-local storage rather
+than inferring it from matching pixels. CPU/OptiX renders can use
+`--max-bounces N` to match the HART depth limit; their existing
+default is unchanged.
 
 ### Testing external HART device code
 

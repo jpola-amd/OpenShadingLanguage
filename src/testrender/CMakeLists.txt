@@ -76,6 +76,8 @@ if (CMAKE_COMPILER_IS_INTELCLANG)
 endif ()
 
 add_executable (testrender ${testrender_srcs})
+target_compile_definitions (testrender PRIVATE
+    OSL_TESTRENDER_HART=$<AND:$<BOOL:${OSL_USE_HART}>,$<BOOL:${USE_LLVM_BITCODE}>>)
 
 target_include_directories (testrender BEFORE PRIVATE ${OpenImageIO_INCLUDES})
 
@@ -92,6 +94,60 @@ endif ()
 osl_optix_target (testrender)
 
 install ( TARGETS testrender RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} )
+
+if (OSL_USE_HART AND USE_LLVM_BITCODE)
+    get_target_property (hart_path_includes amd::hart INTERFACE_INCLUDE_DIRECTORIES)
+    list (APPEND hart_path_includes
+          "${PROJECT_SOURCE_DIR}/src/include" "${PROJECT_BINARY_DIR}/include"
+          ${IMATH_INCLUDES} ${OpenImageIO_INCLUDES})
+    list (REMOVE_DUPLICATES hart_path_includes)
+    set (hart_path_declarations "")
+    set (hart_path_entries "")
+    set (hart_path_sources)
+    set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartpathparams.h")
+    set (hart_path_architectures ${HART_TARGET_ARCHITECTURES})
+    list (REMOVE_DUPLICATES hart_path_architectures)
+    foreach (arch IN LISTS hart_path_architectures)
+        MAKE_HART_BITCODE ("hart/pathtracer.hip" "_hart_${arch}" "${arch}"
+                          path_bc "" "${hart_path_includes}")
+        set (symbol "osl_hart_pathtracer_${arch}")
+        set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/pathtracer.bc.cpp")
+        MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${path_bc}")
+        list (APPEND hart_path_sources "${embedded}")
+        string (APPEND hart_path_declarations
+            "extern unsigned char ${symbol}_block[];\nextern int ${symbol}_size;\n")
+        string (APPEND hart_path_entries
+            "    { \"${arch}\", ${symbol}_block, &${symbol}_size },\n")
+        if (BUILD_TESTING)
+            add_test (NAME hart-pathtracer-codegen-${arch}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}" "-DBITCODE_FILE=${path_bc}"
+                    "-DARCH=${arch}" "-DRAYGEN=__raygen__osl_hart_path"
+                    -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-raytracer-bitcode.cmake")
+        endif ()
+    endforeach ()
+    file (WRITE "${CMAKE_CURRENT_BINARY_DIR}/hart_pathtracer_bitcode.h"
+        "${hart_path_declarations}"
+        "struct HartPathtracerModule { const char* arch; const unsigned char* data; const int* size; };\n"
+        "static const HartPathtracerModule hart_pathtracer_modules[] = {\n"
+        "${hart_path_entries}};\n")
+    target_sources (testrender PRIVATE hartcontext.cpp hartraytracer.cpp
+                    ../testshade/harttexture.cpp ${hart_path_sources})
+    target_include_directories (testrender PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    osl_hart_target (testrender)
+    osl_hart_runtime_target (testrender)
+    if (BUILD_TESTING AND "$ENV{TESTSUITE_HART}" STREQUAL "1")
+        foreach (mode split fused fused-local unoptimized)
+            add_test (NAME hart-pathtracer-${mode}
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-pathtracer.py"
+                    "$<TARGET_FILE:testrender>" "$<TARGET_FILE:oslc>"
+                    "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}")
+            set_tests_properties (hart-pathtracer-${mode} PROPERTIES
+                                  LABELS "gpu;hart" RUN_SERIAL TRUE)
+        endforeach ()
+    endif ()
+endif ()
 
 if (OSL_USE_HART AND USE_LLVM_BITCODE AND BUILD_TESTING)
     get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)

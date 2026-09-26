@@ -9,14 +9,16 @@
 
 #include <OpenImageIO/fmath.h>
 
-#include "../testshade/render_state.h"
-#include "optix_compat.h"
-#include "render_params.h"
+#if !defined(__HIPCC__)
+#    include "../testshade/render_state.h"
+#    include "optix_compat.h"
+#    include "render_params.h"
+#endif
 #include <OSL/dual_vec.h>
 #include <OSL/oslconfig.h>
 #include "bvh.h"
 
-#if OSL_USE_OPTIX
+#if OSL_USE_OPTIX && !defined(__HIPCC__)
 #    include <optix.h>
 #    include <vector_functions.h>  // from CUDA
 #endif
@@ -190,10 +192,12 @@ struct LightSample {
     float u, v;
 };
 
+#if !defined(__HIPCC__)
 using ShaderMap = std::unordered_map<std::string, int>;
+#endif
 
 struct Scene {
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
     void add_sphere(const Vec3& c, float r, int shaderID, int resolution);
 
     void add_quad(const Vec3& p, const Vec3& ex, const Vec3& ey, int shaderID,
@@ -348,7 +352,7 @@ struct Scene {
 
     OSL_HOSTDEVICE int shaderid(int primID) const { return shaderids[primID]; }
 
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
     // basic triangle data
     std::vector<Vec3> verts;
     std::vector<Vec3> normals;
@@ -369,7 +373,11 @@ struct Scene {
     const TriangleIndices* uv_triangles;
     const TriangleIndices* n_triangles;
     const int* shaderids;
+#    if defined(__HIPCC__)
+    uint64_t handle;
+#    else
     OptixTraversableHandle handle;
+#    endif
 #endif
 };
 

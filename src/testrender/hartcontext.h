@@ -10,10 +10,19 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 OSL_NAMESPACE_BEGIN
 
 struct HartTriangle;
+
+/// Borrowed bitcode and its ordered direct-callable exports.
+struct HartCallable {
+    cspan<unsigned char> bitcode;
+    std::vector<std::string> entries;
+};
+
+
 
 /// Host-owned native HART resources. Clear before replacing the pipeline.
 /// All device allocations, including acceleration storage, live until clear().
@@ -25,14 +34,17 @@ public:
     HartContext& operator=(const HartContext&) = delete;
 
     bool init(int device, std::string& arch);
+    bool make_current();
     void* alloc(size_t bytes);
     bool upload(void* destination, cspan<unsigned char> source);
     bool download(span<unsigned char> destination, const void* source);
     bool build_accel(cspan<Vec3> vertices, cspan<HartTriangle> triangles,
                      cspan<unsigned> material_ids, unsigned material_count);
     uint64_t traversable() const;
+    /// Callable SBT indices follow module order, then each module's entries.
     bool create_pipeline(cspan<unsigned char> bitcode, string_view raygen_entry,
-                         unsigned material_count);
+                         unsigned material_count,
+                         cspan<HartCallable> callables = { });
     /// Copy host parameters, launch, and wait for completion.
     bool launch(const void* params, size_t param_bytes, unsigned width,
                 unsigned height);

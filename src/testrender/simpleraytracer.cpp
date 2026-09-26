@@ -69,10 +69,11 @@ public:
     virtual void operator()(int errcode, const std::string& msg)
     {
         OIIO::ErrorHandler::operator()(errcode, msg);
-        if (errcode & OIIO::ErrorHandler::EH_ERROR
-            || errcode & OIIO::ErrorHandler::EH_SEVERE)
+        const int category = errcode & 0xffff0000;
+        if (category == OIIO::ErrorHandler::EH_ERROR
+            || category == OIIO::ErrorHandler::EH_SEVERE)
             m_rend.m_had_error = true;
-        if (errcode & OIIO::ErrorHandler::EH_SEVERE)
+        if (category == OIIO::ErrorHandler::EH_SEVERE)
             exit(EXIT_FAILURE);
     }
 

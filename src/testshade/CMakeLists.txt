@@ -127,36 +127,7 @@ if (OSL_USE_HART)
     target_link_libraries (testshade PRIVATE
         ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
 endif ()
-if (OSL_USE_HART AND WIN32)
-    find_package (hiprtc CONFIG REQUIRED
-                  PATHS "${HIP_PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
-    find_package (rocm-kpack CONFIG QUIET
-                  PATHS "${HIP_PACKAGE_PREFIX_DIR}" NO_DEFAULT_PATH)
-    # System32 precedes PATH and may contain incompatible display-driver copies.
-    set (hart_comgr_dll "${HIP_PACKAGE_PREFIX_DIR}/bin/amd_comgr.dll")
-    if (NOT EXISTS "${hart_comgr_dll}")
-        message (FATAL_ERROR "Cannot deploy the selected ROCm COMGR: ${hart_comgr_dll}")
-    endif ()
-    set (hart_runtime_files
-        "$<TARGET_FILE:amd::hart>"
-        "$<TARGET_FILE:amd::shader_compiler>"
-        "$<TARGET_FILE:amd::shader_stack_runtime>"
-        "$<TARGET_FILE_DIR:amd::hart>/hart-native-codegen.exe"
-        "$<TARGET_FILE:hip::amdhip64>"
-        "$<TARGET_FILE:hiprtc::hiprtc>"
-        "${hart_comgr_dll}")
-    file (GLOB hart_hiprtc_builtins CONFIGURE_DEPENDS
-          "${HIP_PACKAGE_PREFIX_DIR}/bin/hiprtc-builtins*.dll")
-    list (APPEND hart_runtime_files ${hart_hiprtc_builtins})
-    if (TARGET rocm::rocm_kpack)
-        list (APPEND hart_runtime_files "$<TARGET_FILE:rocm::rocm_kpack>")
-    endif ()
-    add_custom_command (TARGET testshade POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            ${hart_runtime_files} "$<TARGET_FILE_DIR:testshade>"
-        COMMAND_EXPAND_LISTS VERBATIM)
-    install (FILES ${hart_runtime_files} DESTINATION "${CMAKE_INSTALL_BINDIR}")
-endif ()
+osl_hart_runtime_target (testshade)
 if (OSL_USE_OPTIX)
     add_dependencies(testshade testshade_ptx)
 endif ()
