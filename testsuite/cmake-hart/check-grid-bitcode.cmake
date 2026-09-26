@@ -29,6 +29,10 @@ foreach (bc IN LISTS GENERATED_GRID_FILES)
     if (NOT ir MATCHES "target triple = \"amdgcn-amd-amdhsa\""
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_generated\\("
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_generated_fused\\("
+        OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_closures\\("
+        OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_closures_fused\\("
+        OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_closure_pool\\("
+        OR NOT ir MATCHES "define [^\n]*@rs_allocate_closure\\("
         OR NOT ir MATCHES "@testshade_hart_params = external"
         OR NOT ir MATCHES "\"target-cpu\"=\"gfx[0-9]+\"")
         message (FATAL_ERROR "${bc} does not implement the generated HART grid contract")

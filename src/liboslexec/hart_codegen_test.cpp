@@ -17,6 +17,7 @@
 // Keep and extend this coverage as HART and LLVM evolve. Replace individual
 // rejection cases with positive tests when their features become supported.
 
+#include <OSL/genclosure.h>
 #include <OSL/oslcomp.h>
 #include <OSL/oslexec.h>
 #include <OSL/rendererservices.h>
@@ -50,14 +51,16 @@ namespace {
 
 class HartServices final : public RendererServices {
 public:
-    explicit HartServices(bool textures = false, bool transforms = false)
-        : m_textures(textures), m_transforms(transforms)
+    explicit HartServices(bool textures = false, bool transforms = false,
+                          bool closures = false)
+        : m_textures(textures), m_transforms(transforms), m_closures(closures)
     {
     }
     int supports(string_view feature) const override
     {
         return feature == "HART" || (m_textures && feature == "HARTTextures")
-               || (m_transforms && feature == "HARTTransforms");
+               || (m_transforms && feature == "HARTTransforms")
+               || (m_closures && feature == "HARTClosures");
     }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -80,7 +83,40 @@ public:
 private:
     bool m_textures;
     bool m_transforms;
+    bool m_closures;
 };
+
+
+
+struct EmptyClosureParams { };
+struct DiffuseClosureParams {
+    Vec3 N;
+    ustring label;
+};
+
+const ClosureParam emission_params[]
+    = { CLOSURE_FINISH_PARAM(EmptyClosureParams) };
+const ClosureParam diffuse_params[]
+    = { CLOSURE_VECTOR_PARAM(DiffuseClosureParams, N),
+        CLOSURE_STRING_KEYPARAM(DiffuseClosureParams, label, "label"),
+        CLOSURE_FINISH_PARAM(DiffuseClosureParams) };
+
+int closure_callback_calls = 0;
+
+
+
+void
+host_closure_callback(RendererServices*, int, void*)
+{ ++closure_callback_calls; }
+
+
+
+void
+register_hart_closures(ShadingSystem& ss)
+{
+    ss.register_closure("emission", 1, emission_params, nullptr, nullptr);
+    ss.register_closure("diffuse", 3, diffuse_params, nullptr, nullptr);
+}
 
 
 
@@ -263,7 +299,7 @@ void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
-             bool looping = false, int used_layers = 0)
+             bool looping = false, int used_layers = 0, bool closures = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -294,6 +330,136 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     if (!error.empty())
         print(stderr, "{}\n", error);
     OIIO_CHECK_EQUAL(module.getDataLayout().getAllocaAddrSpace(), 5);
+    if (closures) {
+        const auto& layout = module.getDataLayout();
+        OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
+        if (optimize == 10) {
+            auto* component
+                = llvm::StructType::getTypeByName(context, "ClosureComponent");
+            if (module.getFunction("osl_allocate_closure_component")
+                || module.getFunction("osl_allocate_weighted_closure_component"))
+                OIIO_CHECK_ASSERT(component);
+            if (component) {
+                OIIO_CHECK_EQUAL(component->getNumElements(), 3);
+                const auto* fields = layout.getStructLayout(component);
+                OIIO_CHECK_EQUAL(fields->getElementOffset(0), 0);
+                OIIO_CHECK_EQUAL(fields->getElementOffset(1), 4);
+                OIIO_CHECK_EQUAL(fields->getElementOffset(2), 16);
+            }
+        }
+        const struct {
+            const char* name;
+            const char* args;
+        } signatures[] = {
+            { "osl_allocate_closure_component", "pii" },
+            { "osl_allocate_weighted_closure_component", "piip" },
+            { "osl_add_closure_closure", "ppp" },
+            { "osl_mul_closure_color", "ppp" },
+            { "osl_mul_closure_float", "ppf" },
+            { "rs_allocate_closure", "pll" },
+        };
+        for (const auto& signature : signatures) {
+            const auto* function = module.getFunction(signature.name);
+            if (!function)
+                continue;  // Null trees and optimization can remove shadeops.
+            OIIO_CHECK_EQUAL(function->isDeclaration(),
+                             string_view(signature.name)
+                                 == "rs_allocate_closure");
+            OIIO_CHECK_ASSERT(!function->isVarArg());
+            OIIO_CHECK_ASSERT(function->getReturnType()->isPointerTy());
+            OIIO_CHECK_EQUAL(function->getReturnType()->getPointerAddressSpace(),
+                             0);
+            OIIO_CHECK_EQUAL(function->arg_size(),
+                             string_view(signature.args).size());
+            for (const auto& arg : function->args()) {
+                if (arg.getArgNo() >= string_view(signature.args).size())
+                    continue;
+                const char kind = signature.args[arg.getArgNo()];
+                if (kind == 'p')
+                    OIIO_CHECK_ASSERT(arg.getType()->isPointerTy()
+                                      && arg.getType()->getPointerAddressSpace()
+                                             == 0);
+                else if (kind == 'f')
+                    OIIO_CHECK_ASSERT(arg.getType()->isFloatTy());
+                else
+                    OIIO_CHECK_ASSERT(
+                        arg.getType()->isIntegerTy(kind == 'i' ? 32 : 64));
+            }
+            if (optimize != 10 || function->isDeclaration())
+                continue;
+            const bool component = string_view(signature.name).find("component")
+                                   != string_view::npos;
+            int allocations      = 0;
+            for (const auto& block : *function)
+                for (const auto& inst : block) {
+                    const auto* call   = llvm::dyn_cast<llvm::CallBase>(&inst);
+                    const auto* callee = call ? call->getCalledFunction()
+                                              : nullptr;
+                    if (!callee || callee->getName() != "rs_allocate_closure")
+                        continue;
+                    ++allocations;
+                    const auto* alignment = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(2));
+                    OIIO_CHECK_ASSERT(alignment);
+                    if (alignment)
+                        OIIO_CHECK_EQUAL(alignment->getZExtValue(),
+                                         component ? 16 : 8);
+                    if (!component) {
+                        const auto* bytes = llvm::dyn_cast<llvm::ConstantInt>(
+                            call->getArgOperand(1));
+                        OIIO_CHECK_ASSERT(bytes);
+                        if (bytes)
+                            OIIO_CHECK_EQUAL(bytes->getZExtValue(), 24);
+                    }
+                }
+            OIIO_CHECK_EQUAL(allocations, 1);
+        }
+        for (const auto& function : module) {
+            if (function.getName().find("osl_layer_group_") != 0
+                && function.getName().find("osl_init_group_") != 0
+                && function.getName().find("__direct_callable__") != 0)
+                continue;
+            for (const auto& block : function)
+                for (const auto& inst : block) {
+                    if (const auto* cast = llvm::dyn_cast<llvm::IntToPtrInst>(
+                            &inst)) {
+                        // offset_ptr uses runtime pointer arithmetic; only
+                        // literal non-null addresses would embed host memory.
+                        const auto* address = llvm::dyn_cast<llvm::ConstantInt>(
+                            cast->getOperand(0));
+                        OIIO_CHECK_ASSERT(!address || address->isZero());
+                    }
+                    if (const auto* call = llvm::dyn_cast<llvm::CallBase>(
+                            &inst)) {
+                        OIIO_CHECK_ASSERT(!call->isIndirectCall());
+                        const auto* callee = call->getCalledFunction();
+                        if (callee
+                            && (callee->getName()
+                                    == "osl_allocate_closure_component"
+                                || callee->getName()
+                                       == "osl_allocate_weighted_closure_component")) {
+                            const auto* id = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(1));
+                            const auto* size = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(2));
+                            OIIO_CHECK_ASSERT(id && size);
+                            if (id && size) {
+                                OIIO_CHECK_ASSERT(id->getZExtValue() == 1
+                                                  || id->getZExtValue() == 3);
+                                OIIO_CHECK_EQUAL(size->getZExtValue(),
+                                                 id->getZExtValue() == 1 ? 1
+                                                                         : 24);
+                            }
+                        }
+                    }
+                    for (const auto& operand : inst.operands())
+                        if (const auto* expr
+                            = llvm::dyn_cast<llvm::ConstantExpr>(operand.get()))
+                            OIIO_CHECK_ASSERT(expr->getOpcode()
+                                              != llvm::Instruction::IntToPtr);
+                }
+        }
+    }
     bool provenance = false;
     for (const auto& global : module.globals())
         provenance |= global.getName().contains("__hart_device_storage_abi");
@@ -2077,6 +2243,275 @@ check_texture_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_closure_modules(string_view arch, string_view stdosl)
+{
+    OSLCompiler consumer_compiler;
+    std::string consumer;
+    if (!consumer_compiler.compile_buffer(
+            "shader hart_closure_consumer(closure color value=0, "
+            "output closure color result=0, output color Cout=0) { "
+            "result=value; if(u>v) Ci=result; else Ci=0; "
+            "Cout=color(u,v,0.5); }",
+            consumer, { }, stdosl))
+        return false;
+    const struct {
+        const char* source;
+        std::initializer_list<string_view> plain;
+        std::initializer_list<string_view> optimized;
+        bool connected;
+    } tests[] = {
+        { "shader hart_closure_smoke(output color Cout=0) { "
+          "Ci=color(0.8,0.3,0.1)*diffuse(N)+color(0.02)*emission(); }",
+          { "osl_allocate_closure_component", "osl_mul_closure_color",
+            "osl_add_closure_closure", "rs_allocate_closure" },
+          { "osl_allocate_weighted_closure_component",
+            "osl_add_closure_closure", "rs_allocate_closure" },
+          false },
+        { "shader hart_closure_null(output color Cout=0) { Ci=0; }",
+          { },
+          { },
+          false },
+        { "shader hart_closure_scalar(output color Cout=0) { "
+          "Ci=(u+0.25)*diffuse(N); }",
+          { "osl_allocate_closure_component", "osl_mul_closure_float",
+            "rs_allocate_closure" },
+          { "osl_allocate_closure_component", "osl_mul_closure_float",
+            "rs_allocate_closure" },
+          false },
+        { "shader hart_closure_weighted(output color Cout=0) { "
+          "Ci=color(u,v,0.5)*diffuse(N); }",
+          { "osl_allocate_closure_component", "osl_mul_closure_color",
+            "rs_allocate_closure" },
+          { "osl_allocate_weighted_closure_component", "rs_allocate_closure" },
+          false },
+        { "shader hart_closure_zero(output color Cout=0) { "
+          "Ci=color(0)*diffuse(N); }",
+          { "osl_allocate_closure_component", "osl_mul_closure_color",
+            "rs_allocate_closure" },
+          { },
+          false },
+        { "shader hart_closure_conditional(output color Cout=0) { "
+          "Ci=0; if(u>v) Ci=diffuse(N); "
+          "if(v>0.5) Ci=Ci+emission(); Cout=color(u,v,0.5); }",
+          { "osl_allocate_closure_component", "osl_add_closure_closure",
+            "rs_allocate_closure" },
+          { "osl_allocate_closure_component", "osl_add_closure_closure",
+            "rs_allocate_closure" },
+          false },
+        { "shader hart_closure_parameter(closure color value=0, "
+          "output closure color result=0, output color Cout=0) { "
+          "result=value; Ci=result; }",
+          { },
+          { },
+          false },
+        { "shader hart_closure_producer(output closure color value=0) { "
+          "value=color(u,v,0.5)*diffuse(N)+color(0.02)*emission(); }",
+          { "osl_allocate_closure_component", "osl_mul_closure_color",
+            "osl_add_closure_closure", "rs_allocate_closure" },
+          { "osl_allocate_weighted_closure_component",
+            "osl_add_closure_closure", "rs_allocate_closure" },
+          true },
+    };
+    for (const auto& test : tests) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 })
+                for (int budget : { 0, 4096 }) {
+                    if (!test.connected
+                        && (budget || ((osl_optimize == 0) != (optimize == 10))))
+                        continue;
+                    HartServices renderer(false, false, true);
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    register_hart_closures(ss);
+                    ss.attribute("hart_arch", arch);
+                    ss.attribute("optimize", osl_optimize);
+                    ss.attribute("llvm_optimize", optimize);
+                    ss.attribute("max_hart_groupdata_alloc", budget);
+                    auto group = test.connected
+                                     ? make_connected_group(ss, bytecode,
+                                                            consumer)
+                                     : make_group(ss, bytecode);
+                    ss.optimize_group(group.get(), nullptr);
+                    if (errors.errors)
+                        print(stderr, "{}: {}\n", test.source,
+                              errors.last_error);
+                    OIIO_CHECK_EQUAL(errors.errors, 0);
+                    check_module(ss, *group, arch,
+                                 osl_optimize ? test.optimized : test.plain,
+                                 optimize, test.connected, false, false,
+                                 test.connected ? 2 : 0, true);
+                }
+    }
+
+    enum Registry {
+        Safe,
+        Missing,
+        Prepare,
+        Setup,
+        Both,
+        WrongType,
+        WrongOffset,
+        NegativeOffset,
+        WrongSize,
+        WrongCount,
+        WrongLabel,
+    };
+    const struct {
+        const char* prefix;
+        const char* expression;
+        Registry registry;
+        const char* error;
+    } rejected[] = {
+        { "", "diffuse(N)", Missing, "closure 'diffuse' is not registered" },
+        { "", "emission()", Missing, "closure 'emission' is not registered" },
+        { "", "background()", Safe, "unsupported closure 'background'" },
+        { "", "diffuse(N)", Prepare, "prepare/setup callbacks" },
+        { "", "diffuse(N)", Setup, "prepare/setup callbacks" },
+        { "", "diffuse(N)", Both, "prepare/setup callbacks" },
+        { "", "emission()", Prepare, "prepare/setup callbacks" },
+        { "", "emission()", Setup, "prepare/setup callbacks" },
+        { "", "emission()", Both, "prepare/setup callbacks" },
+        { "", "diffuse(N,\"label\",\"test\")", Safe,
+          "closure keyword arguments are unsupported" },
+        { "", "diffuse(N,\"unknown\",1.0)", Safe,
+          "closure keyword arguments are unsupported" },
+        { "", "emission(\"label\",\"test\")", Safe,
+          "closure keyword arguments are unsupported" },
+        { "", "diffuse(N)", WrongType, "parameter layout" },
+        { "", "diffuse(N)", WrongOffset, "parameter layout" },
+        { "", "diffuse(N)", NegativeOffset, "parameter layout" },
+        { "", "diffuse(N)", WrongSize, "parameter layout" },
+        { "", "diffuse(N)", WrongCount, "parameter layout" },
+        { "", "diffuse(N)", WrongLabel, "parameter layout" },
+        { "closure color diffuse(float x) [[ int builtin=1 ]]; ", "diffuse(u)",
+          Safe, "incompatible formal argument" },
+        { "closure color diffuse() [[ int builtin=1 ]]; ", "diffuse()", Safe,
+          "invalid closure argument list" },
+    };
+    for (const auto& test : rejected)
+        for (int mode : { 0, 1, 2 }) {
+            const auto source = fmtformat(
+                "{} shader hart_bad_closure(int enable=0, "
+                "output closure color value=0, output color Cout=0) {{ "
+                "{} value={}; }}",
+                test.prefix, mode == 1 ? "if(enable)" : "", test.expression);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            HartServices renderer(false, false, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", 2);
+            ss.attribute("llvm_optimize", 3);
+            if (test.registry != Missing) {
+                std::vector<ClosureParam> params(std::begin(diffuse_params),
+                                                 std::end(diffuse_params));
+                if (test.registry == WrongType) {
+                    params[0].type       = TypeFloat;
+                    params[0].field_size = sizeof(float);
+                }
+                if (test.registry == WrongOffset)
+                    params[0].offset = 4;
+                if (test.registry == NegativeOffset)
+                    params[0].offset = -4;
+                if (test.registry == WrongSize)
+                    params.back().offset = 8;
+                if (test.registry == WrongCount)
+                    params.erase(params.begin());
+                if (test.registry == WrongLabel)
+                    params[1].key = "other";
+                const auto prepare = test.registry == Prepare
+                                             || test.registry == Both
+                                         ? host_closure_callback
+                                         : nullptr;
+                const auto setup   = test.registry == Setup
+                                             || test.registry == Both
+                                         ? host_closure_callback
+                                         : nullptr;
+                ss.register_closure("diffuse", 3, params.data(), prepare,
+                                    setup);
+                ss.register_closure("emission", 1, emission_params, prepare,
+                                    setup);
+            }
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            ShaderGroupRef group;
+            if (mode == 2) {
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_bad_closure", bytecode));
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_closure_consumer",
+                                                consumer));
+                group = ss.ShaderGroupBegin("hart_test_group");
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_bad_closure", "unused"));
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_closure_consumer", "consumer"));
+                OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            } else {
+                group = make_group(ss, bytecode);
+            }
+            check_rejected_group(ss, *group, errors, test.error);
+            OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+        }
+
+    const struct {
+        const char* source;
+        const char* error;
+    } types[] = {
+        { "shader hart_closure_array(closure color values[2]={0,0}, "
+          "output color Cout=0) { Ci=values[0]; }",
+          "unsupported type" },
+        { "struct Holder { closure color value; }; "
+          "shader hart_closure_struct(Holder h={0}, output color Cout=0) { "
+          "Ci=h.value; }",
+          "unsupported type" },
+        { "shader hart_closure_string(string name=\"diffuse\", "
+          "output color Cout=0) { Ci=diffuse(N); }",
+          "unsupported type" },
+        { "shader hart_closure_global(output color Cout=0) { "
+          "N=normal(u,v,1); Ci=diffuse(N); }",
+          "writing shader global 'N'" },
+    };
+    for (const auto& test : types) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        register_hart_closures(ss);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    // Without the opt-in, both constructors and plain Ci access stay rejected.
+    for (const char* expression : { "diffuse(N)", "0" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                fmtformat("shader hart_no_closures(output color Cout=0) {{ "
+                          "Ci={}; }}",
+                          expression),
+                bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode,
+                        string_view(expression) == "0"
+                            ? "unsupported type"
+                            : "unsupported operation 'closure'");
+    }
+    return true;
+}
+
+
+
+bool
 check_procedural_modules(string_view arch, string_view stdosl)
 {
     const char* sources[] = {
@@ -2130,6 +2565,8 @@ main(int argc, char* argv[])
         return 1;
     }
     const string_view arch(argv[1]);
+    if (!check_closure_modules(arch, argv[2]) || unit_test_failures)
+        return 1;
     const char* sources[] = {
         "shader hart_test(output color Cout=0) { Cout=color(u,v,u+v); }",
         "shader hart_test(output color Cout=0) { Cout=color(u,v,sin(u+v)); }",

@@ -382,7 +382,7 @@ HartTextureStore::check_errors()
     if (!errors)
         return true;
     impl.err.errorfmt(
-        "HART device services failed (error bits {}): {}{}{}{}{}", errors,
+        "HART device services failed (error bits {}): {}{}{}{}{}{}{}", errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
             ? "nonfinite coordinates/gradients; "
@@ -392,7 +392,12 @@ HartTextureStore::check_errors()
         errors & testshade::HartInvalidTransform
             ? "invalid transform binding/space; "
             : "",
-        errors & ~15u ? "unknown error; " : "");
+        errors & testshade::HartClosureAllocationFailed
+            ? "closure pool allocation failed; "
+            : "",
+        errors & testshade::HartClosureInvalidTree ? "invalid closure tree; "
+                                                   : "",
+        errors & ~63u ? "unknown error; " : "");
     return false;
 }
 

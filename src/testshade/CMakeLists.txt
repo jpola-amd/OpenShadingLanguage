@@ -389,6 +389,25 @@ if (BUILD_TESTING AND OSL_USE_HART)
         add_dependencies (hart_texture_test testshade)
         set_target_properties (hart_texture_test PROPERTIES FOLDER "Unit Tests")
         if (USE_LLVM_BITCODE)
+            add_executable (hart_closure_test hart_closure_test.cpp
+                hartgridrender.cpp harttexture.cpp simplerend.cpp ${hart_generated_grid_cpp})
+            target_include_directories (hart_closure_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+            target_include_directories (hart_closure_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+            target_link_libraries (hart_closure_test PRIVATE oslexec oslquery oslcomp
+                ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+            osl_hart_target (hart_closure_test)
+            add_dependencies (hart_closure_test testshade)
+            set_target_properties (hart_closure_test PROPERTIES FOLDER "Unit Tests")
+            if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+                foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    add_test (NAME hart-closures-${mode} COMMAND "${Python3_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-closures.py"
+                        "$<TARGET_FILE:hart_closure_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                        ${mode})
+                    set_tests_properties (hart-closures-${mode} PROPERTIES
+                        LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                endforeach ()
+            endif ()
             add_executable (hart_transform_test hart_transform_test.cpp
                 hartgridrender.cpp harttexture.cpp simplerend.cpp ${hart_generated_grid_cpp})
             target_include_directories (hart_transform_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})

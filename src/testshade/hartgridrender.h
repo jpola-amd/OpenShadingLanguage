@@ -9,6 +9,8 @@
 #include <memory>
 #include <string>
 
+#include "hartclosureparams.h"
+
 OSL_NAMESPACE_BEGIN
 
 class SimpleRenderer;
@@ -37,7 +39,15 @@ testshade_hart_validate_generated(int argc, const char* argv[],
                                   int height, int iterations);
 
 std::unique_ptr<SimpleRenderer>
-testshade_hart_renderer(int device, std::string& arch);
+testshade_hart_renderer(int device, std::string& arch, bool closures = false);
+
+// GPU-only numerical inspection, separate from ordinary RGB testshade output.
+bool
+testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
+                            ShaderGroup* group, const HartOptions& options,
+                            string_view arch, int width, int height,
+                            span<testshade::HartClosureSummary> summaries,
+                            size_t capacity = testshade::HartClosureCapacity);
 
 bool
 testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,

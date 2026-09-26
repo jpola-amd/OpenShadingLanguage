@@ -3801,6 +3801,14 @@ LLVMGEN(llvm_gen_closure)
     Symbol& Id     = *rop.opargsym(op, 1 + weighted);
     OSL_DASSERT(Result.typespec().is_closure());
     OSL_DASSERT(Id.typespec().is_string());
+    if (rop.use_hart()
+        && (!rop.shadingsys().renderer()->supports("HARTClosures")
+            || !Id.is_constant())) {
+        rop.shadingcontext()->errorfmt(
+            "HART: closure requires HARTClosures and a literal name ({}:{})",
+            op.sourcefile(), op.sourceline());
+        return false;
+    }
     ustring closure_name = Id.get_string();
 
     const ClosureRegistry::ClosureEntry* clentry
@@ -3814,12 +3822,24 @@ LLVMGEN(llvm_gen_closure)
         return false;
     }
 
+    // Do not let an already optimized group bypass the host-callback guard.
+    // Neither callbacks nor the host renderer may enter the device module.
+    if (rop.use_hart()
+        && (clentry->prepare || clentry->setup
+            || (closure_name != ustring("diffuse")
+                && closure_name != ustring("emission"))
+            || op.nargs() != 2 + weighted + clentry->nformal)) {
+        rop.shadingcontext()->errorfmt(
+            "HART: unsupported closure '{}', keyword arguments, or "
+            "prepare/setup callbacks ({}:{})",
+            closure_name, op.sourcefile(), op.sourceline());
+        return false;
+    }
+
     OSL_DASSERT(op.nargs() >= (2 + weighted + clentry->nformal));
 
     // Call osl_allocate_closure_component(closure, id, size).  It returns
     // the memory for the closure parameter data.
-    llvm::Value* render_ptr = rop.ll.constant_ptr(rop.shadingsys().renderer(),
-                                                  rop.ll.type_void_ptr());
     llvm::Value* sg_ptr     = rop.sg_void_ptr();
     llvm::Value* id_int     = rop.ll.constant(clentry->id);
     llvm::Value* size_int   = rop.ll.constant(clentry->struct_size);
@@ -3854,6 +3874,9 @@ LLVMGEN(llvm_gen_closure)
     // zero out the closure parameter memory.
     if (clentry->prepare) {
         // Call clentry->prepare(renderservices *, int id, void *mem)
+        llvm::Value* render_ptr
+            = rop.ll.constant_ptr(rop.shadingsys().renderer(),
+                                  rop.ll.type_void_ptr());
         llvm::Value* funct_ptr
             = rop.ll.constant_ptr((void*)clentry->prepare,
                                   rop.llvm_type_prepare_closure_func());
@@ -3890,6 +3913,9 @@ LLVMGEN(llvm_gen_closure)
     // setup(render_services, id, mem_ptr).
     if (clentry->setup) {
         // Call clentry->setup(renderservices *, int id, void *mem)
+        llvm::Value* render_ptr
+            = rop.ll.constant_ptr(rop.shadingsys().renderer(),
+                                  rop.ll.type_void_ptr());
         llvm::Value* funct_ptr
             = rop.ll.constant_ptr((void*)clentry->setup,
                                   rop.llvm_type_setup_closure_func());

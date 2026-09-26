@@ -197,12 +197,16 @@ read_module(HartModuleInput& input, ErrorHandler& err)
 
 class GeneratedRenderer final : public SimpleRenderer {
 public:
-    GeneratedRenderer() : m_textures(errhandler()) { }
+    explicit GeneratedRenderer(bool closures)
+        : m_textures(errhandler()), m_closures(closures)
+    {
+    }
 
     int supports(string_view feature) const override
     {
         return feature == "HART" || feature == "HARTTextures"
-               || feature == "HARTTransforms";
+               || feature == "HARTTransforms"
+               || (m_closures && feature == "HARTClosures");
     }
 
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
@@ -217,6 +221,7 @@ public:
 
 private:
     HartTextureStore m_textures;
+    bool m_closures;
 };
 
 
@@ -393,12 +398,13 @@ public:
     }
 
     bool render(int width, int height, int iterations, bool warmup,
-                span<float> pixels, size_t group_size = 0,
+                span<std::byte> pixels, size_t group_size = 0,
                 size_t group_alignment = 0, int raytype = 0,
                 HartTextureStore* textures = nullptr,
-                cspan<Matrix44> transforms = { }, size_t local_groupdata = 0)
+                cspan<Matrix44> transforms = { }, size_t local_groupdata = 0,
+                size_t closure_capacity = 0)
     {
-        const size_t bytes       = pixels.size() * sizeof(float);
+        const size_t bytes       = pixels.size();
         const size_t params_size = group_alignment
                                        ? sizeof(testshade::HartGeneratedParams)
                                        : sizeof(testshade::HartGridParams);
@@ -422,7 +428,7 @@ public:
                               "hipMemcpy transforms"))
                 return false;
             const size_t limit = std::numeric_limits<size_t>::max();
-            const size_t count = pixels.size() / 3;
+            const size_t count = size_t(width) * size_t(height);
             if ((group_alignment & (group_alignment - 1))
                 || std::max(size_t(1), group_size) > limit - group_alignment
                 || (local_groupdata && local_groupdata != group_size)
@@ -460,7 +466,8 @@ public:
                           count,
                           raytype,
                           textures ? textures->device_state() : nullptr,
-                          static_cast<const Matrix44*>(m_transforms) };
+                          static_cast<const Matrix44*>(m_transforms),
+                          closure_capacity };
             if (m_verbose)
                 m_err.infofmt(
                     "HART group storage: {} bytes, alignment {}, local {} bytes, scratch {} bytes",
@@ -624,6 +631,61 @@ private:
     void* m_transforms         = nullptr;
 };
 
+
+
+bool
+compiled_group(ShadingSystem& shadingsys, ShaderGroup& group,
+               const HartOptions& options, HartModuleInput& module,
+               std::vector<std::string>& callables, int& group_size,
+               int& group_alignment, int& local_groupdata, ErrorHandler& err)
+{
+    const void* data = nullptr;
+    uint64_t bytes   = 0;
+    callables.resize(options.fused ? 1 : 2);
+    if (!shadingsys.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &data)
+        || !shadingsys.getattribute(&group, "hart_bitcode_size", TypeUInt64,
+                                    &bytes)
+        || !data || !bytes || bytes > std::string().max_size()
+        || !shadingsys.getattribute(&group, "llvm_groupdata_size", group_size)
+        || !shadingsys.getattribute(&group, "llvm_groupdata_alignment",
+                                    group_alignment)
+        || !shadingsys.getattribute(&group, "hart_groupdata_alloc",
+                                    local_groupdata)
+        || group_size < 0 || group_alignment <= 0 || local_groupdata < 0
+        || (local_groupdata && local_groupdata != group_size)
+        || !shadingsys.getattribute(&group,
+                                    options.fused ? "group_fused_name"
+                                                  : "group_init_name",
+                                    callables[0])
+        || (!options.fused
+            && !shadingsys.getattribute(&group, "group_entry_name",
+                                        callables[1]))) {
+        err.errorfmt("Cannot retrieve a compiled HART shader group; "
+                     "CPU fallback is not supported");
+        return false;
+    }
+    module.filename = "OSL-generated shader group";
+    module.bitcode.assign(static_cast<const char*>(data), size_t(bytes));
+    return validate_module(module, err, callables);
+}
+
+
+
+bool
+embedded_raygen(string_view arch, HartModuleInput& module, ErrorHandler& err)
+{
+    for (const auto& embedded : hart_generated_raygens) {
+        if (embedded.arch && arch == embedded.arch) {
+            module.filename = "embedded HART raygen " + std::string(arch);
+            module.bitcode.assign(reinterpret_cast<const char*>(embedded.data),
+                                  *embedded.size);
+            return validate_module(module, err);
+        }
+    }
+    err.errorfmt("No embedded HART raygen for architecture '{}'", arch);
+    return false;
+}
+
 }  // namespace
 
 
@@ -760,9 +822,9 @@ testshade_hart_validate_generated(int argc, const char* argv[],
 
 
 std::unique_ptr<SimpleRenderer>
-testshade_hart_renderer(int device, std::string& arch)
+testshade_hart_renderer(int device, std::string& arch, bool closures)
 {
-    auto renderer = std::make_unique<GeneratedRenderer>();
+    auto renderer = std::make_unique<GeneratedRenderer>(closures);
     hipDeviceProp_t properties { };
     hipError_t status = hipSetDevice(device);
     if (status == hipSuccess)
@@ -782,6 +844,59 @@ testshade_hart_renderer(int device, std::string& arch)
         "USE_LLVM_BITCODE=ON and include it in HART_TARGET_ARCHITECTURES",
         arch);
     return { };
+}
+
+
+
+bool
+testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
+                            ShaderGroup* group, const HartOptions& options,
+                            string_view arch, int width, int height,
+                            span<testshade::HartClosureSummary> summaries,
+                            size_t capacity)
+{
+    auto& err       = renderer.errhandler();
+    auto* generated = dynamic_cast<GeneratedRenderer*>(&renderer);
+    if (!generated || !renderer.supports("HARTClosures") || width <= 0
+        || height <= 0
+        || size_t(width) > size_t(std::numeric_limits<int>::max()) / height
+        || summaries.size() != size_t(width) * size_t(height)
+        || capacity > testshade::HartClosureCapacity) {
+        err.errorfmt("Invalid HART closure inspection renderer, grid, or pool");
+        return false;
+    }
+    std::vector<HartModuleInput> modules(group ? 2 : 1);
+    std::vector<std::string> callables;
+    int group_size = 0, group_alignment = 1, local_groupdata = 0;
+    if (group) {
+        shadingsys.optimize_group(group, nullptr);
+        if (!compiled_group(shadingsys, *group, options, modules[1], callables,
+                            group_size, group_alignment, local_groupdata, err))
+            return false;
+    }
+    if (!embedded_raygen(arch, modules[0], err))
+        return false;
+    auto& textures = generated->textures();
+    if (!textures.prepare())
+        return false;
+    const char* entry = !group          ? "__raygen__testshade_closure_pool"
+                        : options.fused ? "__raygen__testshade_closures_fused"
+                                        : "__raygen__testshade_closures";
+    HartGridRenderer runtime(err);
+    if (!runtime.initialize(options.device, true, modules, options.no_cache)
+        || !runtime.load(modules, entry, callables))
+        return false;
+    const Matrix44 identity;
+    const Matrix44 transforms[] = { identity, identity, identity, identity };
+    const bool rendered
+        = runtime.render(width, height, 3, true,
+                         { reinterpret_cast<std::byte*>(summaries.data()),
+                           summaries.size_bytes() },
+                         size_t(group_size), size_t(group_alignment), 0,
+                         &textures, transforms,
+                         options.fused ? size_t(local_groupdata) : 0, capacity);
+    const bool cleared = runtime.clear();
+    return rendered && cleared;
 }
 
 
@@ -846,32 +961,13 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     shadingsys.add_symlocs(&group, { &output, 1 });
     shadingsys.optimize_group(&group, nullptr);
 
-    const void* data = nullptr;
-    uint64_t bytes   = 0;
     int group_size = -1, group_alignment = 0, local_groupdata = 0;
-    std::vector<std::string> callables(options.fused ? 1 : 2);
-    if (!shadingsys.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &data)
-        || !shadingsys.getattribute(&group, "hart_bitcode_size", TypeUInt64,
-                                    &bytes)
-        || !data || !bytes || bytes > std::string().max_size()
-        || !shadingsys.getattribute(&group, "llvm_groupdata_size", group_size)
-        || !shadingsys.getattribute(&group, "llvm_groupdata_alignment",
-                                    group_alignment)
-        || !shadingsys.getattribute(&group, "hart_groupdata_alloc",
-                                    local_groupdata)
-        || group_size < 0 || group_alignment <= 0 || local_groupdata < 0
-        || (local_groupdata && local_groupdata != group_size)
-        || !shadingsys.getattribute(&group,
-                                    options.fused ? "group_fused_name"
-                                                  : "group_init_name",
-                                    callables[0])
-        || (!options.fused
-            && !shadingsys.getattribute(&group, "group_entry_name",
-                                        callables[1]))) {
-        err.errorfmt("Cannot retrieve a compiled HART shader group; "
-                     "CPU fallback is not supported");
+    std::vector<std::string> callables;
+    std::array<HartModuleInput, 2> modules;
+    if (!compiled_group(shadingsys, group, options, modules[1], callables,
+                        group_size, group_alignment, local_groupdata, err)
+        || !embedded_raygen(arch, modules[0], err))
         return false;
-    }
     const auto* symbol = shadingsys.find_symbol(group, layer_names.back(),
                                                 ustring("Cout"));
     if (!symbol || shadingsys.symbol_typedesc(symbol) != TypeColor) {
@@ -879,25 +975,6 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         return false;
     }
 
-    std::array<HartModuleInput, 2> modules;
-    modules[1].filename = "OSL-generated shader group";
-    modules[1].bitcode.assign(static_cast<const char*>(data), size_t(bytes));
-    for (const auto& embedded : hart_generated_raygens) {
-        if (embedded.arch && arch == embedded.arch) {
-            modules[0].filename = "embedded HART raygen " + std::string(arch);
-            modules[0].bitcode.assign(reinterpret_cast<const char*>(
-                                          embedded.data),
-                                      *embedded.size);
-            break;
-        }
-    }
-    if (modules[0].bitcode.empty()) {
-        err.errorfmt("No embedded HART raygen for architecture '{}'", arch);
-        return false;
-    }
-    if (!validate_module(modules[0], err)
-        || !validate_module(modules[1], err, callables))
-        return false;
     auto& textures = generated->textures();
     if (!textures.prepare())
         return false;
@@ -914,7 +991,9 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     const Matrix44 transforms[] = { object2common, object2common.inverse(),
                                     shader2common, shader2common.inverse() };
     const bool rendered
-        = runtime.render(width, height, iterations, warmup, pixels,
+        = runtime.render(width, height, iterations, warmup,
+                         { reinterpret_cast<std::byte*>(pixels.data()),
+                           pixels.size() * sizeof(float) },
                          size_t(group_size), size_t(group_alignment), raytype,
                          &textures, transforms,
                          options.fused ? size_t(local_groupdata) : 0);
@@ -1047,8 +1126,10 @@ testshade_hart(int argc, const char* argv[])
         || !renderer.load(modules, entry))
         return EXIT_FAILURE;
     std::vector<float> pixels(size_t(width) * size_t(height) * 3);
-    const bool rendered = renderer.render(width, height, iterations, warmup,
-                                          pixels);
+    const bool rendered
+        = renderer.render(width, height, iterations, warmup,
+                          { reinterpret_cast<std::byte*>(pixels.data()),
+                            pixels.size() * sizeof(float) });
     const bool cleared  = renderer.clear();
     if (!rendered || !cleared)
         return EXIT_FAILURE;

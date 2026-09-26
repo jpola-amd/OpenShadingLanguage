@@ -8,7 +8,7 @@
 
 #include <OSL/rs_free_function.h>
 
-#include "../harttextureparams.h"
+#include "../hartrenderstate.h"
 
 namespace {
 
@@ -29,8 +29,9 @@ hart_get_matrix(OSL::OpaqueExecContextPtr ec, OSL::Matrix44& result,
         result = matrices[inverse ? 1 : 0];
         return true;
     }
-    const auto* state = static_cast<const testshade::HartTextureState*>(
+    const auto* render = static_cast<const testshade::HartRenderState*>(
         sg->renderstate);
+    const auto* state = render ? render->textures : nullptr;
     if (state && state->errors)
         atomicOr(state->errors, testshade::HartInvalidTransform);
     result = OSL::Matrix44(__builtin_nanf(""));

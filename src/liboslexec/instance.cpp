@@ -371,14 +371,85 @@ ShaderInstance::validate_hart() const
 {
     // Check the original code before constant folding can execute host-only
     // operations or hide unsupported paths in a particular specialization.
+    const bool closures = shadingsys().renderer()->supports("HARTClosures");
     auto validate_type = [&](const Symbol& sym) {
         const TypeSpec& type = sym.typespec();
-        if (type.is_array() || type.is_structure() || type.is_closure_based()
-            || (!type.is_float_based() && !type.is_int_based())) {
+        if (type.is_array() || type.is_structure()
+            || (type.is_closure_based() && !closures)
+            || (!type.is_float_based() && !type.is_int_based()
+                && !(closures && type.is_closure()))) {
             shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
                                   "in shader '{}'",
                                   type.c_str(), sym.name(), shadername());
             return false;
+        }
+        return true;
+    };
+    auto validate_closure = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!closures)
+            return fail("unsupported operation 'closure' "
+                        "(renderer lacks HARTClosures)");
+        if (op.nargs() < 2 || !symbol(0).typespec().is_closure()
+            || symbol(0).typespec().is_array())
+            return fail("invalid closure argument list");
+        const int weighted = symbol(1).typespec().is_string() ? 0 : 1;
+        if (op.nargs() < 2 + weighted
+            || (weighted && !symbol(1).typespec().is_color()))
+            return fail("invalid closure weight");
+        const Symbol& id = symbol(1 + weighted);
+        if (!id.is_constant() || !id.typespec().is_string())
+            return fail("closure names must be literal strings");
+        const ustring name = id.get_string();
+        const bool diffuse = name == ustring("diffuse");
+        if (!diffuse && name != ustring("emission"))
+            return fail(fmtformat("unsupported closure '{}'", name));
+        const auto* entry = shadingsys().find_closure(name);
+        if (!entry)
+            return fail(fmtformat("closure '{}' is not registered", name));
+        if (entry->prepare || entry->setup)
+            return fail(fmtformat(
+                "closure '{}' prepare/setup callbacks are unsupported", name));
+        const int nformal = diffuse ? 1 : 0;
+        if (op.nargs() > 2 + weighted + nformal)
+            return fail("closure keyword arguments are unsupported");
+        if (op.nargs() != 2 + weighted + nformal)
+            return fail("invalid closure argument list");
+        // The initial device ABI is an empty emission or a diffuse normal at
+        // offset zero, optionally followed by testshade's unused default label.
+        bool layout = entry->nformal == nformal && entry->nkeyword == 0
+                      && entry->struct_size == (diffuse ? 12 : 1);
+        if (diffuse && entry->nformal == 1 && entry->nkeyword == 1
+            && entry->params.size() >= 2) {
+            const ClosureParam& label = entry->params[1];
+            layout = label.key && string_view(label.key) == "label"
+                     && label.type == TypeString && label.offset == 16
+                     && label.field_size == 8 && entry->struct_size == 24;
+        }
+        if (diffuse && layout) {
+            const ClosureParam& normal = entry->params[0];
+            layout = !normal.key && normal.type == TypeVector
+                     && normal.offset == 0 && normal.field_size == 12;
+        }
+        if (!layout)
+            return fail(
+                fmtformat("unsupported closure '{}' parameter layout", name));
+        if (diffuse) {
+            const TypeSpec& type = symbol(2 + weighted).typespec();
+            if (type.is_array() || type.is_structure()
+                || type.is_closure_based()
+                || !equivalent(type.simpletype(), TypeVector))
+                return fail(
+                    fmtformat("incompatible formal argument to closure '{}'",
+                              name));
         }
         return true;
     };
@@ -493,7 +564,7 @@ ShaderInstance::validate_hart() const
         ustring("mxcompassign"), ustring("transpose"),
         ustring("determinant"),  ustring("transform"),
         ustring("transformv"),   ustring("transformn"),
-        ustring("getmatrix"),
+        ustring("getmatrix"),    ustring("closure"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),    ustring("v"),  ustring("P"),
@@ -510,6 +581,8 @@ ShaderInstance::validate_hart() const
             return false;
         }
         if (op.opname() == ustring("texture") && !validate_texture(op))
+            return false;
+        if (op.opname() == ustring("closure") && !validate_closure(op))
             return false;
         if (op.opname() == ustring("mxcompref")
             || op.opname() == ustring("mxcompassign")) {
@@ -530,6 +603,8 @@ ShaderInstance::validate_hart() const
         for (int a = 0; a < op.nargs(); ++a) {
             const Symbol& sym
                 = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+            if (op.opname() == ustring("closure") && sym.typespec().is_string())
+                continue;  // Validated literal constructor name, not a string.
             if (op.opname() == ustring("texture") && sym.typespec().is_string())
                 continue;
             if (sym.typespec().is_string()
@@ -592,6 +667,8 @@ ShaderInstance::validate_hart() const
             if (!validate_type(sym))
                 return false;
             if (sym.symtype() == SymTypeGlobal) {
+                if (closures && sym.name() == ustring("Ci"))
+                    continue;
                 if (op.argwrite(a)) {
                     shadingsys().errorfmt("HART: writing shader global '{}' is "
                                           "unsupported in shader '{}'",

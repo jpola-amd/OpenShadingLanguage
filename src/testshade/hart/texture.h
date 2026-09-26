@@ -9,7 +9,7 @@
 #include <OSL/rs_free_function.h>
 #include <OSL/shaderglobals.h>
 
-#include "../harttextureparams.h"
+#include "../hartrenderstate.h"
 
 namespace {
 
@@ -134,8 +134,9 @@ rs_texture(OSL::OpaqueExecContextPtr ec, OSL::ustringhash,
            OSL::ustringhash*)
 {
     const auto* sg    = static_cast<const OSL::ShaderGlobals*>(ec);
-    const auto* state = static_cast<const testshade::HartTextureState*>(
+    const auto* render = static_cast<const testshade::HartRenderState*>(
         sg->renderstate);
+    const auto* state  = render ? render->textures : nullptr;
     const uint64_t id  = reinterpret_cast<uintptr_t>(handle);
     unsigned int error = 0;
     if (!state || !state->textures || !id || id > state->count)

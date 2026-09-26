@@ -891,6 +891,47 @@ ctest --test-dir build\hart-validation -C Release `
 Use an OptiX-disabled build for runtime checks on a machine without an
 NVIDIA driver. A mixed HART/OptiX build can be validated by compilation only.
 
+### Inspecting generated HART closures
+
+The experimental closure path is separate from ordinary RGB `testshade --hart`
+output. A renderer advertising `HARTClosures` may compile scalar closure values,
+closure connections and `Ci`, using registered `diffuse(N)` and `emission()`
+components, addition, scalar/color multiplication and null closures. Other
+constructors, keyword arguments and host prepare/setup callbacks are rejected
+before optimization; they are not device-callable implementations.
+
+The test renderer binds a combined `HartRenderState` through `ShaderGlobals`
+`renderstate`. It contains the existing texture descriptor/error state and a
+bounded closure pool. Pool storage belongs to the raygen caller and outlives
+both split and fused shader calls, including callable-local Groupdata.
+`rs_allocate_closure` checks size and alignment without overflowing and makes
+allocation failure sticky until reset. Exhaustion sets a device error and
+fails the launch without returning a partial result.
+
+With `OSL_BUILD_TESTS`, `USE_LLVM_BITCODE` and `OSL_USE_HART` enabled,
+`hart_closure_test` inspects trees on the GPU **after shader return** and
+transfers only numerical component counts, weights, normals and allocation
+sizes to the host. Its test pool is 1024 bytes per shading point; this is not
+a promise about physical GPU stack use or a general renderer allocation limit.
+The unit covers a diffuse/emission material, null and conditional trees,
+weighted operations, connected texture/procedural weights, allocator
+boundaries, exact-fit storage, repeated resets and post-launch exhaustion.
+It does not implement path tracing or change the ordinary RGB output interface.
+
+Set `TESTSUITE_HART=1` during configuration, then run:
+
+```powershell
+cmake --build build\hart-validation --config Release `
+  --target hart_closure_test hart_codegen_test --parallel 8
+ctest --test-dir build\hart-validation -C Release `
+  -R "^hart-(closures-.*|codegen-.*|grid-bitcode)$" --output-on-failure
+```
+
+The closure runtime variants are `split`, `fused`, `fused-local` and
+`unoptimized` (OSL optimization 0, LLVM mode 10). Compiler checks and generated
+device modules cover all configured architectures. Compilation alone is not
+evidence of execution on Linux, gfx1100, gfx1151 or NVIDIA hardware.
+
 ### Testing external HART device code
 
 `testshade --hart --hart-module FILE.bc` preserves the independent external
