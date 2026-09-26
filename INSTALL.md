@@ -431,6 +431,22 @@ small bounds; the backend checks supported operations and types, not
 termination, and does not impose an iteration limit. Shader authors remain
 responsible for terminating their loops.
 
+`do`/`while`, `break`, `continue`, helper-function early returns and shader
+`exit()` use the same shared LLVM control-flow lowering. They preserve lazy
+connected inputs and derivative propagation through function results and
+output parameters. Logical `&&`, `||`, `!` (and `and`, `or`, `not`) retain
+short-circuit evaluation. Integer bitwise `&`, `|`, `^`, `~`, shifts, signed
+remainder and prefix/postfix increments and decrements are also supported.
+Shift tests exercise counts 0 through 31; HART does not add semantics for
+out-of-range counts.
+
+The GPU-opt-in `hart-control-flow-runtime` test checks packed integer results
+exactly, nested loop exits, early shader exits with hazardous unused producers,
+and short-circuit texture calls that would otherwise raise device errors.
+It covers OSL 0 / LLVM 10 and optimized split, fused and callable-local storage.
+The existing `hart-loops-runtime` additionally checks loop-carried values and
+zero/one/multiple iterations.
+
 `Dx` and `Dy` expose OSL's propagated first-order derivatives. For example:
 
 ```osl
@@ -699,7 +715,7 @@ sampling/product-rule references, exercise split and fused storage modes,
 and change alpha image contents across A-B-A cache reuse without changing
 shader code or filenames.
 
-`Dz`, unlisted noise forms, `break`, `continue`, `do`/`while`, closures,
+`Dz`, unlisted noise forms, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `Ps` and `dtime`, unlisted coordinate spaces and transforms,
 general strings, arrays, interpolated or interactive parameters, other

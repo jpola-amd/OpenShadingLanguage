@@ -5,8 +5,8 @@
 // GPU-independent compiler regression tests for the HART backend. Compile small
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, split/fused callable ABI, address spaces, group-data
-// alignment, linked shadeops, HART provenance, and rejection of unsupported
-// operations.
+// alignment, linked shadeops, control flow, HART provenance, and rejection of
+// unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -25,6 +25,7 @@
 
 #include <OpenImageIO/unittest.h>
 
+#include <algorithm>
 #include <initializer_list>
 
 #include <llvm/Analysis/LoopInfo.h>
@@ -1325,9 +1326,6 @@ check_math_modules(string_view arch, string_view stdosl)
         { "float hidden(float x) { printf(\"no\"); return x; } "
           "shader bad(output color Cout=0) { Cout=color(hidden(u)); }",
           "unsupported operation 'printf'" },
-        { "float hidden(float x) { if (x>0) return x; return -x; } "
-          "shader bad(output color Cout=0) { Cout=color(hidden(u)); }",
-          "unsupported operation 'return'" },
         { "string hidden() { return \"no\"; } "
           "shader bad(output color Cout=0) { string s=hidden(); Cout=color(u); }",
           "unsupported type 'string'" },
@@ -2516,6 +2514,242 @@ check_closure_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_control_flow_ir(ShadingSystem& ss, ShaderGroup& group,
+                      unsigned minimum_loop_depth, bool bitwise)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    ustring entry_name;
+    if (!ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes)
+        || !ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size)
+        || !ss.getattribute(&group, "group_entry_name", entry_name) || !bytes
+        || !size) {
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_control_flow"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    const llvm::StringRef prefix("__direct_callable__");
+    const llvm::StringRef name(entry_name.c_str());
+    if (name.find(prefix) != 0) {
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    auto* entry = (*parsed)->getFunction(name.drop_front(prefix.size()));
+    OIIO_CHECK_ASSERT(entry && !entry->isDeclaration());
+    if (!entry || entry->isDeclaration())
+        return false;
+
+    llvm::DominatorTree dominators(*entry);
+    llvm::LoopInfo loops(dominators);
+    unsigned depth                   = 0;
+    unsigned conditional_branches    = 0;
+    const unsigned integer_opcodes[] = {
+        llvm::Instruction::And, llvm::Instruction::Or, llvm::Instruction::Xor,
+        llvm::Instruction::Shl, llvm::Instruction::AShr
+    };
+    bool seen[std::size(integer_opcodes)] = { };
+    bool complement                       = false;
+    for (const auto& block : *entry) {
+        depth              = std::max(depth, loops.getLoopDepth(&block));
+        const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+            block.getTerminator());
+        conditional_branches += branch && branch->isConditional();
+        for (const auto& inst : block) {
+            if (!inst.getType()->isIntegerTy(32))
+                continue;
+            for (size_t i = 0; i < std::size(integer_opcodes); ++i)
+                seen[i] |= inst.getOpcode() == integer_opcodes[i];
+            if (inst.getOpcode() == llvm::Instruction::Xor)
+                for (const auto& operand : inst.operands())
+                    if (const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                            operand.get()))
+                        complement |= value->isMinusOne();
+        }
+    }
+    OIIO_CHECK_ASSERT(conditional_branches > 0);
+    OIIO_CHECK_ASSERT(depth >= minimum_loop_depth);
+    if (bitwise) {
+        for (size_t i = 0; i < std::size(integer_opcodes); ++i) {
+            if (!seen[i])
+                print(stderr, "Missing HART i32 instruction '{}'\n",
+                      llvm::Instruction::getOpcodeName(integer_opcodes[i]));
+            OIIO_CHECK_ASSERT(seen[i]);
+        }
+        OIIO_CHECK_ASSERT(complement);
+    }
+    return true;
+}
+
+
+
+bool
+check_control_flow_modules(string_view arch, string_view stdosl,
+                           cspan<std::string> basic_loops)
+{
+    OSLCompiler consumer_compiler;
+    std::string consumer;
+    if (!consumer_compiler.compile_buffer(
+            "shader hart_flow_consumer(float value=42, output color Cout=0) { "
+            "float sum=0; for(int i=0;i<3;i+=1) { "
+            "if(u>v && i==1) continue; sum+=sin(value+i); "
+            "if(v>0.75 && i==2) break; } "
+            "Cout=color(sum,Dx(sum),Dy(sum)); }",
+            consumer, { }, stdosl))
+        return false;
+
+    auto check = [&](string_view bytecode, string_view name, bool connected,
+                     unsigned depth, bool bitwise, bool sine_loop,
+                     string_view shadeop = { }) {
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 }) {
+                HartServices renderer;
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+                OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+                OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+                auto group = connected
+                                 ? make_connected_group(ss, bytecode, consumer)
+                                 : make_group(ss, bytecode);
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr,
+                          "HART control flow '{}' (OSL {}, LLVM {}): {}\n",
+                          name, osl_optimize, optimize, errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                check_module(ss, *group, arch, { shadeop }, optimize, connected,
+                             false, sine_loop, connected ? 2 : 0);
+                if (optimize == 10)
+                    OIIO_CHECK_ASSERT(
+                        check_control_flow_ir(ss, *group, depth, bitwise));
+            }
+    };
+    for (size_t i = 0; i < basic_loops.size(); ++i)
+        check(basic_loops[i], fmtformat("basic loop {}", i), false, 1, false,
+              false);
+
+    const struct {
+        const char* name;
+        const char* source;
+        bool connected;
+        unsigned depth;
+        bool bitwise;
+        const char* shadeop = "";
+    } tests[] = {
+        // Logical operators short-circuit to OSL if/assign, not and/or opcodes.
+        { "logical short circuit and output side effects",
+          "int hart_mark(int result, output int calls) { calls+=1; return result; } "
+          "shader hart_logical(output color Cout=0) { "
+          "int calls=0, a=int(8*u)-4, b=int(8*v)-4; "
+          "int both=a && hart_mark(b,calls); "
+          "int either=a || hart_mark(b,calls); "
+          "int flags=(!a)+2*(a==0)+4*(a!=b)+8*(u<=v); "
+          "Cout=color(both+2*either,calls,flags); }",
+          false, 0, false },
+        { "signed bitwise boundaries and masked shifts",
+          "shader hart_bitwise(output color Cout=0) { "
+          "int a=(u>0.5)?(-2147483647-1):2147483647; "
+          "int b=(v>0.5)?-1:0; int shift=int(32*u)&31; "
+          "Cout=color((a&b)^~a,a|b,(a<<shift)^(a>>shift)); }",
+          false, 0, true },
+        { "signed integer remainder",
+          "shader hart_remainder(output color Cout=0) { "
+          "int a=(u>v)?-17:17; int divisor=(u>0.5)?-3:3; "
+          "Cout=color(a%divisor,a%3,a%-3); }",
+          false, 0, false, "osl_safe_mod_iii" },
+        { "safe integer remainder with zero divisor",
+          "shader hart_zero_remainder(output color Cout=0) { "
+          "int a=(u>v)?-17:17; int divisor=(v>0.5)?0:3; "
+          "Cout=color(a%divisor,a%0,(a+1)%divisor); }",
+          false, 0, false, "osl_safe_mod_iii" },
+        { "all shift counts zero through thirty-one",
+          "shader hart_shift_range(output color Cout=0) { "
+          "int a=(u>v)?(-2147483647-1):-1; float sum=0; "
+          "for(int shift=0;shift<32;shift+=1) { "
+          "int bits=(a>>shift)^(1<<shift); "
+          "sum+=float(bits&255)+sin(u+v+shift); } "
+          "Cout=color(sum,Dx(sum),Dy(sum)); }",
+          false, 1, false },
+        { "nested divergent for and while",
+          "shader hart_nested(output color Cout=0) { float sum=0; "
+          "for(int outer=0;outer<2+int(2*u);outer+=1) { int inner=0; "
+          "while(inner<3+int(v)) { inner+=1; "
+          "if(inner==1 && u>v) continue; sum+=sin(u*v+outer+inner); "
+          "if(inner>1 && v>u) break; } "
+          "if(outer==1 && u<0.5) continue; "
+          "if(sum>2 && outer>1) break; } "
+          "Cout=color(sum,Dx(sum),Dy(sum)); }",
+          false, 2, false },
+        { "divergent do-while break and continue",
+          "shader hart_do_flow(output color Cout=0) { "
+          "int limit=(u>v)?3:0, i=0; float sum=0; do { i+=1; "
+          "if(i==1 && v>0.5) continue; sum+=sin(u+v+i); "
+          "if(i>1 && u>0.5) break; } while(i<limit); "
+          "Cout=color(sum,Dx(sum),Dy(sum)); }",
+          false, 1, false },
+        { "conditional helper returns",
+          "float hidden(float x) { if(x>0) return x; return -x; } "
+          "shader hart_helper_return(output color Cout=0) { "
+          "Cout=color(hidden(u)); }",
+          false, 0, false },
+        { "nested helper returns and output parameters",
+          "float hart_partial(float x, output float extra) { extra=sin(x); "
+          "for(int i=0;i<3+int(2*v);i+=1) { "
+          "if(x+i>1.5) return extra; extra+=sin(x+i); } return extra; } "
+          "void hart_assign(float x, output float result) { float extra=0; "
+          "result=hart_partial(x,extra); if(x>0.5) return; result+=extra; } "
+          "shader hart_returns(output color Cout=0) { float left=0,right=0; "
+          "float sum=hart_partial(u,left); hart_assign(v,right); "
+          "sum+=left+right; Cout=color(sum,Dx(sum),Dy(sum)); }",
+          false, 1, false },
+        { "shader return preserves prior output",
+          "shader hart_shader_return(output color Cout=0) { "
+          "float value=sin(u*v); Cout=color(value,Dx(value),Dy(value)); "
+          "if(u>v) return; value+=sin(u+v); "
+          "Cout=color(value,Dx(value),Dy(value)); }",
+          false, 0, false },
+        { "shader exit before and within a loop",
+          "shader hart_exit(output color Cout=0) { float sum=sin(u+v); "
+          "Cout=color(sum,Dx(sum),Dy(sum)); if(u>v) exit(); int i=0; "
+          "do { sum+=sin(u*v+i); if(v>0.5) exit(); i+=1; "
+          "} while(i<2+int(2*v)); Cout=color(sum,Dx(sum),Dy(sum)); }",
+          false, 1, false },
+        { "connected producer exit and lazy loop consumer",
+          "float hart_flow_value(float x, output float extra) { extra=sin(x); "
+          "if(x<0.25) return extra; extra+=sin(2*x); return 0.5*extra; } "
+          "shader hart_flow_producer(output float value=0) { float extra=0; "
+          "value=hart_flow_value(u*v,extra); if(u>v) exit(); int i=0; "
+          "do { i+=1; if(i==2 && v>0.5) continue; "
+          "value+=sin(extra+i); if(value>1 && i>1) break; } while(i<3); }",
+          true, 1, false },
+    };
+    for (const auto& test : tests) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl)) {
+            print(stderr, "Cannot compile HART control-flow case '{}'\n",
+                  test.name);
+            return false;
+        }
+        check(bytecode, test.name, test.connected, test.depth, test.bitwise,
+              test.depth > 0, test.shadeop);
+    }
+    return true;
+}
+
+
+
+bool
 check_procedural_modules(string_view arch, string_view stdosl)
 {
     const char* sources[] = {
@@ -2771,9 +3005,6 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[11], "unsupported type");
     check_rejection(arch, oso[14], "unsupported operation 'printf'");
     check_rejection(arch, oso[15], "unsupported operation 'texture'");
-    check_rejection(arch, oso[18], "unsupported operation 'break'");
-    check_rejection(arch, oso[19], "unsupported operation 'continue'");
-    check_rejection(arch, oso[20], "unsupported operation 'dowhile'");
     check_rejection(arch, oso[21], "unsupported operation 'printf'");
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
     check_rejection(arch, oso[28], "unsupported operation 'Dz'");
@@ -2831,7 +3062,8 @@ main(int argc, char* argv[])
                                        TypeDesc(TypeDesc::STRING, 1), &entry));
         check_rejected_group(ss, *group, errors, "default entry point");
     }
-    if (!check_chain_modules(arch, argv[2])
+    if (!check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
+        || !check_chain_modules(arch, argv[2])
         || !check_topology_modules(arch, argv[2])
         || !check_material_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])

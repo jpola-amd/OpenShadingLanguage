@@ -22,6 +22,8 @@ parser.add_argument("--gpu", action="store_true")
 suites = parser.add_mutually_exclusive_group()
 suites.add_argument("--loops", action="store_true",
                     help="Run loop runtime cases instead of the basic runtime cases")
+suites.add_argument("--control-flow", action="store_true",
+                    help="Run integer operators, loop exits and function/shader returns")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
@@ -64,7 +66,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                     help="Benchmark host-synchronized launch latency for split, "
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
-if (args.loops or args.derivatives or args.surface or args.filterwidth
+if (args.loops or args.control_flow or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
@@ -196,6 +198,37 @@ def comparison_result(a, b):
     return (int(a < b) + 2 * int(a <= b),
             int(a > b) + 2 * int(a >= b),
             int(a == b) + 2 * int(a != b))
+
+
+def control_ops_result(u, v):
+    s = min(31, int(32*u))
+    a, b = -123456789+s, 0x01347bdf+int(16*v)
+    if v < 0.125:
+        return (a & b) & 65535, ((a | b) >> 16) & 65535, (a ^ b) & 65535
+    if v < 0.375:
+        return (~a) & 65535, ((a << s) >> 16) & 65535, (a >> s) & 65535
+    if v < 0.625:
+        x, y = s-16, s%5-2
+        remainder = x-int(x/y)*y if y else 0
+        return (int(bool(x) and bool(y)) + 2*int(bool(x) or bool(y))
+                + 4*int(not x) + 8*int(not y),
+                (x<y) + 2*(x<=y) + 4*(x>y) + 8*(x>=y)
+                + 16*(x==y) + 32*(x!=y), remainder)
+    if v < 0.875:
+        k = s-16
+        return 10*k+7, k, 1
+    return 7, 7, 10
+
+
+def control_flow_result(u, v, width, height):
+    count = int(4*u)
+    total = sum(20*i+2 for i in range(1, max(1, count)+1) if i != 2)
+    if v > 0.5:
+        return total, 0, -1
+    h = u+v + (2 if count >= 3 else -1)
+    return (total + sum(j for j in (1, 3, 4) if j <= count),
+            h + 2/max(1, width-1) + 4/max(1, height-1),
+            min(count, 3)+10)
 
 
 def loop_result(u, v, count=-1, value=None, reuse=False):
@@ -2218,6 +2251,49 @@ def check_fused_benchmark():
             }, allow_nan=False), flush=True)
 
 
+def check_control_flow_suite():
+    prepare_texture_images()
+    connected = connected_group("hart_control_flow",
+                                producer="hart_control_source")
+    configurations = [
+        ("-O0", "10", []), ("-O2", "3", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"]),
+    ]
+    for osl_opt, llvm_opt, mode in configurations:
+        print("Checking HART control flow", osl_opt, llvm_opt, mode, flush=True)
+        flags = [osl_opt, "--llvm_opt", llvm_opt]
+        cases = [
+            (["hart_control_ops"], 33, 5, reference(33, 5, control_ops_result)),
+            (["hart_control_short"], 5, 5, [0, 1, 0]*25),
+        ]
+        for width, height in ((1, 1), (5, 5)):
+            expected = reference(
+                width, height,
+                lambda u, v: control_flow_result(u, v, width, height))
+            cases.append((connected, width, height, expected))
+        for shaders, width, height, expected in cases:
+            host, device = root / "control-cpu.pfm", root / "control-gpu.pfm"
+            common = flags + ["-g", str(width), str(height), "-d", "float"]
+            run(["-t", "1"] + common + ["-o", "Cout", str(host)] + shaders)
+            output = run(["--hart", "--hart-no-cache", "-v", "--warmup",
+                          "--iters", "3"] + mode + common
+                         + ["-o", "Cout", str(device)] + shaders)
+            assert output.count("Launching HART grid") == 4, output
+            size, alignment, local, scratch = hart_group_storage(output)
+            assert local == (size if "--hart-local-groupdata" in mode else 0)
+            assert (scratch == 0) == bool(local)
+            # Packed integer results and binary-fraction grids are exact.
+            assert image_pixels(host, width, height) == expected, shaders
+            assert image_pixels(device, width, height) == expected, shaders
+        rejected = root / "control-rejected.pfm"
+        run(["--hart", "--hart-no-cache", "-v"] + mode + flags
+            + ["-g", "5", "5", "--param", "force", "1",
+               "-o", "Cout", str(rejected), "hart_control_short"],
+            "nonfinite coordinates/gradients", error_after_launch=True)
+        assert not rejected.exists()
+
+
 try:
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
@@ -2269,10 +2345,12 @@ try:
     if args.loops:
         for operation in ("break", "continue", "dowhile"):
             shader = "hart_loop_" + operation
-            error = "unsupported operation '" + operation + "'"
-            run(["--hart", "-v", shader], error)
-            run(["--hart", "-v", "--shader", shader, "producer",
-                 "--shader", "hart_sine", "consumer"], error)
+            evaluate = lambda u, v: tuple(
+                c * (2 if operation == "dowhile" else (0 if u > v else 4))
+                for c in (u, v, 0))
+            for optimize in ("10", "3"):
+                check_render(["--llvm_opt", optimize, "-O0", shader], 5, 3,
+                             reference(5, 3, evaluate))
         for optimize in ("10", "3"):
             for shader in ("hart_for", "hart_loop"):
                 loop_args = ["--llvm_opt", optimize] + connected_group(shader)
@@ -2302,6 +2380,9 @@ try:
                     compare(cpu, expected, 6e-6)
                     compare(gpu, expected, 2e-6)
                     compare(gpu, cpu, 6e-6)
+
+    if args.control_flow:
+        check_control_flow_suite()
 
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
@@ -2527,7 +2608,7 @@ try:
     if args.fused_benchmark:
         check_fused_benchmark()
 
-    if args.gpu and not (args.loops or args.derivatives or args.surface or args.filterwidth
+    if args.gpu and not (args.loops or args.control_flow or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
@@ -2626,7 +2707,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.texture_materials:
+if args.control_flow:
+    suite = "control flow"
+elif args.texture_materials:
     suite = "texture materials"
 elif args.texture_channels:
     suite = "texture channels"

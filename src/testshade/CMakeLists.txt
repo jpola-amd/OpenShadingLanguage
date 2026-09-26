@@ -252,7 +252,14 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --loops)
-            set_tests_properties (hart-loops-runtime PROPERTIES LABELS "hart;gpu")
+            set_tests_properties (hart-loops-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-control-flow-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --control-flow)
+            set_tests_properties (hart-control-flow-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-derivatives-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
