@@ -3212,7 +3212,7 @@ ShadingSystemImpl::ConnectShaders(ShaderGroup& group, string_view srclayer,
         return false;
     }
 
-    if (srccon.type.is_structure() && dstcon.type.is_structure()
+    if (srccon.type.is_structure_based() && dstcon.type.is_structure_based()
         && equivalent(srccon.type, dstcon.type)) {
         // If the connection is whole struct-to-struct (and they are
         // structs with equivalent data layout), implement it underneath
@@ -3224,7 +3224,8 @@ ShadingSystemImpl::ConnectShaders(ShaderGroup& group, string_view srclayer,
                                       srcstruct->field(i).name);
             std::string d = fmtformat("{}.{}", dstparam,
                                       dststruct->field(i).name);
-            ConnectShaders(group, srclayer, s, dstlayer, d);
+            if (!ConnectShaders(group, srclayer, s, dstlayer, d))
+                return false;
         }
         return true;
     }

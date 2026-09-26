@@ -24,6 +24,8 @@ suites.add_argument("--loops", action="store_true",
                     help="Run loop runtime cases instead of the basic runtime cases")
 suites.add_argument("--control-flow", action="store_true",
                     help="Run integer operators, loop exits and function/shader returns")
+suites.add_argument("--aggregates", action="store_true",
+                    help="Run array/struct layout, derivatives and bounds cases")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
@@ -66,7 +68,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                     help="Benchmark host-synchronized launch latency for split, "
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
-if (args.loops or args.control_flow or args.derivatives or args.surface or args.filterwidth
+if (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.math
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
@@ -2251,6 +2253,28 @@ def check_fused_benchmark():
             }, allow_nan=False), flush=True)
 
 
+def check_exact_render(shaders, flags, mode, width, height, expected):
+    assert len(expected) == width * height * 3
+    host, device = root / "exact-cpu.pfm", root / "exact-gpu.pfm"
+    for path in (host, device):
+        if path.exists():
+            path.unlink()
+    common = flags + ["-g", str(width), str(height), "-d", "float"]
+    run(["-t", "1"] + common + ["-o", "Cout", str(host)] + shaders)
+    output = run(["--hart", "--hart-no-cache", "-v", "--warmup",
+                  "--iters", "3"] + mode + common
+                 + ["-o", "Cout", str(device)] + shaders)
+    assert output.count("Launching HART grid") == 4, output
+    size, alignment, local, scratch = hart_group_storage(output)
+    assert local == (size if "--hart-local-groupdata" in mode else 0)
+    assert (scratch == 0) == bool(local)
+    # Packed integer results and binary-fraction grids are exact.
+    for path in (host, device):
+        for i, (actual, target) in enumerate(zip(
+                image_pixels(path, width, height), expected)):
+            assert actual == target, (shaders, path.name, i, actual, target)
+
+
 def check_control_flow_suite():
     prepare_texture_images()
     connected = connected_group("hart_control_flow",
@@ -2273,25 +2297,98 @@ def check_control_flow_suite():
                 lambda u, v: control_flow_result(u, v, width, height))
             cases.append((connected, width, height, expected))
         for shaders, width, height, expected in cases:
-            host, device = root / "control-cpu.pfm", root / "control-gpu.pfm"
-            common = flags + ["-g", str(width), str(height), "-d", "float"]
-            run(["-t", "1"] + common + ["-o", "Cout", str(host)] + shaders)
-            output = run(["--hart", "--hart-no-cache", "-v", "--warmup",
-                          "--iters", "3"] + mode + common
-                         + ["-o", "Cout", str(device)] + shaders)
-            assert output.count("Launching HART grid") == 4, output
-            size, alignment, local, scratch = hart_group_storage(output)
-            assert local == (size if "--hart-local-groupdata" in mode else 0)
-            assert (scratch == 0) == bool(local)
-            # Packed integer results and binary-fraction grids are exact.
-            assert image_pixels(host, width, height) == expected, shaders
-            assert image_pixels(device, width, height) == expected, shaders
+            check_exact_render(shaders, flags, mode, width, height, expected)
         rejected = root / "control-rejected.pfm"
         run(["--hart", "--hart-no-cache", "-v"] + mode + flags
             + ["-g", "5", "5", "--param", "force", "1",
                "-o", "Cout", str(rejected), "hart_control_short"],
             "nonfinite coordinates/gradients", error_after_launch=True)
         assert not rejected.exists()
+
+
+def check_aggregate_suite():
+    for shader in ("hart_struct_source", "hart_struct_consumer"):
+        original = (root / (shader + ".oso")).read_text()
+        legacy = original.replace("%structfields{weight,shade}", "")
+        assert legacy != original
+        (root / (shader + "_legacy.oso")).write_text(legacy)
+    run(["--hart", "-v"] + connected_group(
+        "hart_struct_consumer_legacy", producer="hart_struct_source_legacy"),
+        "missing struct-array field metadata")
+
+    def array_value(u, v, write=False):
+        if write:
+            return u+v, 0.125, 0.25
+        return ((u, 0.125, 0), (2*u+v, 0.25, 0.25),
+                (3*u-v, 0.375, -0.25),
+                (u*v, 0.125*v, 0.25*u))[int(3*u)]
+
+    def structure_value(u, v):
+        i, j = int(u >= 0.5), int(2*v)
+        term, dx, dy = ((u, 1, 0), (v, 0, 1), (u*v, v, u))[j]
+        return ((i+2)*u+2*v+i+u*v+term,
+                (i+2+v+dx)*0.125, (2+u+dy)*0.25)
+
+    def vector_value(u, v):
+        q, dx, dy = ((u, 0.125, 0), (v, 0, 0.25),
+                     (u*v, 0.125*v, 0.25*u))[int(2*u)]
+        return q+u, dx+0.125, dy
+
+    connected = connected_group("hart_struct_consumer",
+                                producer="hart_struct_source")
+    configurations = [
+        ("-O0", "10", []), ("-O2", "3", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"]),
+    ]
+    for osl_opt, llvm_opt, mode in configurations:
+        print("Checking HART aggregates", osl_opt, llvm_opt, mode, flush=True)
+        flags = [osl_opt, "--llvm_opt", llvm_opt]
+        cases = [
+            (["hart_array"], reference(9, 5, array_value)),
+            (["--param", "write", "1", "hart_array"],
+             reference(9, 5, lambda u, v: array_value(u, v, True))),
+            (connected, reference(9, 5, structure_value)),
+            (["hart_aggregate_indices"], reference(9, 5, vector_value)),
+            (["--param", "kind", "1", "hart_aggregate_indices"],
+             reference(9, 5, lambda u, v: (2*u+v, 0, 0))),
+            (["--param", "kind", "2", "hart_aggregate_indices"],
+             reference(9, 5, lambda u, v: (3+2*int(2*u)+int(4*v), 0, 0))),
+            (["--param", "kind", "3", "hart_aggregate_indices"],
+             reference(9, 5, lambda u, v: (2*u+v, 0, 0))),
+            (["--shader", "hart_struct_source", "producer",
+              "--shader", "hart_array_param", "consumer",
+              "--connect", "producer", "value.coefficients",
+              "consumer", "values"],
+             reference(9, 5, lambda u, v:
+                       ((u+v+u*v)*(1+u),
+                        ((1+v)*(1+u)+u+v+u*v)*0.125, 19))),
+        ]
+        for count in (1, 3, 9):
+            params = (["--param:type=float[" + str(count) + "]", "values",
+                       ",".join(str(i+1) for i in range(count))]
+                      if count != 3 else [])
+            total = count*(count+1)/2
+            expected = reference(
+                9, 5, lambda u, v, total=total, count=count:
+                (total*(1+u), total*0.125, count+16))
+            cases.append((params + ["hart_array_param"], expected))
+        for shaders, expected in cases:
+            check_exact_render(shaders, flags, mode, 9, 5, expected)
+        rejected = root / "aggregate-rejected.pfm"
+        for shaders in (["hart_array"], ["--param", "write", "1", "hart_array"],
+                        ["hart_aggregate_indices"],
+                        ["--param", "kind", "1", "hart_aggregate_indices"],
+                        ["--param", "kind", "2", "hart_aggregate_indices"],
+                        ["--param", "kind", "3", "hart_aggregate_indices"]):
+            for offset in ("-1", "4"):
+                run(["--hart", "--hart-no-cache", "-v"] + mode + flags
+                    + ["-g", "9", "5", "--param", "offset", offset,
+                       "-o", "Cout", str(rejected)] + shaders,
+                    "index out of range", error_after_launch=True)
+                assert not rejected.exists()
+        run(["--hart", "-v"] + mode + flags + ["hart_aggregate_bad"],
+            "string")
 
 
 try:
@@ -2383,6 +2480,9 @@ try:
 
     if args.control_flow:
         check_control_flow_suite()
+
+    if args.aggregates:
+        check_aggregate_suite()
 
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
@@ -2608,7 +2708,7 @@ try:
     if args.fused_benchmark:
         check_fused_benchmark()
 
-    if args.gpu and not (args.loops or args.control_flow or args.derivatives or args.surface or args.filterwidth
+    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.math
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
@@ -2707,7 +2807,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.control_flow:
+if args.aggregates:
+    suite = "aggregates"
+elif args.control_flow:
     suite = "control flow"
 elif args.texture_materials:
     suite = "texture materials"

@@ -6,10 +6,14 @@
 
 shader b (coords x = { 0, 0 },
           coords y = { 0, 0 },
-          shading_result r = { 0, 0 })
+          shading_result r = { 0, 0 },
+          coords_packet packet = {{{0,0},{0,0}}})
 {
     printf ("b: x = %g, %g\n", x.s, x.t);
     printf ("b: y = %g, %g\n", y.s, y.t);
     printf ("b: r = %g, %s\n", r.Copac, r.Cout);
+    coords copy[2];
+    copy = packet.values;
+    printf ("b: packet = %g, %g; %g, %g\n",
+            copy[0].s, copy[0].t, copy[1].s, copy[1].t);
 }
-

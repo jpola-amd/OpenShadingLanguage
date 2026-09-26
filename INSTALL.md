@@ -478,8 +478,9 @@ Points include translation and homogeneous division; vectors ignore translation.
 Normals use the inverse transpose without automatic normalization. Matrix
 construction, multiplication/division, transpose, determinant, assignment,
 uniform matrix parameters and matrix connections are supported. Component
-reads/writes require literal row and column indices in `[0,3]`; runtime
-index/range-check callbacks are not enabled.
+reads/writes support integer row and column indices in `[0,3]`, including
+runtime indices when the renderer advertises `HARTArrayBounds`. Invalid
+runtime indices report a device error and prevent image publication.
 Transforms propagate the input triple's derivatives using existing OSL
 shadeops. OSL does not track matrix-element derivatives, even when matrix
 values vary across the grid. Singular matrices and zero homogeneous
@@ -718,7 +719,7 @@ shader code or filenames.
 `Dz`, unlisted noise forms, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `Ps` and `dtime`, unlisted coordinate spaces and transforms,
-general strings, arrays, interpolated or interactive parameters, other
+general strings, interpolated or interactive parameters, other
 renderer-service callbacks, batched execution, instrumentation,
 explicit entry layers, multiple final outputs, and unlisted frontend
 options are unsupported.
@@ -727,6 +728,27 @@ They fail explicitly; there is **no CPU fallback**.
 mode and cannot override generated callables.
 The selected architecture is fixed for the lifetime of a `ShadingSystem`;
 its `hart_arch` attribute may be set again only to the same architecture.
+
+Numeric arrays and flattened structs support initialization, copying, length
+queries, runtime indexing, nested members and whole-aggregate connections.
+Unsized input arrays use the existing group-resolved parameter length; an empty
+initializer retains OSL's one-zero-element default. Unresolved or zero-length
+storage cannot be indexed. Differentiable members retain
+their normal derivative storage. Closure aggregates require `HARTClosures`
+as well as the array capability; ordinary RGB `--hart` still rejects closures.
+Recompile older shaders with arrays-of-struct parameters to include their
+struct-field metadata in the bytecode; missing metadata is rejected before
+launch rather than losing connected values.
+
+Array storage and potentially out-of-range component accesses require
+`HARTArrayBounds`, supplied by both generated testshade and the HART path tracer.
+Accesses not statically proven in range also require shader `range_checking`.
+The device range-error callback records an error before the existing OSL clamp
+keeps the failing invocation memory-safe; it is not a successful clamp-only
+fallback. The renderer must check the error before publishing output.
+`hart-aggregate-runtime` compares exact values and derivatives with CPU and
+independent references in split, fused, fused-local and unoptimized modes,
+and distinguishes pre-launch rejection from device bounds errors.
 
 `hart-generated-cli` checks the supported CLI boundary without GPU execution.
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,

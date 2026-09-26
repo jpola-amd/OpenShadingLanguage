@@ -1722,6 +1722,12 @@ LLVMGEN(llvm_gen_aref)
     Symbol& Src    = *rop.opargsym(op, 1);
     Symbol& Index  = *rop.opargsym(op, 2);
 
+    if (rop.use_hart() && Src.typespec().arraylength() <= 0) {
+        rop.shadingcontext()->errorfmt(
+            "HART: cannot index unresolved or empty array '{}'", Src.name());
+        return false;
+    }
+
     // Get array index we're interested in
     llvm::Value* index = rop.loadLLVMValue(Index);
     if (!index)
@@ -1766,6 +1772,12 @@ LLVMGEN(llvm_gen_aassign)
     Symbol& Result = *rop.opargsym(op, 0);
     Symbol& Index  = *rop.opargsym(op, 1);
     Symbol& Src    = *rop.opargsym(op, 2);
+
+    if (rop.use_hart() && Result.typespec().arraylength() <= 0) {
+        rop.shadingcontext()->errorfmt(
+            "HART: cannot index unresolved or empty array '{}'", Result.name());
+        return false;
+    }
 
     // Get array index we're interested in
     llvm::Value* index = rop.loadLLVMValue(Index);

@@ -1,0 +1,14 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+struct Unsupported {
+    string name;
+    float values[2];
+};
+
+shader hart_aggregate_bad(Unsupported value = {"unsupported", {1, 2}},
+                          output color Cout = 0)
+{
+    Cout = color(u, v, 0);
+}

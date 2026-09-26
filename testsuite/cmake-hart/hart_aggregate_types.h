@@ -2,16 +2,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
+#pragma once
 
-struct coords {
-    float s, t;
+struct HartLeaf {
+    float weight;
+    color shade;
 };
 
-struct coords_packet {
-    coords values[2];
-};
-
-struct shading_result {
-   closure color Cout;
-   color Copac;
+struct HartPacket {
+    HartLeaf leaves[2];
+    float coefficients[3];
+    vector axis;
 };

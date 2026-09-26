@@ -4,6 +4,7 @@
 
 #include <amd/hart/hart_optix_compat.h>
 
+#include "array.h"
 #include "closure.h"
 #include "texture.h"
 #include "transform.h"

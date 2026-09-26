@@ -1,0 +1,18 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#include "hart_aggregate_types.h"
+
+shader hart_struct_source(
+    output HartPacket value = {{{0,0},{0,0}}, {0,0,0}, 0})
+{
+    for (int i = 0; i < 2; ++i) {
+        value.leaves[i].weight = (i+1)*u+v;
+        value.leaves[i].shade = color(u,v,i+u*v);
+    }
+    value.coefficients[0] = u;
+    value.coefficients[1] = v;
+    value.coefficients[2] = u*v;
+    value.axis = vector(u+v,u-v,2*u);
+}

@@ -222,7 +222,7 @@ ShaderInstance::parameters(const ParamValueList& params,
                                         sm->name());
                 continue;
             }
-            if (sm_typespec.is_structure())
+            if (sm_typespec.is_structure_based())
                 continue;  // structs are just placeholders; skip
 
             const void* data = p.data();
@@ -372,12 +372,27 @@ ShaderInstance::validate_hart() const
     // Check the original code before constant folding can execute host-only
     // operations or hide unsupported paths in a particular specialization.
     const bool closures = shadingsys().renderer()->supports("HARTClosures");
-    auto validate_type = [&](const Symbol& sym) {
+    const bool bounds   = shadingsys().renderer()->supports("HARTArrayBounds");
+    auto validate_type  = [&](const Symbol& sym) {
         const TypeSpec& type = sym.typespec();
-        if (type.is_array() || type.is_structure()
-            || (type.is_closure_based() && !closures)
+        if (type.is_structure_array() && type.structspec()->numfields() == 0) {
+            shadingsys().errorfmt(
+                "HART: missing struct-array field metadata for '{}' in shader "
+                "'{}'; recompile the shader",
+                sym.name(), shadername());
+            return false;
+        }
+        if (type.is_structure_based())
+            return true;  // Placeholder; flattened members are checked separately.
+        if (type.is_array() && !bounds) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTArrayBounds for '{}' in shader '{}'",
+                sym.name(), shadername());
+            return false;
+        }
+        if ((type.is_closure_based() && !closures)
             || (!type.is_float_based() && !type.is_int_based()
-                && !(closures && type.is_closure()))) {
+                && !(closures && type.is_closure_based()))) {
             shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
                                   "in shader '{}'",
                                   type.c_str(), sym.name(), shadername());
@@ -552,6 +567,8 @@ ShaderInstance::validate_hart() const
         ustring("bitor"),        ustring("xor"),
         ustring("compl"),        ustring("shl"),
         ustring("shr"),          ustring("mod"),
+        ustring("arraycopy"),    ustring("arraylength"),
+        ustring("aref"),         ustring("aassign"),
         ustring("Dx"),           ustring("Dy"),
         ustring("point"),        ustring("vector"),
         ustring("normal"),       ustring("dot"),
@@ -597,11 +614,45 @@ ShaderInstance::validate_hart() const
             for (int a = first; a < first + 2; ++a) {
                 const Symbol& index
                     = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
-                if (!index.is_constant() || !index.typespec().is_int()
-                    || index.get_int() < 0 || index.get_int() >= 4) {
+                if (!index.typespec().is_int()
+                    || (index.is_constant()
+                        && (index.get_int() < 0 || index.get_int() >= 4))
+                    || (!index.is_constant() && !bounds)) {
                     shadingsys().errorfmt(
-                        "HART: matrix indices must be literal integers in [0,3] "
+                        "HART: matrix indices must be integers in [0,3]; "
+                        "dynamic indices require HARTArrayBounds "
                         "in shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+            }
+        }
+        const bool array_ref        = op.opname() == ustring("aref");
+        const bool array_assign     = op.opname() == ustring("aassign");
+        const bool component_ref    = op.opname() == ustring("compref");
+        const bool component_assign = op.opname() == ustring("compassign");
+        const bool matrix_ref       = op.opname() == ustring("mxcompref");
+        const bool matrix_assign    = op.opname() == ustring("mxcompassign");
+        if (array_ref || array_assign || component_ref || component_assign
+            || matrix_ref || matrix_assign) {
+            const int first = array_ref || component_ref || matrix_ref ? 2 : 1;
+            const int count = matrix_ref || matrix_assign ? 2 : 1;
+            const Symbol& aggregate
+                = m_master->m_symbols[m_master->m_args[op.firstarg()
+                                                       + (first == 2 ? 1 : 0)]];
+            const int length = array_ref || array_assign
+                                   ? aggregate.typespec().arraylength()
+                                   : (count == 2 ? 4 : 3);
+            for (int a = first; a < first + count; ++a) {
+                const Symbol& index
+                    = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                if (index.is_constant() && index.get_int() >= 0
+                    && index.get_int() < length)
+                    continue;
+                if (!bounds || !m_master->range_checking()) {
+                    shadingsys().errorfmt(
+                        "HART: checked indexing requires HARTArrayBounds and "
+                        "range_checking in shader '{}' ({}:{})",
                         shadername(), op.sourcefile(), op.sourceline());
                     return false;
                 }

@@ -6,13 +6,16 @@
 
 shader a (coords st_in = { 0, 1 },
           output coords st_out = { 0, 0 },
-          output shading_result r = { 0, 0 }
+          output shading_result r = { 0, 0 },
+          output coords_packet packet = {{{0,0},{0,0}}}
     )
 {
     printf ("a: st_in = %g, %g\n", st_in.s, st_in.t);
     st_out = st_in;
     st_out.s = 42;
     printf ("a: st_out = %g, %g\n", st_out.s, st_out.t);
+    packet.values[0] = st_out;
+    packet.values[1] = st_in;
     r.Copac = color (0.8, 0.7, 0.6);
     r.Cout  = color (0.6, 0.5, 0.4) * microfacet ("ggx", N, 0.5, 20, 0) +
               color (0.4, 0.5, 0.6) * phong(N, st_out.s);

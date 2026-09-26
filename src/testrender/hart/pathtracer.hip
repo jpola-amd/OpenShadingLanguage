@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
+#include "../../testshade/hart/array.h"
 #include "../../testshade/hart/closure.h"
 #include "../../testshade/hart/texture.h"
 #include "../hartpathparams.h"

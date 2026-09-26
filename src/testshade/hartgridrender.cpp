@@ -205,7 +205,7 @@ public:
     int supports(string_view feature) const override
     {
         return feature == "HART" || feature == "HARTTextures"
-               || feature == "HARTTransforms"
+               || feature == "HARTTransforms" || feature == "HARTArrayBounds"
                || (m_closures && feature == "HARTClosures");
     }
 
@@ -932,8 +932,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                             && parameter.type == TypeColor
                             && !parameter.isclosure;
             }
-            if (parameter.isclosure || parameter.isstruct
-                || parameter.type.is_array()
+            if (parameter.isclosure
                 || parameter.type.basetype == TypeDesc::STRING) {
                 err.errorfmt(
                     "Generated HART mode does not support parameter '{}' "

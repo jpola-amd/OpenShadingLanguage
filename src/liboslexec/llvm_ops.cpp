@@ -982,6 +982,21 @@ osl_range_check_err(int indexvalue, int length, ustringhash_pod symname,
                     int sourceline, ustringhash_pod groupname, int layer,
                     ustringhash_pod layername, ustringhash_pod shadername);
 
+#if defined(__HIP_DEVICE_COMPILE__)
+extern "C" OSL_HOSTDEVICE void
+rs_hart_range_error(OpaqueExecContextPtr ec, int index, int length);
+
+
+OSL_SHADEOP_NOINLINE int
+osl_range_check_err(int indexvalue, int length, ustringhash_pod,
+                    OpaqueExecContextPtr ec, ustringhash_pod, int,
+                    ustringhash_pod, int, ustringhash_pod, ustringhash_pod)
+{
+    rs_hart_range_error(ec, indexvalue, length);
+    return indexvalue < 0 ? 0 : length - 1;
+}
+#endif
+
 
 
 OSL_SHADEOP int

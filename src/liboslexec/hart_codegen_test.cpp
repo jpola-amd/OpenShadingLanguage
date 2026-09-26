@@ -53,15 +53,19 @@ namespace {
 class HartServices final : public RendererServices {
 public:
     explicit HartServices(bool textures = false, bool transforms = false,
-                          bool closures = false)
-        : m_textures(textures), m_transforms(transforms), m_closures(closures)
+                          bool closures = false, bool arrays = false)
+        : m_textures(textures)
+        , m_transforms(transforms)
+        , m_closures(closures)
+        , m_arrays(arrays)
     {
     }
     int supports(string_view feature) const override
     {
         return feature == "HART" || (m_textures && feature == "HARTTextures")
                || (m_transforms && feature == "HARTTransforms")
-               || (m_closures && feature == "HARTClosures");
+               || (m_closures && feature == "HARTClosures")
+               || (m_arrays && feature == "HARTArrayBounds");
     }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -85,6 +89,7 @@ private:
     bool m_textures;
     bool m_transforms;
     bool m_closures;
+    bool m_arrays;
 };
 
 
@@ -300,7 +305,8 @@ void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
-             bool looping = false, int used_layers = 0, bool closures = false)
+             bool looping = false, int used_layers = 0, bool closures = false,
+             bool aggregates = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -479,6 +485,30 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     OIIO_CHECK_ASSERT(size_bytes > 0 && alignment > 0);
     OIIO_CHECK_EQUAL(size_bytes % alignment, 0);
     OIIO_CHECK_ASSERT(allocated == 0 || allocated == size_bytes);
+    if (aggregates && optimize == 10) {
+        auto* storage = llvm::StructType::getTypeByName(context, "Groupdata");
+        OIIO_CHECK_ASSERT(storage);
+        if (storage) {
+            const auto& layout = module.getDataLayout();
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(storage).getFixedValue(),
+                             uint64_t(size_bytes));
+            OIIO_CHECK_EQUAL(layout.getABITypeAlign(storage).value(),
+                             uint64_t(alignment));
+        }
+        const auto* callback = module.getFunction("rs_hart_range_error");
+        if (callback && !callback->use_empty()) {
+            OIIO_CHECK_ASSERT(callback->isDeclaration());
+            OIIO_CHECK_ASSERT(callback->getReturnType()->isVoidTy());
+            OIIO_CHECK_ASSERT(!callback->isVarArg());
+            OIIO_CHECK_EQUAL(callback->arg_size(), 3);
+            for (const auto& arg : callback->args())
+                OIIO_CHECK_ASSERT(
+                    arg.getArgNo() == 0
+                        ? arg.getType()->isPointerTy()
+                              && arg.getType()->getPointerAddressSpace() == 0
+                        : arg.getType()->isIntegerTy(32));
+        }
+    }
     const char* queries[]       = { "group_init_name", "group_entry_name",
                                     "group_fused_name" };
     llvm::Function* wrappers[3] = { };
@@ -1589,7 +1619,7 @@ check_matrix_modules(string_view arch, string_view stdosl)
             "if (u<0) m[int(3*u)][1]=v; Cout=color(m[0][0]); }",
             rejected, { }, stdosl))
         return false;
-    check_rejection(arch, rejected, "matrix indices must be literal");
+    check_rejection(arch, rejected, "HARTArrayBounds");
     return true;
 }
 
@@ -2082,7 +2112,8 @@ check_texture_firstchannel_modules(string_view arch, string_view stdosl)
         { "", "1.0", "firstchannel requires a literal nonnegative integer" },
         { "", "color(1)",
           "firstchannel requires a literal nonnegative integer" },
-        { "int channels[2]={1,2},", "channels", "unsupported type" },
+        { "int channels[2]={1,2},", "channels",
+          "firstchannel requires a literal nonnegative integer" },
     };
     // Rejection must precede folding default parameters or pruning layers.
     for (const auto& test : rejected)
@@ -2097,7 +2128,7 @@ check_texture_firstchannel_modules(string_view arch, string_view stdosl)
             std::string bytecode;
             if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
                 return false;
-            HartServices renderer(true);
+            HartServices renderer(true, false, false, true);
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
             ss.attribute("hart_arch", arch);
@@ -2466,13 +2497,6 @@ check_closure_modules(string_view arch, string_view stdosl)
         const char* source;
         const char* error;
     } types[] = {
-        { "shader hart_closure_array(closure color values[2]={0,0}, "
-          "output color Cout=0) { Ci=values[0]; }",
-          "unsupported type" },
-        { "struct Holder { closure color value; }; "
-          "shader hart_closure_struct(Holder h={0}, output color Cout=0) { "
-          "Ci=h.value; }",
-          "unsupported type" },
         { "shader hart_closure_string(string name=\"diffuse\", "
           "output color Cout=0) { Ci=diffuse(N); }",
           "unsupported type" },
@@ -2750,6 +2774,132 @@ check_control_flow_modules(string_view arch, string_view stdosl,
 
 
 bool
+check_aggregate_modules(string_view arch, string_view stdosl,
+                        string_view output_array)
+{
+    check_rejection(arch, output_array, "HARTArrayBounds");
+    const struct {
+        const char* producer;
+        const char* consumer;
+        bool closure;
+        bool checked;
+    } tests[] = {
+        { "shader array_local(output color Cout=0) { "
+          "float a[3]={u,v,u*v}; float b[3]; b=a; int i=int(2*u); "
+          "b[i]=a[i]+v; Cout=color(b[i],Dx(b[i]),Dy(b[i])); }",
+          "", false, true },
+        { "shader array_output(output float value[3]={0,0,0}) { "
+          "value[0]=u; value[1]=v; value[2]=u*v; }",
+          "shader array_input(float value[]={1,2,3}, output color Cout=0) { "
+          "float q=0; for(int i=0;i<arraylength(value);++i) q+=value[i]; "
+          "Cout=color(q,Dx(q),Dy(q)); }",
+          false, true },
+        { "struct Leaf { float f; color c; }; "
+          "struct Packet { Leaf a[2]; float b[3]; }; "
+          "shader struct_output(output Packet value={{{0,0},{0,0}},{0,0,0}}) { "
+          "value.a[0].f=u; value.a[1].f=v; "
+          "value.a[0].c=color(u,v,u*v); value.a[1].c=color(v,u,u+v); "
+          "value.b[0]=u; value.b[1]=v; value.b[2]=u*v; }",
+          "struct Leaf { float f; color c; }; "
+          "struct Packet { Leaf a[2]; float b[3]; }; "
+          "shader struct_input(Packet value={{{0,0},{0,0}},{0,0,0}}, "
+          "output color Cout=0) { Packet copy=value; Leaf leaves[2]; "
+          "leaves=copy.a; int i=int(u>v); Leaf selected=leaves[i]; "
+          "float q=selected.f+selected.c[0]+copy.b[int(2*u)]; "
+          "Cout=color(q,Dx(q),Dy(q)); }",
+          false, true },
+        { "struct Holder { closure color lobes[2]; }; "
+          "shader closure_output(output Holder value={{0,0}}) { "
+          "value.lobes[0]=u*diffuse(N); value.lobes[1]=v*emission(); }",
+          "struct Holder { closure color lobes[2]; }; "
+          "shader closure_input(Holder value={{0,0}}, output color Cout=0) { "
+          "Holder copy=value; closure color c[2]; c=copy.lobes; "
+          "Ci=c[int(u>v)]; Cout=color(u,v,1); }",
+          true, true },
+        { "shader empty_length(float a[]={}, output color Cout=0) { "
+          "Cout=color(arraylength(a)); }",
+          "", false, false },
+        { "shader unchecked_static [[int range_checking=0]] "
+          "(output color Cout=0) { float a[2]={u,v}; "
+          "Cout=color(a[0]+P[1]); }",
+          "", false, false },
+    };
+    for (const auto& test : tests) {
+        OSLCompiler compiler, consumer_compiler;
+        std::string producer, consumer;
+        const bool connected = test.consumer[0] != '\0';
+        if (!compiler.compile_buffer(test.producer, producer, { }, stdosl)
+            || (connected
+                && !consumer_compiler.compile_buffer(test.consumer, consumer,
+                                                     { }, stdosl)))
+            return false;
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 }) {
+                HartServices renderer(false, false, test.closure, true);
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                if (test.closure)
+                    register_hart_closures(ss);
+                ss.attribute("hart_arch", arch);
+                ss.attribute("optimize", osl_optimize);
+                ss.attribute("llvm_optimize", optimize);
+                ss.attribute("max_hart_groupdata_alloc",
+                             optimize == 3 ? 4096 : 0);
+                auto group = connected
+                                 ? make_connected_group(ss, producer, consumer)
+                                 : make_group(ss, producer);
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr, "{}: {}\n", test.producer, errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                check_module(ss, *group, arch,
+                             test.checked && osl_optimize == 0
+                                 ? std::initializer_list<
+                                       string_view> { "rs_hart_range_error" }
+                                 : std::initializer_list<string_view> { },
+                             optimize, connected, false, false,
+                             connected ? 2 : 0, test.closure, true);
+            }
+    }
+    const struct {
+        const char* source;
+        const char* error;
+    } rejected[] = {
+        { "shader unchecked [[int range_checking=0]] (output color Cout=0) { "
+          "float a[2]={u,v}; Cout=color(a[int(u)]); }",
+          "range_checking" },
+        { "shader unchecked [[int range_checking=0]] (output color Cout=0) { "
+          "Cout=color(P[int(u)]); }",
+          "range_checking" },
+        { "shader unchecked [[int range_checking=0]] (output color Cout=0) { "
+          "matrix m=matrix(1); m[int(u)][0]=v; Cout=color(m[0][0]); }",
+          "range_checking" },
+        { "struct Holder { string label; float a[2]; }; "
+          "shader unused_string(Holder h={\"bad\",{0,0}}, output color Cout=0) "
+          "{ Cout=color(u,v,1); }",
+          "unsupported type 'string'" },
+        { "shader interactive_array(float a[2]={0,0} [[int interactive=1]], "
+          "output color Cout=0) { Cout=color(a[0]); }",
+          "interactive" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    return true;
+}
+
+
+
+bool
 check_procedural_modules(string_view arch, string_view stdosl)
 {
     const char* sources[] = {
@@ -3002,7 +3152,6 @@ main(int argc, char* argv[])
     check_rejection(arch, oso[0], "instrumentation", 1, true);
     check_rejection(arch, oso[2], "unsupported operation 'printf'");
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
-    check_rejection(arch, oso[11], "unsupported type");
     check_rejection(arch, oso[14], "unsupported operation 'printf'");
     check_rejection(arch, oso[15], "unsupported operation 'texture'");
     check_rejection(arch, oso[21], "unsupported operation 'printf'");
@@ -3062,7 +3211,8 @@ main(int argc, char* argv[])
                                        TypeDesc(TypeDesc::STRING, 1), &entry));
         check_rejected_group(ss, *group, errors, "default entry point");
     }
-    if (!check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
+    if (!check_aggregate_modules(arch, argv[2], oso[11])
+        || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])
         || !check_topology_modules(arch, argv[2])
         || !check_material_modules(arch, argv[2])

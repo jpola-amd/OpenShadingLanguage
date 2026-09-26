@@ -373,7 +373,7 @@ BackendLLVM::llvm_type_groupdata()
         FOREACH_PARAM(Symbol & sym, inst)
         {
             TypeSpec ts = sym.typespec();
-            if (ts.is_structure())  // skip the struct symbol itself
+            if (ts.is_structure_based())  // skip the struct symbol itself
                 continue;
 
             if (can_treat_param_as_local(sym))
@@ -1693,7 +1693,7 @@ BackendLLVM::build_llvm_instance(bool groupentry)
             continue;
         }
         // Skip structure placeholders
-        if (s.typespec().is_structure())
+        if (s.typespec().is_structure_based())
             continue;
         // Allocate space for locals, temps, aggregate constants, and some output params
         if (s.symtype() == SymTypeLocal || s.symtype() == SymTypeTemp
@@ -1733,7 +1733,7 @@ BackendLLVM::build_llvm_instance(bool groupentry)
     FOREACH_PARAM(Symbol & s, inst())
     {
         // Skip structure placeholders
-        if (s.typespec().is_structure())
+        if (s.typespec().is_structure_based())
             continue;
         // Skip if it's never read and isn't connected
         if (!s.everread() && !s.connected_down() && !s.connected()

@@ -1,0 +1,13 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_array_param(float values[] = {1, 2, 3}, float empty[] = {},
+                        output color Cout = 0)
+{
+    float q = 0;
+    for (int i = 0; i < arraylength(values); ++i)
+        q += values[i]*(1+u);
+    q += empty[0];
+    Cout = color(q, Dx(q), arraylength(values) + 16*arraylength(empty));
+}

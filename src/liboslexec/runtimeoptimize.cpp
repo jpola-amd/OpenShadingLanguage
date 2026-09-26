@@ -898,7 +898,8 @@ RuntimeOptimizer::simplify_params()
         // editable
         if (s->interpolated() || s->interactive())
             continue;
-        if (s->typespec().is_structure() || s->typespec().is_closure_based())
+        if (s->typespec().is_structure_based()
+            || s->typespec().is_closure_based())
             continue;  // We don't mess with struct placeholders or closures
 
         if (s->valuesource() == Symbol::InstanceVal) {
@@ -2774,11 +2775,11 @@ RuntimeOptimizer::track_variable_dependencies()
 inline bool
 coalescable(const Symbol& s)
 {
-    return (s.symtype() == SymTypeTemp &&    // only coalesce temporaries
-            s.everused() &&                  // only if they're used
-            s.dealias() == &s &&             // only if not already aliased
-            !s.typespec().is_structure() &&  // only if not a struct
-            s.fieldid() < 0);                //    or a struct field
+    return (s.symtype() == SymTypeTemp &&  // only coalesce temporaries
+            s.everused() &&                // only if they're used
+            s.dealias() == &s &&           // only if not already aliased
+            !s.typespec().is_structure_based() &&  // only if not a struct
+            s.fieldid() < 0);                      //    or a struct field
 }
 
 

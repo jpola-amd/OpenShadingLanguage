@@ -64,7 +64,12 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
             Ci = w * emission();
         }""",
         "path_diffuse": """shader path_diffuse(color tint = 0.5) {
-            Ci = 0.25*tint*diffuse(N) + 0.75*tint*diffuse(N);
+            closure color lobes[2] = {
+                0.25*tint*diffuse(N), 0.75*tint*diffuse(N)};
+            closure color copy[2];
+            copy = lobes;
+            int i = u > v;
+            Ci = copy[i] + copy[1-i];
         }""",
         "path_producer": """shader path_producer(output color weight = 0) {
             weight = color(0.2 + 0.1*u, 0.3 + 0.1*v, 0.4)

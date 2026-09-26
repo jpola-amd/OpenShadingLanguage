@@ -1,0 +1,15 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_array(int write = 0, int offset = 0, output color Cout = 0)
+{
+    float a[4] = {u, 2*u+v, 3*u-v, u*v};
+    float b[4] = {0, 0, 0, 0};
+    b = a;
+    int index = int(3*u) + offset;
+    if (write)
+        b[index] = u+v;
+    float q = b[index];
+    Cout = color(q, Dx(q), Dy(q));
+}
