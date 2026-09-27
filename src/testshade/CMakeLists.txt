@@ -342,6 +342,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
             set_tests_properties (hart-userdata-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-geometry-state-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-geometry-state.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-geometry-state-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-gabor-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
@@ -503,6 +509,15 @@ if (BUILD_TESTING AND OSL_USE_HART)
                             "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
                             --mode ${mode} --kind userdata)
                     set_tests_properties (hart-userdata-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-raytype-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind raytypes)
+                    set_tests_properties (hart-raytype-rebind-${mode} PROPERTIES
                         LABELS "hart;gpu" RUN_SERIAL TRUE
                         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
                     add_test (NAME hart-color-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"

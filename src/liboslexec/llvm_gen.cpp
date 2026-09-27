@@ -4408,6 +4408,18 @@ LLVMGEN(llvm_gen_raytype)
         ustring name = Name.get_string();
         args[1]      = rop.ll.constant(rop.shadingsys().raytype_bit(name));
         func         = "osl_raytype_bit";
+    } else if (rop.use_hart()) {
+        const auto names = rop.shadingsys().raytypes();
+        auto* name       = rop.llvm_load_value(Name);
+        llvm::Value* bit = rop.ll.constant(0);
+        // As with raytype_bit, the first occurrence of a name wins.
+        for (size_t i = names.size(); i > 0; --i)
+            bit = rop.ll.op_select(rop.ll.op_eq(name, rop.llvm_const_hash(
+                                                          names[i - 1])),
+                                   rop.ll.constant(uint32_t(1) << (i - 1)),
+                                   bit);
+        args[1] = bit;
+        func    = "osl_raytype_bit";
     } else {
         // No way to know which name is being asked for
         args[1] = rop.llvm_load_value(Name);

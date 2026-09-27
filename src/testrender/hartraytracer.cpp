@@ -415,7 +415,7 @@ HartRaytracer::supports(string_view feature) const
            || feature == "HARTTextures" || feature == "HARTArrayBounds"
            || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
            || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
-           || feature == "HARTInteractive";
+           || feature == "HARTInteractive" || feature == "HARTGeometry";
 }
 
 

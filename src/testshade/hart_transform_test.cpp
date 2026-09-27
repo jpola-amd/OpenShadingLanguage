@@ -963,6 +963,112 @@ run_userdata(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 
 
 
+bool
+run_raytypes(string_view stdosl, string_view mode, Diagnostics& diagnostics)
+{
+    OutputFiles files;
+    if (!files.create(diagnostics))
+        return false;
+    std::string arch;
+    auto renderer = testshade_hart_renderer(0, arch);
+    if (!renderer)
+        return false;
+    renderer->errhandler().verbosity(ErrorHandler::VERBOSE);
+    ShadingSystem ss(renderer.get(), nullptr, &diagnostics);
+    renderer->init_shadingsys(&ss);
+    if (!ss.attribute("hart_arch", arch)
+        || !ss.attribute("llvm_debugging_symbols", 0)
+        || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? 1048576 : 0)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+        || !ss.attribute("optimize", mode == "unoptimized" ? 0 : 2))
+        return false;
+    std::array<std::string, 32> storage;
+    std::array<const char*, 32> names;
+    for (size_t i = 0; i < names.size(); ++i) {
+        storage[i] = fmtformat("ray{}", i);
+        names[i]   = storage[i].c_str();
+    }
+    names[1] = names[2] = "duplicate";
+    names[30]           = "";
+    names[31]           = "high";
+    if (!ss.attribute("raytypes", TypeDesc(TypeDesc::STRING, 32), names.data()))
+        return false;
+    const char* source
+        = "shader hart_raytypes(output color Cout=0) {"
+          "string name=v>.5 ? \"\" : u<.5 ? \"high\""
+          ": u<.75 ? \"duplicate\" : \"unknown\";"
+          "Cout=color(raytype(name),raytype(\"high\"),raytype(\"duplicate\")); }";
+    OSLCompiler compiler(&diagnostics);
+    std::string oso;
+    if (!compiler.compile_buffer(source, oso, { }, stdosl)
+        || !ss.LoadMemoryCompiledShader("hart_raytypes", oso))
+        return false;
+    auto group = ss.ShaderGroupBegin("hart_raytype_rebind");
+    if (!group || !ss.Shader("surface", "hart_raytypes", "out")
+        || !ss.ShaderGroupEnd())
+        return false;
+    const SymLocationDesc output("out.Cout", TypeColor, false,
+                                 SymArena::Outputs, 0, 12);
+    ss.add_symlocs(group.get(), { &output, 1 });
+    ss.optimize_group(group.get(), nullptr);
+    std::string original;
+    const void* original_address = nullptr;
+    if (!artifact(ss, *group, original, original_address, diagnostics))
+        return false;
+    HartOptions options;
+    options.fused = mode == "fused" || mode == "fused-local";
+    const Matrix44 identity;
+    const int masks[] = { std::numeric_limits<int32_t>::min(), (1 << 30) | 4,
+                          std::numeric_limits<int32_t>::min() };
+    std::array<std::vector<float>, 3> images;
+    for (int pass = 0; pass < 3; ++pass) {
+        print("HART raytypes pass {}\n", pass);
+        std::fflush(stdout);
+        if (!testshade_hart_generated(*renderer, ss, *group, options, arch,
+                                      width, height, 1, false, true,
+                                      masks[pass], false, files.files[pass],
+                                      "float", identity, identity))
+            return false;
+        OIIO::ImageBuf image(files.files[pass]);
+        if (!image.read(0, 0, true, TypeFloat) || image.nchannels() != 3
+            || image.spec().width != width || image.spec().height != height) {
+            diagnostics.errorfmt("Invalid ray-type output: {}",
+                                 image.geterror());
+            return false;
+        }
+        images[pass].resize(width * height * 3);
+        if (!image.get_pixels(image.roi(), TypeFloat, images[pass].data())) {
+            diagnostics.errorfmt("Cannot read ray-type output: {}",
+                                 image.geterror());
+            return false;
+        }
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                const int offset = 3 * (width * y + x);
+                const float u    = float(x) / (width - 1);
+                const float v    = float(y) / (height - 1);
+                OIIO_CHECK_EQUAL(images[pass][offset],
+                                 float(pass == 1 ? v > .5f
+                                                 : u < .5f && v <= .5f));
+                OIIO_CHECK_EQUAL(images[pass][offset + 1],
+                                 pass == 1 ? 0.0f : 1.0f);
+                OIIO_CHECK_EQUAL(images[pass][offset + 2], 0.0f);
+            }
+        std::string current;
+        const void* address = nullptr;
+        if (!artifact(ss, *group, current, address, diagnostics))
+            return false;
+        OIIO_CHECK_EQUAL(current, original);
+        OIIO_CHECK_EQUAL(address, original_address);
+    }
+    OIIO_CHECK_ASSERT(images[0] != images[1] && images[0] == images[2]);
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
 }  // namespace
 
 
@@ -970,27 +1076,29 @@ run_userdata(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 int
 main(int argc, char* argv[])
 {
-    const bool color = argc == 4 && string_view(argv[3]) == "color";
-    const bool outputs = argc == 4 && string_view(argv[3]) == "outputs";
+    const bool color       = argc == 4 && string_view(argv[3]) == "color";
+    const bool outputs     = argc == 4 && string_view(argv[3]) == "outputs";
     const bool interactive = argc == 4 && string_view(argv[3]) == "interactive";
     const bool userdata    = argc == 4 && string_view(argv[3]) == "userdata";
+    const bool raytypes    = argc == 4 && string_view(argv[3]) == "raytypes";
     const string_view mode(argc >= 3 ? argv[2] : "split");
     if ((argc != 2 && argc != 3 && !color && !outputs && !interactive
-         && !userdata)
+         && !userdata && !raytypes)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
-            && !((color || outputs || interactive || userdata)
+            && !((color || outputs || interactive || userdata || raytypes)
                  && mode == "unoptimized"))) {
         print(
             stderr,
             "Usage: hart_transform_test stdosl.h "
-            "[split|fused|fused-local|unoptimized] [color|outputs|interactive|userdata]\n");
+            "[split|fused|fused-local|unoptimized] [color|outputs|interactive|userdata|raytypes]\n");
         return 1;
     }
     Diagnostics diagnostics;
     OIIO_CHECK_ASSERT(
-        userdata  ? run_userdata(argv[1], mode, diagnostics)
-        : outputs ? run_outputs(argv[1], mode, diagnostics)
-                  : run(argv[1], mode, color, interactive, diagnostics));
+        raytypes   ? run_raytypes(argv[1], mode, diagnostics)
+        : userdata ? run_userdata(argv[1], mode, diagnostics)
+        : outputs  ? run_outputs(argv[1], mode, diagnostics)
+                   : run(argv[1], mode, color, interactive, diagnostics));
     OIIO_CHECK_EQUAL(diagnostics.errors, 0);
     OIIO_CHECK_EQUAL(diagnostics.warnings, 0);
     return unit_test_failures;

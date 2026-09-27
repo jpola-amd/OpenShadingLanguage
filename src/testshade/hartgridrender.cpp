@@ -211,6 +211,7 @@ public:
                || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
                || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
                || feature == "HARTInteractive" || feature == "HARTUserdata"
+               || feature == "HARTGeometry"
                || feature == "build_interpolated_getter"
                || (m_closures && feature == "HARTClosures");
     }
@@ -785,6 +786,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--entryoutput %s:NAME");
     ap.arg("--reparam %s:LAYERNAME %s:PARAMNAME %s:VALUE");
     ap.arg("--userdata %s:NAME %s:VALUE");
+    ap.arg("--raytype %s:NAME");
     ap.arg("--shader %s:SHADER %s:LAYER")
       .action([&](cspan<const char*>) { has_shader = true; });
     ap.arg("--connect %s:FROMLAYER %s:FROMOUTPUT %s:TOLAYER %s:TOINPUT");

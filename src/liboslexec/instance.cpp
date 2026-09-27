@@ -387,6 +387,7 @@ ShaderInstance::validate_hart() const
     // operations or hide unsupported paths in a particular specialization.
     const bool closures = shadingsys().renderer()->supports("HARTClosures");
     const bool bounds   = shadingsys().renderer()->supports("HARTArrayBounds");
+    const bool geometry = shadingsys().renderer()->supports("HARTGeometry");
     auto validate_type  = [&](const Symbol& sym) {
         const TypeSpec& type = sym.typespec();
         if (type.is_structure_array() && type.structspec()->numfields() == 0) {
@@ -440,7 +441,8 @@ ShaderInstance::validate_hart() const
                    && (name == ustring("eq") || name == ustring("neq"))) {
             valid = type(0).is_int() && type(1).is_string()
                     && type(2).is_string();
-        } else if (op.nargs() == 2 && name == ustring("hash")) {
+        } else if (op.nargs() == 2
+                   && (name == ustring("hash") || name == ustring("raytype"))) {
             valid = type(0).is_int() && type(1).is_string();
         }
         if (!valid)
@@ -1013,6 +1015,9 @@ ShaderInstance::validate_hart() const
         ustring("wavelength_color"),
         ustring("luminance"),
         ustring("transformc"),
+        ustring("raytype"),
+        ustring("backfacing"),
+        ustring("surfacearea"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),    ustring("v"),  ustring("P"),
@@ -1026,6 +1031,15 @@ ShaderInstance::validate_hart() const
                                   "'{}' ({}:{})",
                                   op.opname(), shadername(), op.sourcefile(),
                                   op.sourceline());
+            return false;
+        }
+        if (!geometry
+            && (op.opname() == ustring("raytype")
+                || op.opname() == ustring("backfacing")
+                || op.opname() == ustring("surfacearea"))) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTGeometry for '{}' in shader '{}'",
+                op.opname(), shadername());
             return false;
         }
         if (op.opname() == ustring("texture") && !validate_texture(op))
@@ -1169,15 +1183,23 @@ ShaderInstance::validate_hart() const
             if (sym.symtype() == SymTypeGlobal) {
                 if (closures && sym.name() == ustring("Ci"))
                     continue;
+                const bool readable = std::find(std::begin(readable_globals),
+                                                std::end(readable_globals),
+                                                sym.name())
+                                      != std::end(readable_globals);
+                if (geometry
+                    && ((!op.argwrite(a)
+                         && (sym.name() == ustring("dtime")
+                             || sym.name() == ustring("dPdtime")))
+                        || (readable && sym.name() != ustring("time"))))
+                    continue;
                 if (op.argwrite(a)) {
                     shadingsys().errorfmt("HART: writing shader global '{}' is "
                                           "unsupported in shader '{}'",
                                           sym.name(), shadername());
                     return false;
                 }
-                if (std::find(std::begin(readable_globals),
-                              std::end(readable_globals), sym.name())
-                    == std::end(readable_globals)) {
+                if (!readable) {
                     shadingsys().errorfmt("HART: unsupported shader global '{}' "
                                           "in shader '{}'",
                                           sym.name(), shadername());

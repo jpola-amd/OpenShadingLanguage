@@ -6,5 +6,5 @@ shader hart_surface_write(int enable = 0, output color Cout = 0)
 {
     if (enable)
         N = normal(u, v, 1);
-    Cout = color(u, v, 0);
+    Cout = enable ? color(N) : color(u, v, 0);
 }

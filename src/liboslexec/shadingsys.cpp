@@ -1773,8 +1773,11 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
         return true;
     }
     if (name == "raytypes" && type.basetype == TypeDesc::STRING) {
-        OSL_ASSERT(type.numelements() <= 32
-                   && "ShaderGlobals.raytype is an int, max of 32 raytypes");
+        if (type.arraylen < 0 || type.aggregate != TypeDesc::SCALAR
+            || type.numelements() > 32 || !val) {
+            errorfmt("raytypes requires at most 32 string names");
+            return false;
+        }
         m_raytypes.clear();
         for (size_t i = 0; i < type.numelements(); ++i)
             m_raytypes.emplace_back(((const char**)val)[i]);
@@ -3986,8 +3989,8 @@ int
 ShadingSystemImpl::raytype_bit(ustring name)
 {
     for (size_t i = 0, e = m_raytypes.size(); i < e; ++i)
-        if (name == m_raytypes[i])
-            return (1 << i);
+        if (name == m_raytypes[i] || (name.empty() && m_raytypes[i].empty()))
+            return int(uint32_t(1) << i);
     return 0;  // not found
 }
 

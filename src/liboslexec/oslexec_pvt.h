@@ -789,6 +789,7 @@ public:
 
 
     OSLEXECPUBLIC int raytype_bit(ustring name);
+    cspan<ustring> raytypes() const { return m_raytypes; }
 
     void optimize_all_groups(int nthreads = 0, int mythread = 0,
                              int totalthreads = 1, bool do_jit = true);

@@ -59,9 +59,14 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
         "path_emit": """shader path_emit(
             color tint = 1 [[int interactive=1]], int globals = 0) {
             color w = tint;
-            if (globals)
+            if (globals) {
+                N = -N;
                 w += color(0.1*u, 0.1*v,
                            0.01*(abs(dot(I,N)) + abs(Dx(u)) + abs(Dy(v))));
+                w += .01*color(N)
+                     + color(.001*surfacearea(), .01*raytype("camera"),
+                             .01*backfacing());
+            }
             Ci = w * emission();
         }""",
         "path_diffuse": """shader path_diffuse(color tint = 0.5) {

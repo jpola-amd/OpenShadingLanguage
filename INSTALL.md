@@ -629,7 +629,7 @@ Cout = color(w, Dx(w), Dy(w));
 Here the red channel is `abs(cos(u*v))*sqrt((v*dudx)^2+(u*dvdy)^2)`;
 green and blue are zero.
 
-Read-only surface geometry is also available: `P`, `N`, `Ng`, `dPdu`, `dPdv`,
+Surface geometry is also available: `P`, `N`, `Ng`, `dPdu`, `dPdv`,
 `I`, and `time`, in addition to `u` and `v`. The test grid is still a synthetic
 flat patch, not a ray-traced scene. It supplies `P=(u,v,1)`, `N=Ng=(0,0,1)`,
 `dPdu=(1,0,0)`, and `dPdv=(0,1,0)`. Position derivatives are
@@ -637,7 +637,33 @@ flat patch, not a ray-traced scene. It supplies `P=(u,v,1)`, `N=Ng=(0,0,1)`,
 Like CPU testshade, this grid supplies `I=(0,0,0)` and `time=0`, with zero
 derivatives and filter widths. These are explicit synthetic-grid defaults,
 not camera-ray directions or animated sampling; no new camera or time
-controls are implied. All shader globals remain read-only.
+controls are implied.
+
+Renderers advertising `HARTGeometry` also support `surfacearea()`,
+`backfacing()` and `raytype()`, and writes to `P`, `I`, `N`, `Ng`, `dPdu`,
+`dPdv`, `u` and `v`. Writes and their supported derivative storage are visible
+to subsequent executed layers through the existing shared shader globals.
+`time`, `dtime` and `dPdtime` remain read-only; the supplied static grid and
+native renderer set motion intervals and velocities to zero, without claiming
+motion-blur support. `Ps` is still unsupported.
+
+Both supplied HART renderers opt in. The grid's actual unit patch has surface
+area one and is front-facing. The native path tracer supplies the hit mesh's
+area, the original hit's backfacing flag, incident direction and current ray
+mask. Changing a shading normal does not recalculate that captured hit flag.
+Live geometry queries report their required fields through `globals_needed`.
+Constant and dynamic `raytype` names use the shading system's configured
+name-to-bit mapping without calling host renderer services. Unknown names
+return zero; duplicate names retain first-match precedence. Configure up to
+32 names before compiling groups, as for constant ray queries; changing the
+mapping requires recompilation. The supplied path tracer uses the standard
+ray-bit mapping, while generated testshade's `--raytype` selects the launch
+mask. The opt-in `hart-geometry-state-runtime` test compares live ray masks,
+shared-global writes and gradients with CPU and independent references in
+split, fused, callable-local and unoptimized modes.
+The four `hart-raytype-rebind-*` tests use 32 configured names, bit 31,
+duplicate-name precedence and unknown/empty names on the GPU, and require
+A-B-A mask updates to preserve compiled artifacts and pipeline-cache identity.
 
 Unqualified `point`, `vector`, and `normal` constructors work in common
 space, together with `dot`, `length`, and `normalize`. Construction does
@@ -854,8 +880,8 @@ and change alpha image contents across A-B-A cache reuse without changing
 shader code or filenames.
 
 `Dz`, unlisted noise forms, closures,
-tracing, shader printing, writes to shader globals, other globals such as
-`Ps` and `dtime`, unlisted coordinate spaces and transforms,
+tracing, shader printing, writes to read-only or unlisted shader globals,
+other globals such as `Ps`, unlisted coordinate spaces and transforms,
 string allocation and character operations,
 other renderer-service callbacks, batched execution, instrumentation,
 and unlisted frontend
@@ -1053,7 +1079,7 @@ normalization, length, or dot products, including mixed derivative/non-derivativ
 operands. It compares analytical and CPU/GPU results at LLVM levels 10 and 3,
 with connected groups on `1x1`, `3x2`, and `37x5` grids. Additional cases
 check each global and operation, uniform vector parameters, zero-length
-vectors with nonzero input derivatives, and rejection of global writes,
+vectors with nonzero input derivatives, normal writes, and rejection of
 unsupported globals and named spaces. It uses the same image, cache and
 repeated-launch checks. The compiler tests verify the linked shadeop variants,
 vector value/dx/dy storage and unchanged callable ABI on every configured
@@ -1150,12 +1176,13 @@ matrix queries, values and derivatives against CPU and analytical references.
 matrices, checks the artifact remains unchanged, and requires matching pipeline
 cache hits while the rendered values and derivatives change and change back.
 
-`hart-geometry-runtime` checks read-only `I` and `time`, their derivatives and
+`hart-geometry-runtime` checks initial `I` and `time`, their derivatives and
 filter widths against the grid's exact-zero defaults. It also composes named
 transforms, procedural UVs and texture sampling in standalone and connected
 groups at LLVM levels 10 and 3, including disabled OSL optimization. Values
 and derivatives are compared with CPU execution and the sampler oracle.
-Unsupported globals and writes still fail before launch.
+It also verifies an incident-vector component write and its gradients;
+unsupported globals and writes to time still fail before launch.
 
 `hart-groups-runtime` checks longer numeric chains with float, color, point,
 vector, normal and matrix connections. Group storage, derivative propagation,

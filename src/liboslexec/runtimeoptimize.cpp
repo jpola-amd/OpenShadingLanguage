@@ -41,6 +41,8 @@ static ustring u_setmessage("setmessage");
 static ustring u_getmessage("getmessage");
 static ustring u_getattribute("getattribute");
 static ustring u_backfacing("backfacing");
+static ustring u_raytype("raytype");
+static ustring u_surfacearea("surfacearea");
 static ustring u_calculatenormal("calculatenormal");
 static ustring u_flipHandedness("flipHandedness");
 static ustring u_N("N");
@@ -3402,8 +3404,9 @@ RuntimeOptimizer::run()
                 } else {
                     m_unknown_closures_needed = true;
                 }
-            } else if (op.opname() == u_backfacing) {
-                m_globals_needed.insert(u_backfacing);
+            } else if (op.opname() == u_backfacing || op.opname() == u_raytype
+                       || op.opname() == u_surfacearea) {
+                m_globals_needed.insert(op.opname());
             } else if (op.opname() == u_calculatenormal) {
                 m_globals_needed.insert(u_flipHandedness);
             } else if (op.opname() == u_getattribute) {

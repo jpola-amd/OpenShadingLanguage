@@ -16,5 +16,5 @@ shader hart_geometry_rejected(int enabled = 0, output color Cout = 0)
         I[0] = u;
 #endif
     }
-    Cout = color(u, v, 0);
+    Cout = enabled ? color(I[0], Dx(I[0]), Dy(I[0])) : color(u, v, 0);
 }

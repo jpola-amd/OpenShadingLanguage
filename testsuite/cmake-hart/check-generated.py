@@ -68,7 +68,7 @@ suites.add_argument("--matrices", action="store_true",
 suites.add_argument("--spaces", action="store_true",
                     help="Run literal common/object/shader space runtime cases")
 suites.add_argument("--geometry", action="store_true",
-                    help="Run read-only I/time and composed material runtime cases")
+                    help="Run geometry globals and composed material runtime cases")
 suites.add_argument("--groups", action="store_true",
                     help="Run numeric multilayer chain runtime cases")
 suites.add_argument("--topology", action="store_true",
@@ -1686,9 +1686,13 @@ def check_geometry_suite():
         name = "hart_geometry_rejected_" + str(case)
         compile_fixture(fixtures / "hart_geometry_rejected.osl", name,
                         ("GEOMETRY_WRITE_TIME=" + str(case),))
-        run(["--hart", "-v", "--shader", name, "unused",
-             "--shader", "hart_first", "surface"],
-            "HART: writing shader global '" + global_name + "'")
+        if global_name == "I":
+            check_render(["--param", "enabled", "1", name], 3, 2,
+                         reference(3, 2, lambda u, v: (u, .5, 0)))
+        else:
+            run(["--hart", "-v", "--shader", name, "unused",
+                 "--shader", "hart_first", "surface"],
+                "HART: writing shader global '" + global_name + "'")
 
 
 def group_arguments(depth, optimize, specialize="-O2"):
@@ -3789,7 +3793,7 @@ try:
     for option in (
         ["--batched"], ["--center"],
         ["--use_rs_bitcode"],
-        ["--no-output-placement"], ["--shadeimage"], ["--raytype", "shadow"],
+        ["--no-output-placement"], ["--shadeimage"],
         ["--scaleuv", "2", "2"], ["--offsetuv", "1", "1"],
         ["--options", "optimize=0"], ["--saveptx"],
     ):
@@ -3921,7 +3925,6 @@ try:
     if args.surface:
         for shader, error in (
             ("hart_surface_incident", "unsupported shader global 'Ps'"),
-            ("hart_surface_write", "writing shader global 'N'"),
             ("hart_space_rejected", "HART: unsupported coordinate space"),
         ):
             run(["--hart", "-v", shader], error)
@@ -3931,6 +3934,8 @@ try:
                                     producer="hart_surface_producer")
         for optimize in ("10", "3"):
             flags = ["--llvm_opt", optimize]
+            check_render(flags + ["--param", "enable", "1", "hart_surface_write"],
+                         3, 2, reference(3, 2, lambda u, v: (u, v, 1)))
             for width, height in ((1, 1), (3, 2), (37, 5)):
                 check_render(flags + connected, width, height,
                              reference(width, height,

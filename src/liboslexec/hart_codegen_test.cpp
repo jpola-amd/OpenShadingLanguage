@@ -6,8 +6,8 @@
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
-// diagnostics, interactive uploads, userdata caching, linked shadeops, control
-// flow, HART provenance, and rejection of unsupported operations.
+// diagnostics, interactive uploads, userdata caching, geometry state, linked
+// shadeops, control flow, HART provenance, and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -273,6 +273,23 @@ public:
     bool userdata = true, getter = true, missing_spec = false;
     int host_lookups = 0;
     std::vector<Request> requests;
+};
+
+
+
+class HartGeometryServices final : public RendererServices {
+public:
+    explicit HartGeometryServices(bool geometry = true) : m_geometry(geometry)
+    {
+    }
+    int supports(string_view feature) const override
+    {
+        return feature == "HART" || feature == "HARTArrayBounds"
+               || (m_geometry && feature == "HARTGeometry");
+    }
+
+private:
+    bool m_geometry;
 };
 
 
@@ -3700,8 +3717,11 @@ check_hart_entry_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     targets.insert(targets.begin(), init);
     check_wrapper(wrappers[2], targets, local ? storage : nullptr, alignment);
 
-    // All fixtures put the shared producer first, so its run flag is the
-    // first byte of the target-derived flag array, not an entry's own flag.
+    // The producer is the first layer, whether a shared dependency or itself
+    // an explicit entry.
+    const bool producer_is_entry = std::find(unique_targets.begin(),
+                                             unique_targets.end(), producer)
+                                   != unique_targets.end();
     OIIO_CHECK_ASSERT(storage->getNumElements() > 0);
     if (!storage->getNumElements())
         return false;
@@ -3717,6 +3737,38 @@ check_hart_entry_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         const auto* base
             = llvm::GetPointerBaseWithConstantOffset(pointer, offset, layout);
         return base == function.getArg(1) && offset == 0;
+    };
+    const auto guarded_by_producer_flag = [&](const llvm::Instruction* target,
+                                              llvm::Function& function) {
+        llvm::DominatorTree dominators(function);
+        for (const auto& block : function) {
+            const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                block.getTerminator());
+            const auto* cmp = branch && branch->isConditional()
+                                  ? llvm::dyn_cast<llvm::ICmpInst>(
+                                        branch->getCondition())
+                                  : nullptr;
+            if (!cmp || !cmp->isEquality())
+                continue;
+            for (unsigned i = 0; i < 2; ++i) {
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(
+                    cmp->getOperand(i));
+                const auto* ran = llvm::dyn_cast<llvm::ConstantInt>(
+                    cmp->getOperand(1 - i));
+                if (!load || !load->getType()->isIntegerTy(1) || !ran
+                    || !ran->isOne()
+                    || !producer_flag(load->getPointerOperand(), function))
+                    continue;
+                const unsigned unran
+                    = cmp->getPredicate() == llvm::CmpInst::ICMP_NE ? 0 : 1;
+                if (dominators.dominates(branch->getSuccessor(unran),
+                                         target->getParent())
+                    && !dominators.dominates(branch->getSuccessor(1 - unran),
+                                             target->getParent()))
+                    return true;
+            }
+        }
+        return false;
     };
     int resets = 0, marks = 0;
     for (const auto& function : module) {
@@ -3746,8 +3798,12 @@ check_hart_entry_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                         const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
                             store->getValueOperand());
                         OIIO_CHECK_ASSERT(value && value->isOne());
-                        OIIO_CHECK_EQUAL(store->getParent(),
-                                         &producer->getEntryBlock());
+                        if (producer_is_entry)
+                            OIIO_CHECK_ASSERT(
+                                guarded_by_producer_flag(store, *producer));
+                        else
+                            OIIO_CHECK_EQUAL(store->getParent(),
+                                             &producer->getEntryBlock());
                     }
                 if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
                     OIIO_CHECK_ASSERT(call->getCalledFunction() != init);
@@ -3756,7 +3812,6 @@ check_hart_entry_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     OIIO_CHECK_EQUAL(resets, 1);
     OIIO_CHECK_EQUAL(marks, 1);
     for (auto* entry : unique_targets) {
-        llvm::DominatorTree dominators(*entry);
         int calls = 0;
         for (const auto* user : producer->users()) {
             const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
@@ -3769,37 +3824,12 @@ check_hart_entry_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                              producer->getCallingConv());
             for (unsigned i = 0; i < call->arg_size() && i < 6; ++i)
                 OIIO_CHECK_EQUAL(call->getArgOperand(i), entry->getArg(i));
-            bool guarded = false;
-            for (const auto& block : *entry) {
-                const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
-                    block.getTerminator());
-                const auto* cmp = branch && branch->isConditional()
-                                      ? llvm::dyn_cast<llvm::ICmpInst>(
-                                            branch->getCondition())
-                                      : nullptr;
-                if (!cmp || !cmp->isEquality())
-                    continue;
-                for (unsigned i = 0; i < 2; ++i) {
-                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(
-                        cmp->getOperand(i));
-                    const auto* ran = llvm::dyn_cast<llvm::ConstantInt>(
-                        cmp->getOperand(1 - i));
-                    if (!load || !load->getType()->isIntegerTy(1) || !ran
-                        || !ran->isOne()
-                        || !producer_flag(load->getPointerOperand(), *entry))
-                        continue;
-                    const unsigned unran
-                        = cmp->getPredicate() == llvm::CmpInst::ICMP_NE ? 0 : 1;
-                    guarded |= dominators.dominates(branch->getSuccessor(unran),
-                                                    call->getParent())
-                               && !dominators.dominates(branch->getSuccessor(
-                                                            1 - unran),
-                                                        call->getParent());
-                }
-            }
-            OIIO_CHECK_ASSERT(guarded);
+            OIIO_CHECK_ASSERT(guarded_by_producer_flag(call, *entry));
         }
-        OIIO_CHECK_ASSERT(calls > 0);
+        if (entry == producer)
+            OIIO_CHECK_EQUAL(calls, 0);
+        else if (!producer_is_entry)
+            OIIO_CHECK_ASSERT(calls > 0);
     }
     return true;
 }
@@ -6849,6 +6879,851 @@ check_space_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_geometry_state_ir(ShadingSystem& ss, ShaderGroup& group,
+                        bool zero_derivatives, bool connected)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_geometry_state"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module       = **parsed;
+    const auto& layout = module.getDataLayout();
+    auto* sg = llvm::StructType::getTypeByName(context, "ShaderGlobals");
+    const struct {
+        unsigned index;
+        size_t offset;
+        unsigned words;
+        bool writable;
+    } fields[] = {
+        { 0, offsetof(ShaderGlobals, P), 9, true },
+        { 2, offsetof(ShaderGlobals, I), 9, true },
+        { 3, offsetof(ShaderGlobals, N), 3, true },
+        { 4, offsetof(ShaderGlobals, Ng), 3, true },
+        { 5, offsetof(ShaderGlobals, u), 3, true },
+        { 6, offsetof(ShaderGlobals, v), 3, true },
+        { 7, offsetof(ShaderGlobals, dPdu), 3, true },
+        { 8, offsetof(ShaderGlobals, dPdv), 3, true },
+        { 9, offsetof(ShaderGlobals, time), 1, false },
+        { 10, offsetof(ShaderGlobals, dtime), 1, false },
+        { 11, offsetof(ShaderGlobals, dPdtime), 3, false },
+        { 24, offsetof(ShaderGlobals, surfacearea), 1, false },
+        { 27, offsetof(ShaderGlobals, backfacing), 1, false },
+    };
+    if (!zero_derivatives) {
+        const auto* ray = module.getFunction("osl_raytype_bit");
+        OIIO_CHECK_ASSERT(ray && !ray->isDeclaration() && !ray->use_empty());
+        OIIO_CHECK_ASSERT(sg && sg->getNumElements() == 28);
+        if (!sg || sg->getNumElements() != 28)
+            return false;
+        const auto* offsets = layout.getStructLayout(sg);
+        OIIO_CHECK_EQUAL(layout.getTypeAllocSize(sg).getFixedValue(),
+                         sizeof(ShaderGlobals));
+        OIIO_CHECK_EQUAL(offsets->getElementOffset(25),
+                         offsetof(ShaderGlobals, raytype));
+        OIIO_CHECK_ASSERT(sg->getElementType(24)->isFloatTy()
+                          && sg->getElementType(25)->isIntegerTy(32)
+                          && sg->getElementType(27)->isIntegerTy(32));
+        for (const auto& field : fields) {
+            OIIO_CHECK_EQUAL(offsets->getElementOffset(field.index),
+                             field.offset);
+            OIIO_CHECK_EQUAL(
+                layout.getTypeAllocSize(sg->getElementType(field.index))
+                    .getFixedValue(),
+                field.words * sizeof(float));
+        }
+    }
+    struct Access {
+        const llvm::Instruction* instruction;
+        int64_t offset;
+        uint64_t length;
+        bool write;
+    };
+    int writers = 0, readers = 0, zero_outputs = 0;
+    for (auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0)
+            continue;
+        OIIO_CHECK_EQUAL(function.arg_size(), 6);
+        if (function.arg_size() != 6)
+            continue;
+        std::vector<Access> accesses;
+        auto access = [&](const llvm::Instruction& instruction,
+                          const llvm::Value* pointer, uint64_t length,
+                          bool write) {
+            int64_t offset = 0;
+            if (!interactive_address(pointer, function.getArg(0), layout,
+                                     offset))
+                return;
+            accesses.push_back({ &instruction, offset, length, write });
+            bool allowed = false;
+            for (const auto& field : fields)
+                allowed |= (!write || field.writable)
+                           && offset >= int64_t(field.offset)
+                           && uint64_t(offset) + length
+                                  <= field.offset + field.words * sizeof(float);
+            OIIO_CHECK_ASSERT(allowed);
+            // A derivative address must stay inside its actual SG field,
+            // not alias the next writable global.
+            const llvm::Value* base = pointer;
+            for (unsigned depth = 0; base && depth < 16; ++depth) {
+                if (const auto* cast = llvm::dyn_cast<llvm::CastInst>(base)) {
+                    base = cast->getOperand(0);
+                } else if (const auto* gep
+                           = llvm::dyn_cast<llvm::GetElementPtrInst>(base)) {
+                    if (sg && gep->getSourceElementType() == sg
+                        && gep->getNumIndices() >= 2) {
+                        const auto* index = llvm::dyn_cast<llvm::ConstantInt>(
+                            gep->getOperand(2));
+                        OIIO_CHECK_ASSERT(index
+                                          && index->getZExtValue()
+                                                 < sg->getNumElements());
+                        if (index
+                            && index->getZExtValue() < sg->getNumElements()) {
+                            const unsigned i = unsigned(index->getZExtValue());
+                            const auto start
+                                = layout.getStructLayout(sg)->getElementOffset(
+                                    i);
+                            const auto extent
+                                = layout.getTypeAllocSize(sg->getElementType(i))
+                                      .getFixedValue();
+                            OIIO_CHECK_ASSERT(offset >= int64_t(start)
+                                              && uint64_t(offset) + length
+                                                     <= start + extent);
+                        }
+                    }
+                    base = gep->getPointerOperand();
+                } else {
+                    break;
+                }
+            }
+        };
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst))
+                    access(inst, load->getPointerOperand(),
+                           layout.getTypeStoreSize(load->getType())
+                               .getFixedValue(),
+                           false);
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                    access(inst, store->getPointerOperand(),
+                           layout
+                               .getTypeStoreSize(
+                                   store->getValueOperand()->getType())
+                               .getFixedValue(),
+                           true);
+                }
+                if (const auto* copy = llvm::dyn_cast<llvm::MemTransferInst>(
+                        &inst)) {
+                    const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                        copy->getLength());
+                    OIIO_CHECK_ASSERT(length);
+                    if (!length)
+                        continue;
+                    access(inst, copy->getRawSource(), length->getZExtValue(),
+                           false);
+                    access(inst, copy->getRawDest(), length->getZExtValue(),
+                           true);
+                    if (!zero_derivatives)
+                        continue;
+                    // Prove the live output is zero, following the lowering's
+                    // unoptimized temporary stores rather than assuming folding.
+                    const auto* address = llvm::dyn_cast<llvm::IntToPtrInst>(
+                        copy->getRawDest()->stripPointerCasts());
+                    const auto* sum
+                        = address ? llvm::dyn_cast<llvm::BinaryOperator>(
+                                        address->getOperand(0))
+                                  : nullptr;
+                    bool output = false;
+                    if (sum && sum->getOpcode() == llvm::Instruction::Add)
+                        for (unsigned i = 0; i < 2; ++i)
+                            if (const auto* base
+                                = llvm::dyn_cast<llvm::PtrToIntInst>(
+                                    sum->getOperand(i)))
+                                output
+                                    |= base->getOperand(0)->stripPointerCasts()
+                                       == function.getArg(3);
+                    if (!output)
+                        continue;
+                    ++zero_outputs;
+                    OIIO_CHECK_EQUAL(length->getZExtValue(), 3 * sizeof(float));
+                    int64_t source_offset = 0;
+                    const auto* source = llvm::GetPointerBaseWithConstantOffset(
+                        copy->getRawSource(), source_offset, layout);
+                    if (const auto* global
+                        = llvm::dyn_cast<llvm::GlobalVariable>(source)) {
+                        OIIO_CHECK_ASSERT(
+                            global->hasInitializer()
+                            && global->getInitializer()->isNullValue());
+                        OIIO_CHECK_ASSERT(
+                            source_offset >= 0
+                            && uint64_t(source_offset) + length->getZExtValue()
+                                   <= layout
+                                          .getTypeAllocSize(
+                                              global->getValueType())
+                                          .getFixedValue());
+                    } else {
+                        llvm::DominatorTree dominators(function);
+                        auto last_store = [&](const llvm::Value* base,
+                                              int64_t offset,
+                                              const llvm::Instruction* before) {
+                            const llvm::StoreInst* latest = nullptr;
+                            for (const auto& candidate_block : function)
+                                for (const auto& candidate : candidate_block) {
+                                    const auto* store
+                                        = llvm::dyn_cast<llvm::StoreInst>(
+                                            &candidate);
+                                    if (!store
+                                        || !dominators.dominates(store, before))
+                                        continue;
+                                    int64_t position = 0;
+                                    const auto* target
+                                        = llvm::GetPointerBaseWithConstantOffset(
+                                            store->getPointerOperand(),
+                                            position, layout);
+                                    if (target != base || position != offset)
+                                        continue;
+                                    if (!latest
+                                        || dominators.dominates(latest, store))
+                                        latest = store;
+                                    else if (!dominators.dominates(store,
+                                                                   latest))
+                                        return static_cast<
+                                            const llvm::StoreInst*>(nullptr);
+                                }
+                            return latest;
+                        };
+                        auto zero_value = [&](auto&& self,
+                                              const llvm::Value* value,
+                                              unsigned depth) -> bool {
+                            if (depth > 128)
+                                return false;
+                            if (const auto* number
+                                = llvm::dyn_cast<llvm::ConstantFP>(value))
+                                return number->isZero();
+                            if (const auto* sum
+                                = llvm::dyn_cast<llvm::BinaryOperator>(value))
+                                return sum->getOpcode()
+                                           == llvm::Instruction::FAdd
+                                       && self(self, sum->getOperand(0),
+                                               depth + 1)
+                                       && self(self, sum->getOperand(1),
+                                               depth + 1);
+                            if (const auto* load
+                                = llvm::dyn_cast<llvm::LoadInst>(value)) {
+                                int64_t offset = 0;
+                                const auto* base
+                                    = llvm::GetPointerBaseWithConstantOffset(
+                                        load->getPointerOperand(), offset,
+                                        layout);
+                                const auto* store = last_store(base, offset,
+                                                               load);
+                                return store
+                                       && self(self, store->getValueOperand(),
+                                               depth + 1);
+                            }
+                            return false;
+                        };
+                        for (int c = 0; c < 3; ++c) {
+                            const auto* store = last_store(
+                                source, source_offset + c * int(sizeof(float)),
+                                copy);
+                            OIIO_CHECK_ASSERT(
+                                store
+                                && zero_value(zero_value,
+                                              store->getValueOperand(), 0));
+                        }
+                    }
+                }
+                if (const auto* clear = llvm::dyn_cast<llvm::MemSetInst>(
+                        &inst)) {
+                    const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                        clear->getLength());
+                    OIIO_CHECK_ASSERT(length);
+                    if (length)
+                        access(inst, clear->getRawDest(),
+                               length->getZExtValue(), true);
+                }
+            }
+        if (zero_derivatives) {
+            OIIO_CHECK_ASSERT(accesses.empty());
+            continue;
+        }
+        const bool writes = std::any_of(accesses.begin(), accesses.end(),
+                                        [](const Access& a) { return a.write; });
+        if (!writes && !connected)
+            continue;
+        if (writes) {
+            ++writers;
+        } else {
+            ++readers;
+        }
+        llvm::DominatorTree dominators(function);
+        for (const auto& field : fields) {
+            if (!writes && !field.writable)
+                continue;
+            for (unsigned c = 0; c < field.words; ++c) {
+                const auto offset = field.offset + c * sizeof(float);
+                bool read = false, write = false, read_before_write = false;
+                auto covers = [&](const Access& a) {
+                    return a.offset <= int64_t(offset)
+                           && int64_t(offset + sizeof(float))
+                                  <= a.offset + int64_t(a.length);
+                };
+                for (const auto& a : accesses) {
+                    if (!covers(a))
+                        continue;
+                    read |= !a.write;
+                    write |= a.write;
+                    if (a.write)
+                        for (const auto& b : accesses)
+                            read_before_write
+                                |= !b.write && covers(b)
+                                   && dominators.dominates(b.instruction,
+                                                           a.instruction);
+                }
+                OIIO_CHECK_ASSERT(read);
+                OIIO_CHECK_EQUAL(write, writes && field.writable);
+                if (writes && field.writable)
+                    OIIO_CHECK_ASSERT(read_before_write);
+            }
+        }
+    }
+    OIIO_CHECK_EQUAL(writers, zero_derivatives ? 0 : 1);
+    OIIO_CHECK_EQUAL(readers, connected ? 1 : 0);
+    if (zero_derivatives)
+        OIIO_CHECK_EQUAL(zero_outputs, 1);
+    return true;
+}
+
+
+
+uint32_t
+geometry_ray_bit(cspan<ustring> names, ustring name)
+{
+    OIIO_CHECK_ASSERT(names.size() <= 32);
+    if (names.size() > 32)
+        return 0;
+    for (size_t i = 0; i < names.size(); ++i)
+        if (names[i] == name || (names[i].empty() && name.empty()))
+            return uint32_t(1) << i;
+    return 0;
+}
+
+
+
+bool
+check_geometry_ray_ir(ShadingSystem& ss, ShaderGroup& group,
+                      cspan<ustring> names, bool dynamic, bool constants)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_geometry_rays"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module       = **parsed;
+    const auto* legacy = module.getFunction("osl_raytype_name");
+    OIIO_CHECK_ASSERT(!legacy || legacy->use_empty());
+    const auto* helper = module.getFunction("osl_raytype_bit");
+    OIIO_CHECK_ASSERT(helper && !helper->isDeclaration()
+                      && !helper->use_empty());
+    if (helper)
+        OIIO_CHECK_EQUAL(helper->arg_size(), 2);
+    if (!helper || helper->isDeclaration() || helper->arg_size() != 2)
+        return false;
+    OIIO_CHECK_ASSERT(helper->getReturnType()->isIntegerTy(32));
+    OIIO_CHECK_ASSERT(!helper->isVarArg());
+    OIIO_CHECK_ASSERT(helper->getArg(0)->getType()->isPointerTy()
+                      && helper->getArg(0)->getType()->getPointerAddressSpace()
+                             == 0);
+    OIIO_CHECK_ASSERT(helper->getArg(1)->getType()->isIntegerTy(32));
+    bool ray_load = false, bit_and = false;
+    for (const auto& block : *helper)
+        for (const auto& inst : block) {
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
+                int64_t offset = 0;
+                ray_load
+                    |= load->getType()->isIntegerTy(32)
+                       && interactive_address(load->getPointerOperand(),
+                                              helper->getArg(0),
+                                              module.getDataLayout(), offset)
+                       && offset == int64_t(offsetof(ShaderGlobals, raytype));
+            }
+            if (const auto* op = llvm::dyn_cast<llvm::BinaryOperator>(&inst))
+                if (op->getOpcode() == llvm::Instruction::And)
+                    for (unsigned i = 0; i < 2; ++i) {
+                        const auto* load = llvm::dyn_cast<llvm::LoadInst>(
+                            op->getOperand(i));
+                        int64_t offset = 0;
+                        bit_and
+                            |= load && load->getType()->isIntegerTy(32)
+                               && op->getOperand(1 - i) == helper->getArg(1)
+                               && interactive_address(load->getPointerOperand(),
+                                                      helper->getArg(0),
+                                                      module.getDataLayout(),
+                                                      offset)
+                               && offset
+                                      == int64_t(
+                                          offsetof(ShaderGlobals, raytype));
+                    }
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                OIIO_CHECK_ASSERT(call->getCalledFunction()
+                                  && call->getCalledFunction()->isIntrinsic());
+        }
+    OIIO_CHECK_ASSERT(ray_load && bit_and);
+    std::vector<uint32_t> masks;
+    int dynamic_calls              = 0;
+    const ustring constant_names[] = {
+        ustring("camera"),           ustring("edge31"), ustring("duplicate"),
+        ustring("hart-missing-ray"), ustring(),         ustring("")
+    };
+    for (const auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0)
+            continue;
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+                if (!call || call->getCalledFunction() != helper)
+                    continue;
+                OIIO_CHECK_EQUAL(call->arg_size(), 2);
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 helper->getCallingConv());
+                if (call->arg_size() != 2)
+                    continue;
+                OIIO_CHECK_EQUAL(call->getArgOperand(0), function.getArg(0));
+                const auto* mask = call->getArgOperand(1);
+                OIIO_CHECK_ASSERT(mask->getType()->isIntegerTy(32));
+                if (const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                        mask)) {
+                    masks.push_back(uint32_t(value->getZExtValue()));
+                    continue;
+                }
+                ++dynamic_calls;
+                const llvm::Value* selector = nullptr;
+                const llvm::Value* tail     = mask;
+                std::vector<std::pair<uint64_t, uint32_t>> choices;
+                for (size_t i = 0; i < names.size(); ++i) {
+                    const auto* select = llvm::dyn_cast<llvm::SelectInst>(tail);
+                    OIIO_CHECK_ASSERT(select);
+                    if (!select)
+                        break;
+                    const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(
+                        select->getCondition());
+                    const auto* bit = llvm::dyn_cast<llvm::ConstantInt>(
+                        select->getTrueValue());
+                    OIIO_CHECK_ASSERT(
+                        cmp && cmp->getPredicate() == llvm::CmpInst::ICMP_EQ
+                        && bit);
+                    if (!cmp || !bit)
+                        break;
+                    const auto* hash = llvm::dyn_cast<llvm::ConstantInt>(
+                        cmp->getOperand(1));
+                    const auto* name = cmp->getOperand(0);
+                    if (!hash) {
+                        hash = llvm::dyn_cast<llvm::ConstantInt>(name);
+                        name = cmp->getOperand(1);
+                    }
+                    OIIO_CHECK_ASSERT(hash && hash->getType()->isIntegerTy(64)
+                                      && name->getType()->isIntegerTy(64)
+                                      && !llvm::isa<llvm::Constant>(name));
+                    if (!hash)
+                        break;
+                    if (!selector)
+                        selector = name;
+                    OIIO_CHECK_EQUAL(name, selector);
+                    OIIO_CHECK_EQUAL(hash->getZExtValue(), names[i].hash());
+                    OIIO_CHECK_EQUAL(bit->getZExtValue(), uint32_t(1) << i);
+                    choices.emplace_back(hash->getZExtValue(),
+                                         uint32_t(bit->getZExtValue()));
+                    tail = select->getFalseValue();
+                }
+                OIIO_CHECK_EQUAL(choices.size(), names.size());
+                const auto* fallback = llvm::dyn_cast<llvm::ConstantInt>(tail);
+                OIIO_CHECK_ASSERT(fallback && fallback->isZero());
+                auto selected_bit = [&](ustring name) {
+                    for (const auto& choice : choices)
+                        if (choice.first == name.hash())
+                            return choice.second;
+                    return uint32_t(0);
+                };
+                for (ustring name : names)
+                    OIIO_CHECK_EQUAL(selected_bit(name),
+                                     geometry_ray_bit(names, name));
+                for (ustring name : constant_names) {
+                    OIIO_CHECK_EQUAL(selected_bit(name),
+                                     geometry_ray_bit(names, name));
+                    OIIO_CHECK_EQUAL(selected_bit(name),
+                                     uint32_t(ss.raytype_bit(name)));
+                }
+            }
+    }
+    OIIO_CHECK_EQUAL(dynamic_calls > 0, dynamic);
+    if (constants) {
+        for (ustring name : constant_names)
+            OIIO_CHECK_ASSERT(std::find(masks.begin(), masks.end(),
+                                        geometry_ray_bit(names, name))
+                              != masks.end());
+        for (uint32_t mask : masks)
+            OIIO_CHECK_ASSERT(
+                std::any_of(std::begin(constant_names),
+                            std::end(constant_names), [&](ustring name) {
+                                return mask == geometry_ray_bit(names, name);
+                            }));
+    } else {
+        // Dynamic fixtures also query the literal empty name in the same
+        // module, so both lowering paths must select the first empty slot.
+        OIIO_CHECK_ASSERT(!masks.empty());
+        for (uint32_t mask : masks)
+            OIIO_CHECK_EQUAL(mask, geometry_ray_bit(names, ustring()));
+    }
+    return true;
+}
+
+
+
+bool
+check_geometry_state_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_geometry_state(output float value=0,output color Cout=0) { "
+        "float uu=2*u+v, vv=v-0.5*u; u=uu; v=vv; "
+        "P=P+vector(u,v,u*v)+dPdtime*(time+dtime); P[2]+=u*v; I=I+vector(P); "
+        "N=N+normal(u,v,1)+normal(backfacing(),surfacearea(),raytype(\"camera\")); "
+        "Ng=Ng+normal(v,u,2); "
+        "dPdu=dPdu+vector(N)+vector(P); dPdv=dPdv+vector(Ng)+I; "
+        "vector dxP=Dx(P),dyP=Dy(P),dxI=Dx(I),dyI=Dy(I); "
+        "value=u; float sum=u+v+P[0]+P[1]+P[2]+I[0]+I[1]+I[2]"
+        "+N[0]+N[1]+N[2]+Ng[0]+Ng[1]+Ng[2]"
+        "+dPdu[0]+dPdu[1]+dPdu[2]+dPdv[0]+dPdv[1]+dPdv[2]"
+        "+time+dtime+dPdtime[0]+dPdtime[1]+dPdtime[2]"
+        "+backfacing()+surfacearea()+raytype(\"camera\"); "
+        "Cout=color(sum,Dx(u)+Dy(u)+Dx(v)+Dy(v)"
+        "+dxP[0]+dxP[1]+dxP[2]+dyP[0]+dyP[1]+dyP[2],"
+        "dxI[0]+dxI[1]+dxI[2]+dyI[0]+dyI[1]+dyI[2]); }",
+        "shader hart_geometry_state_consumer(float value=0,output color Cout=0) { "
+        "Cout=color(value+u+v)+color(P)+color(I)+color(N)+color(Ng)"
+        "+color(dPdu)+color(dPdv)+color(Dx(P))+color(Dy(P))"
+        "+color(Dx(I))+color(Dy(I))"
+        "+color(Dx(u)+Dy(u)+Dx(v)+Dy(v)+Dx(value)+Dy(value)); }",
+        "shader hart_geometry_zero_derivs(output color Cout=1) { "
+        "Cout=color(Dx(time)+Dy(time)+Dx(dtime)+Dy(dtime))"
+        "+color(Dx(dPdtime)+Dy(dPdtime)+Dx(N)+Dy(N)"
+        "+Dx(Ng)+Dy(Ng)+Dx(dPdu)+Dy(dPdu)+Dx(dPdv)+Dy(dPdv)); }",
+        "shader hart_geometry_ray_producer(output string value=\"\") { "
+        "string names[5]={\"camera\",\"edge31\",\"duplicate\","
+        "\"hart-missing-ray\",\"\"}; value=names[min(4,max(0,int(5*u)))]; }",
+        "shader hart_geometry_ray_consumer(string value=\"\",output color Cout=0) { "
+        "Cout=color(raytype(value),backfacing(),surfacearea()+raytype(\"\")); }",
+        "shader hart_geometry_ray_dynamic(output color Cout=0) { "
+        "string names[5]={\"camera\",\"edge31\",\"duplicate\","
+        "\"hart-missing-ray\",\"\"}; "
+        "Cout=color(raytype(names[min(4,max(0,int(5*u)))]),"
+        "backfacing(),surfacearea()+raytype(\"\")); }",
+        "shader hart_geometry_ray_constant(output color Cout=0) { "
+        "Cout=color(raytype(\"camera\")+2*raytype(\"edge31\"),"
+        "raytype(\"duplicate\")+2*raytype(\"hart-missing-ray\"),"
+        "raytype(\"\")); }",
+        "shader hart_geometry_plain(output color Cout=0) { Cout=color(u,v,u*v); }",
+    };
+    std::string bytecode[std::size(sources)];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], bytecode[i], { }, stdosl))
+            return false;
+    }
+    const struct {
+        int osl, llvm;
+        bool connected, local, zero;
+    } states[] = {
+        { 0, 10, false, false, false }, { 2, 10, false, true, false },
+        { 2, 3, false, true, false },   { 0, 10, true, false, false },
+        { 2, 10, true, true, false },   { 2, 3, true, true, false },
+        { 2, 10, false, true, true },
+    };
+    const ustring entries[] = { ustring("producer"), ustring("consumer") };
+    for (const auto& test : states) {
+        HartGeometryServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", test.osl));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", test.llvm));
+        OIIO_CHECK_ASSERT(ss.attribute("lazyglobals", 1));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", test.local ? 4096 : 0));
+        auto group = test.connected
+                         ? make_connected_group(ss, bytecode[0], bytecode[1])
+                         : make_group(ss, bytecode[test.zero ? 2 : 0]);
+        if (test.connected) {
+            // OSL O2 may alias value directly to u and remove the connection's
+            // lazy call. Global side effects therefore need explicit entries.
+            OIIO_CHECK_ASSERT(ss.attribute(group.get(), "entry_layers",
+                                           TypeDesc(TypeDesc::STRING, 2),
+                                           entries));
+            check_hart_entry_selection(ss, *group, entries, entries);
+        }
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Geometry state: {}\n", errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        if (test.connected) {
+            OIIO_CHECK_ASSERT(check_hart_entry_module(ss, *group, arch,
+                                                      test.llvm, entries,
+                                                      test.local, false));
+            check_hart_entry_selection(ss, *group, entries, entries);
+        } else {
+            check_module(
+                ss, *group, arch,
+                test.zero
+                    ? std::initializer_list<string_view> { }
+                    : std::initializer_list<string_view> { "osl_raytype_bit" },
+                test.llvm);
+        }
+        int allocated = -1, group_size = 0;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", group_size));
+        OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, test.local ? group_size : 0);
+        if (test.llvm == 10)
+            OIIO_CHECK_ASSERT(
+                check_geometry_state_ir(ss, *group, test.zero, test.connected));
+    }
+    const ustring defaults[] = {
+        ustring("camera"),     ustring("shadow"),      ustring("reflection"),
+        ustring("refraction"), ustring("diffuse"),     ustring("glossy"),
+        ustring("subsurface"), ustring("displacement")
+    };
+    const ustring empty_names[] = { ustring(), ustring("") };
+    OIIO_CHECK_ASSERT(empty_names[0].empty() && empty_names[1].empty());
+    OIIO_CHECK_ASSERT(!empty_names[0].c_str() && empty_names[1].c_str());
+    for (ustring name : empty_names)
+        OIIO_CHECK_EQUAL(name.hash(), uint64_t(0));
+    std::vector<ustring> custom;
+    for (int i = 0; i < 32; ++i)
+        custom.emplace_back(fmtformat("hart-ray-{}", i));
+    custom[0] = ustring("camera");
+    custom[1] = custom[7] = ustring("duplicate");
+    // Exercise both orders without changing the first empty-name bit.
+    custom[12] = empty_names[1];
+    custom[19] = empty_names[0];
+    custom[31] = ustring("edge31");
+    const struct {
+        int osl, llvm;
+        bool custom, connected, local, constant;
+        bool null_first = false;
+    } rays[] = {
+        { 0, 10, false, false, false, false },
+        { 2, 3, false, false, true, false },
+        { 0, 10, true, false, false, false },
+        { 2, 3, true, false, true, false, true },
+        { 2, 10, true, true, true, false, true },
+        { 0, 10, false, false, false, true },
+        { 2, 10, true, false, true, true },
+    };
+    for (const auto& test : rays) {
+        HartGeometryServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", test.osl));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", test.llvm));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", test.local ? 4096 : 0));
+        OIIO_CHECK_ASSERT(ss.attribute("error_repeats", 1));
+        auto configured = custom;
+        if (test.null_first)
+            std::swap(configured[12], configured[19]);
+        const cspan<ustring> names = test.custom ? cspan<ustring>(configured)
+                                                 : cspan<ustring>(defaults);
+        std::vector<const char*> strings;
+        for (ustring name : names)
+            strings.push_back(name.c_str());
+        if (test.custom)
+            OIIO_CHECK_ASSERT(
+                ss.attribute("raytypes",
+                             TypeDesc(TypeDesc::STRING, int(strings.size())),
+                             strings.data()));
+        auto unchanged = [&]() {
+            for (ustring name : names)
+                OIIO_CHECK_EQUAL(uint32_t(ss.raytype_bit(name)),
+                                 geometry_ray_bit(names, name));
+            OIIO_CHECK_EQUAL(ss.raytype_bit(ustring("hart-missing-ray")), 0);
+            for (ustring empty : empty_names)
+                OIIO_CHECK_EQUAL(uint32_t(ss.raytype_bit(empty)),
+                                 test.custom ? uint32_t(1) << 12 : 0);
+            if (test.custom)
+                OIIO_CHECK_EQUAL(ss.raytype_bit(ustring("duplicate")), 2);
+        };
+        unchanged();
+        if (test.custom && test.osl == 0) {
+            auto too_many = strings;
+            too_many.push_back("hart-overflow-ray");
+            const struct {
+                TypeDesc type;
+                const void* data;
+            } invalid[] = {
+                { TypeDesc(TypeDesc::STRING, 33), too_many.data() },
+                { TypeDesc(TypeDesc::STRING, -1), strings.data() },
+                { TypeDesc(TypeDesc::STRING, TypeDesc::VEC3, 2),
+                  strings.data() },
+                { TypeDesc(TypeDesc::STRING, 32), nullptr },
+                { TypeString, nullptr },
+            };
+            for (const auto& bad : invalid) {
+                const int before = errors.errors;
+                OIIO_CHECK_ASSERT(
+                    !ss.attribute("raytypes", bad.type, bad.data));
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+                    errors.last_error,
+                    "raytypes requires at most 32 string names"));
+                unchanged();
+            }
+            for (ustring single : { ustring("hart-single-ray"), empty_names[0],
+                                    empty_names[1] }) {
+                const char* value = single.c_str();
+                OIIO_CHECK_ASSERT(ss.attribute("raytypes", TypeString, &value));
+                OIIO_CHECK_EQUAL(ss.raytype_bit(single), 1);
+                for (ustring empty : empty_names)
+                    OIIO_CHECK_EQUAL(ss.raytype_bit(empty),
+                                     single.empty() ? 1 : 0);
+                OIIO_CHECK_EQUAL(ss.raytype_bit(ustring("camera")), 0);
+                OIIO_CHECK_EQUAL(ss.raytype_bit(ustring("edge31")), 0);
+            }
+            OIIO_CHECK_ASSERT(ss.attribute("raytypes",
+                                           TypeDesc(TypeDesc::STRING, 32),
+                                           strings.data()));
+            unchanged();
+            OIIO_CHECK_EQUAL(errors.errors, std::size(invalid));
+        }
+        const int before = errors.errors;
+        auto group = test.connected
+                         ? make_connected_group(ss, bytecode[3], bytecode[4])
+                         : make_group(ss, bytecode[test.constant ? 6 : 5]);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors != before)
+            print(stderr, "Geometry raytype: {}\n", errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, before);
+        if (!test.constant) {
+            // All three queries are live; no known ray masks are supplied.
+            int count              = 0;
+            const ustring* globals = nullptr;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "num_globals_needed", count));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "globals_needed",
+                                              TypeDesc::PTR, &globals));
+            OIIO_CHECK_ASSERT(globals && count >= 3);
+            if (globals && count >= 3)
+                for (ustring name : { ustring("raytype"), ustring("backfacing"),
+                                      ustring("surfacearea") })
+                    OIIO_CHECK_ASSERT(std::find(globals, globals + count, name)
+                                      != globals + count);
+        }
+        check_module(ss, *group, arch, { "osl_raytype_bit" }, test.llvm,
+                     test.connected, false, false, test.connected ? 2 : 0);
+        int allocated = -1, group_size = 0;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", group_size));
+        OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, test.local ? group_size : 0);
+        if (test.llvm == 10)
+            OIIO_CHECK_ASSERT(check_geometry_ray_ir(ss, *group, names,
+                                                    !test.constant,
+                                                    test.constant));
+    }
+    const struct {
+        const char* body;
+        const char* diagnostic;
+        bool geometry;
+    } negatives[] = {
+        { "Cout=color(raytype(\"camera\"));",
+          "renderer lacks HARTGeometry for 'raytype'", false },
+        { "Cout=color(backfacing());",
+          "renderer lacks HARTGeometry for 'backfacing'", false },
+        { "Cout=color(surfacearea());",
+          "renderer lacks HARTGeometry for 'surfacearea'", false },
+        { "Cout=color(dtime);", "unsupported shader global 'dtime'", false },
+        { "Cout=color(dPdtime);", "unsupported shader global 'dPdtime'", false },
+        { "N=normal(u,v,1);", "writing shader global 'N'", false },
+        { "P[0]=u;", "writing shader global 'P'", false },
+        { "time=u;", "writing shader global 'time'", true },
+        { "dtime=u;", "writing shader global 'dtime'", true },
+        { "dPdtime=vector(P);", "writing shader global 'dPdtime'", true },
+        { "Cout=color(Ps);", "unsupported shader global 'Ps'", true },
+        { "Ps=P;", "writing shader global 'Ps'", true },
+    };
+    for (const auto& test : negatives) {
+        OSLCompiler compiler;
+        std::string bad;
+        if (!compiler.compile_buffer(
+                fmtformat("shader hart_geometry_rejected(int enable=0,"
+                          "output color Cout=0) {{ if(enable) {{ {} }} }}",
+                          test.body),
+                bad, { }, stdosl))
+            return false;
+        for (bool unused : { false, true }) {
+            HartGeometryServices renderer(test.geometry);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+            OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", 10));
+            OIIO_CHECK_ASSERT(ss.attribute("lazyunconnected", 1));
+            OIIO_CHECK_ASSERT(ss.attribute("lazyglobals", 1));
+            ShaderGroupRef group;
+            if (!unused) {
+                group = make_group(ss, bad);
+            } else {
+                OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_bad", bad));
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_plain", bytecode[7]));
+                group = ss.ShaderGroupBegin("hart_geometry_rejected_group");
+                OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_bad", "unused"));
+                OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_plain", "last"));
+                OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+                const SymLocationDesc output("last.Cout", TypeColor, false,
+                                             SymArena::Outputs, 0,
+                                             3 * sizeof(float));
+                ss.add_symlocs(group.get(), { &output, 1 });
+            }
+            check_rejected_group(ss, *group, errors, test.diagnostic);
+        }
+    }
+    return true;
+}
+
+
+
+bool
 check_geometry_modules(string_view arch, string_view stdosl)
 {
     const char* sources[] = {
@@ -9406,6 +10281,7 @@ main(int argc, char* argv[])
         || !check_matrix_modules(arch, argv[2])
         || !check_space_modules(arch, argv[2])
         || !check_geometry_modules(arch, argv[2])
+        || !check_geometry_state_modules(arch, argv[2])
         || !check_texture_modules(arch, argv[2]))
         return 1;
     return unit_test_failures;
