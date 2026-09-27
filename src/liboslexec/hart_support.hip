@@ -7,6 +7,17 @@
 
 #include <OSL/oslconfig.h>
 
+extern "C" __device__ bool
+rs_hart_get_userdata(void* ec, int shade_index, OSL::ustringhash_pod name,
+                     long long type, bool derivatives, void* data);
+
+extern "C" __device__ bool
+osl_hart_get_userdata(void* ec, int shade_index, OSL::ustringhash_pod name,
+                      long long type, bool derivatives, void* data)
+{ return rs_hart_get_userdata(ec, shade_index, name, type, derivatives, data); }
+
+
+
 extern "C" __device__ void
 rs_hart_diagnostic(void* ec, OSL::ustringhash_pod format, int count,
                    const unsigned char* types, int bytes,

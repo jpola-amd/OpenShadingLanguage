@@ -853,6 +853,13 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
         symloc = group().find_symloc(sym.name(), inst()->layername(),
                                      SymArena::UserData);
         if (symloc) {
+            if (use_hart()) {
+                shadingcontext()->errorfmt(
+                    "HART userdata pre-placement is unsupported; use renderer "
+                    "table bindings");
+                m_llvm_codegen_failed = true;
+                return;
+            }
             // We had a userdata pre-placement record for this variable.
             // Just copy from the correct offset location!
 
@@ -870,9 +877,11 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
             if (sym.has_derivs() && !symloc->derivs)
                 ll.op_memset(ll.offset_ptr(dstptr, size), 0, 2 * size);
         } else if (renderer()->supports("build_interpolated_getter")) {
+            const bool userdata_derivs
+                = group().m_userdata_derivs[userdata_index];
             InterpolatedGetterSpec spec;
             renderer()->build_interpolated_getter(group(), symname, type,
-                                                  sym.has_derivs(), spec);
+                                                  userdata_derivs, spec);
             if (!spec.function_name().empty()) {
                 std::vector<llvm::Value*> args;
                 args.reserve(spec.arg_count() + 1);
@@ -891,7 +900,7 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
                             args.push_back(shadeindex());
                             break;
                         case InterpolatedSpecBuiltinArg::Derivatives:
-                            args.push_back(ll.constant_bool(sym.has_derivs()));
+                            args.push_back(ll.constant_bool(userdata_derivs));
                             break;
                         case InterpolatedSpecBuiltinArg::Type:
                             args.push_back(ll.constant(type));
@@ -2207,7 +2216,9 @@ BackendLLVM::run()
 #else
         if (use_hart()) {
 #    if OSL_USE_HART
-            if (!group().m_userdata_names.empty()) {
+            if (!group().m_userdata_names.empty()
+                && (!renderer()->supports("HARTUserdata")
+                    || !renderer()->supports("build_interpolated_getter"))) {
                 shadingcontext()->errorfmt(
                     "HART does not yet support interpolated userdata");
                 return;

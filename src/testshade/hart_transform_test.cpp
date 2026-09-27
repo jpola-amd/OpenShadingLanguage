@@ -828,6 +828,141 @@ run_outputs(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 
 
 
+bool
+run_userdata(string_view stdosl, string_view mode, Diagnostics& diagnostics)
+{
+    OutputFiles files;
+    if (!files.create(diagnostics))
+        return false;
+    std::string arch;
+    auto renderer = testshade_hart_renderer(0, arch);
+    if (!renderer)
+        return false;
+    renderer->errhandler().verbosity(ErrorHandler::VERBOSE);
+    ShadingSystem ss(renderer.get(), nullptr, &diagnostics);
+    renderer->init_shadingsys(&ss);
+    if (!ss.attribute("hart_arch", arch)
+        || !ss.attribute("llvm_debugging_symbols", 0)
+        || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? 1048576 : 0)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+        || !ss.attribute("optimize", mode == "unoptimized" ? 0 : 2))
+        return false;
+    const char* sources[] = {
+        "shader hart_ud_p(float field=2 [[int interpolated=1]],"
+        "output float value=0) { value=field; }",
+        "shader hart_ud_c(float value=0, float field=7 [[int interpolated=1]],"
+        "output color Cout=0) { Cout=color(value+field,Dx(field),Dy(field)); }"
+    };
+    for (int i = 0; i < 2; ++i) {
+        OSLCompiler compiler(&diagnostics);
+        std::string oso;
+        if (!compiler.compile_buffer(sources[i], oso, { }, stdosl)
+            || !ss.LoadMemoryCompiledShader(i ? "hart_ud_c" : "hart_ud_p", oso))
+            return false;
+    }
+    auto group = ss.ShaderGroupBegin("hart_userdata_rebind");
+    if (!group || !ss.Shader("surface", "hart_ud_p", "producer")
+        || !ss.Shader("surface", "hart_ud_c", "consumer")
+        || !ss.ConnectShaders("producer", "value", "consumer", "value")
+        || !ss.ShaderGroupEnd())
+        return false;
+    const SymLocationDesc output("consumer.Cout", TypeColor, false,
+                                 SymArena::Outputs, 0, 12);
+    ss.add_symlocs(group.get(), { &output, 1 });
+    ss.optimize_group(group.get(), nullptr);
+    std::string original;
+    const void* original_address = nullptr;
+    if (!artifact(ss, *group, original, original_address, diagnostics))
+        return false;
+    constexpr size_t count = width * height;
+    std::array<std::array<float, 4>, count> data;
+    std::array<uint8_t, count> present;
+    HartOptions options;
+    options.fused = mode == "fused" || mode == "fused-local";
+    const HartUserdataBinding binding {
+        "field",
+        TypeFloat,
+        true,
+        sizeof(data[0]),
+        { reinterpret_cast<const std::byte*>(data.data()), sizeof(data) },
+        present
+    };
+    options.userdata_bindings = { binding };
+    const Matrix44 identity;
+    std::array<std::vector<float>, 3> images;
+    for (int pass = 0; pass < 3; ++pass) {
+        for (size_t i = 0; i < count; ++i) {
+            const float n = float(i + 1);
+            data[i] = pass == 1
+                          ? std::array<float, 4> { 20 - n, -.5f * n, .75f * n,
+                                                   999 }
+                          : std::array<float, 4> { n, .25f * n, -.5f * n, 999 };
+            present[i] = i % 3 != size_t(pass == 1);
+        }
+        print("HART userdata pass {}\n", pass);
+        std::fflush(stdout);
+        if (!testshade_hart_generated(*renderer, ss, *group, options, arch,
+                                      width, height, 1, false, true, 0, false,
+                                      files.files[pass], "float", identity,
+                                      identity))
+            return false;
+        OIIO::ImageBuf image(files.files[pass]);
+        if (!image.read(0, 0, true, TypeFloat) || image.nchannels() != 3
+            || image.spec().width != width || image.spec().height != height) {
+            diagnostics.errorfmt("Invalid userdata output: {}",
+                                 image.geterror());
+            return false;
+        }
+        images[pass].resize(count * 3);
+        if (!image.get_pixels(image.roi(), TypeFloat, images[pass].data())) {
+            diagnostics.errorfmt("Cannot read userdata output: {}",
+                                 image.geterror());
+            return false;
+        }
+        for (size_t i = 0; i < count; ++i)
+            for (int c = 0; c < 3; ++c) {
+                const float expected = present[i] ? data[i][c] * (c ? 1 : 2)
+                                                  : (c ? 0.0f : 9.0f);
+                OIIO_CHECK_EQUAL(images[pass][3 * i + c], expected);
+            }
+        std::string current;
+        const void* address = nullptr;
+        if (!artifact(ss, *group, current, address, diagnostics))
+            return false;
+        OIIO_CHECK_EQUAL(current, original);
+        OIIO_CHECK_EQUAL(address, original_address);
+    }
+    OIIO_CHECK_ASSERT(images[0] != images[1] && images[0] == images[2]);
+    for (int invalid = 0; invalid < 7; ++invalid) {
+        present[0]                = 0;
+        options.userdata_bindings = { binding };
+        auto& entry               = options.userdata_bindings[0];
+        if (invalid == 0)
+            entry.data = { binding.data.data(), sizeof(float) };
+        else if (invalid == 1)
+            entry.stride = sizeof(float);
+        else if (invalid == 2)
+            entry.present = { present.data(), 1 };
+        else if (invalid == 3)
+            entry.type = TypeString;
+        else if (invalid == 4)
+            entry.type = TypeDesc(TypeDesc::BASETYPE(255));
+        else if (invalid == 5)
+            present[0] = 2;
+        else
+            options.userdata_bindings.push_back(binding);
+        OIIO_CHECK_ASSERT(
+            !testshade_hart_generated(*renderer, ss, *group, options, arch,
+                                      width, height, 1, false, true, 0, false,
+                                      "null", "float", identity, identity));
+    }
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
 }  // namespace
 
 
@@ -838,20 +973,24 @@ main(int argc, char* argv[])
     const bool color = argc == 4 && string_view(argv[3]) == "color";
     const bool outputs = argc == 4 && string_view(argv[3]) == "outputs";
     const bool interactive = argc == 4 && string_view(argv[3]) == "interactive";
+    const bool userdata    = argc == 4 && string_view(argv[3]) == "userdata";
     const string_view mode(argc >= 3 ? argv[2] : "split");
-    if ((argc != 2 && argc != 3 && !color && !outputs && !interactive)
+    if ((argc != 2 && argc != 3 && !color && !outputs && !interactive
+         && !userdata)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
-            && !((color || outputs || interactive) && mode == "unoptimized"))) {
+            && !((color || outputs || interactive || userdata)
+                 && mode == "unoptimized"))) {
         print(
             stderr,
             "Usage: hart_transform_test stdosl.h "
-            "[split|fused|fused-local|unoptimized] [color|outputs|interactive]\n");
+            "[split|fused|fused-local|unoptimized] [color|outputs|interactive|userdata]\n");
         return 1;
     }
     Diagnostics diagnostics;
     OIIO_CHECK_ASSERT(
-        outputs ? run_outputs(argv[1], mode, diagnostics)
-                : run(argv[1], mode, color, interactive, diagnostics));
+        userdata  ? run_userdata(argv[1], mode, diagnostics)
+        : outputs ? run_outputs(argv[1], mode, diagnostics)
+                  : run(argv[1], mode, color, interactive, diagnostics));
     OIIO_CHECK_EQUAL(diagnostics.errors, 0);
     OIIO_CHECK_EQUAL(diagnostics.warnings, 0);
     return unit_test_failures;

@@ -26,7 +26,22 @@ enum HartDeviceError : unsigned int {
     HartInvalidNoiseArguments       = 1024,
     HartDiagnosticOverflow          = 2048,
     HartInvalidDiagnostic           = 4096,
-    HartShaderError                 = 8192
+    HartShaderError                 = 8192,
+    HartInvalidUserdata             = 16384
+};
+
+struct HartUserdataDesc {
+    uint64_t name, type;
+    uint64_t offset, stride, presence;
+    uint32_t size, derivatives;
+};
+
+struct HartUserdataState {
+    const HartUserdataDesc* entries;
+    uint64_t count;
+    const unsigned char* data;
+    uint64_t bytes, points;
+    uint32_t grid_defaults, reserved;
 };
 
 // Texture IDs are one-based indices into the launch-time descriptor table.
@@ -41,11 +56,13 @@ struct HartTextureState {
     unsigned int* errors;
     const void* colorsystem;
     OSL::HartDiagnosticBuffer* diagnostics;
+    const HartUserdataState* userdata;
 };
 
 static_assert(
     sizeof(void*) == 8 && sizeof(HartTextureDesc) == 24
-        && sizeof(HartTextureState) == 40,
+        && sizeof(HartTextureState) == 48 && sizeof(HartUserdataDesc) == 48
+        && sizeof(HartUserdataState) == 48,
     "The HART texture ABI requires 64-bit pointers and fixed record sizes");
 static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureDesc, width) == 8
@@ -56,12 +73,17 @@ static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureState, count) == 8
                   && offsetof(HartTextureState, errors) == 16
                   && offsetof(HartTextureState, colorsystem) == 24
-                  && offsetof(HartTextureState, diagnostics) == 32,
+                  && offsetof(HartTextureState, diagnostics) == 32
+                  && offsetof(HartTextureState, userdata) == 40,
               "Unexpected HART texture ABI offsets");
 static_assert(std::is_trivial<HartTextureDesc>::value
                   && std::is_standard_layout<HartTextureDesc>::value
                   && std::is_trivial<HartTextureState>::value
-                  && std::is_standard_layout<HartTextureState>::value,
+                  && std::is_standard_layout<HartTextureState>::value
+                  && std::is_trivial<HartUserdataDesc>::value
+                  && std::is_standard_layout<HartUserdataDesc>::value
+                  && std::is_trivial<HartUserdataState>::value
+                  && std::is_standard_layout<HartUserdataState>::value,
               "HART texture records must be POD");
 
 }  // namespace testshade

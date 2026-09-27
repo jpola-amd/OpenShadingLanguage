@@ -6,8 +6,8 @@
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
-// diagnostics, interactive uploads, linked shadeops, control flow, HART
-// provenance, and rejection of unsupported operations.
+// diagnostics, interactive uploads, userdata caching, linked shadeops, control
+// flow, HART provenance, and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -25,6 +25,8 @@
 #include <OSL/rendererservices.h>
 #include <OSL/shaderglobals.h>
 
+#include "../testshade/hartgeneratedparams.h"
+#include "../testshade/hartrenderstate.h"
 #include "hart_bitcode.h"
 #include "oslexec_pvt.h"
 #include "opcolor.h"
@@ -229,6 +231,48 @@ public:
     size_t requested_size = 0;
     std::unique_ptr<uint8_t[]> storage;
     std::vector<Copy> copies;
+};
+
+
+
+class HartUserdataServices final : public RendererServices {
+public:
+    int supports(string_view feature) const override
+    {
+        return feature == "HART" || feature == "HARTArrayBounds"
+               || feature == "HARTInteractive" || feature == "HARTClosures"
+               || (getter && feature == "build_interpolated_getter")
+               || (userdata && feature == "HARTUserdata");
+    }
+    void build_interpolated_getter(const ShaderGroup&, const ustring& name,
+                                   TypeDesc type, bool derivatives,
+                                   InterpolatedGetterSpec& spec) override
+    {
+        requests.push_back({ name, type, derivatives });
+        if (!missing_spec)
+            spec.set(ustring("osl_hart_get_userdata"),
+                     InterpolatedSpecBuiltinArg::OpaqueExecutionContext,
+                     InterpolatedSpecBuiltinArg::ShadeIndex,
+                     InterpolatedSpecBuiltinArg::ParamName,
+                     InterpolatedSpecBuiltinArg::Type,
+                     InterpolatedSpecBuiltinArg::Derivatives);
+    }
+    bool get_userdata(bool, ustringhash, TypeDesc, ShaderGlobals*,
+                      void*) override
+    {
+        ++host_lookups;
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+
+    struct Request {
+        ustring name;
+        TypeDesc type;
+        bool derivatives;
+    };
+    bool userdata = true, getter = true, missing_spec = false;
+    int host_lookups = 0;
+    std::vector<Request> requests;
 };
 
 
@@ -938,6 +982,36 @@ check_color_layout(string_view arch, string_view filename)
     const auto& layout = module.getDataLayout();
     OIIO_CHECK_EQUAL(layout.getAllocaAddrSpace(), 5);
     OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
+    auto renderer_record = [&](const char* name, uint64_t size,
+                               std::initializer_list<uint64_t> offsets) {
+        const auto* object = module.getNamedGlobal(name);
+        OIIO_CHECK_ASSERT(object && object->isDeclaration()
+                          && !object->use_empty());
+        if (!object)
+            return;
+        auto* record = llvm::dyn_cast<llvm::StructType>(object->getValueType());
+        OIIO_CHECK_ASSERT(record && !record->isOpaque()
+                          && record->getNumElements() == offsets.size());
+        if (!record || record->isOpaque()
+            || record->getNumElements() != offsets.size())
+            return;
+        OIIO_CHECK_EQUAL(object->getAddressSpace(), 1);
+        OIIO_CHECK_EQUAL(layout.getTypeAllocSize(record).getFixedValue(), size);
+        OIIO_CHECK_EQUAL(layout.getABITypeAlign(record).value(), 8);
+        const auto* fields = layout.getStructLayout(record);
+        unsigned index     = 0;
+        for (uint64_t offset : offsets)
+            OIIO_CHECK_EQUAL(fields->getElementOffset(index++), offset);
+    };
+    renderer_record("osl_hart_texture_abi_probe",
+                    sizeof(testshade::HartTextureState),
+                    { 0, 8, 16, 24, 32, 40 });
+    renderer_record("osl_hart_userdata_abi_probe",
+                    sizeof(testshade::HartUserdataState),
+                    { 0, 8, 16, 24, 32, 40, 44 });
+    renderer_record("osl_hart_userdata_desc_abi_probe",
+                    sizeof(testshade::HartUserdataDesc),
+                    { 0, 8, 16, 24, 32, 40, 44 });
     const uint64_t target_size  = layout.getTypeAllocSize(type).getFixedValue();
     const uint64_t target_align = layout.getABITypeAlign(type).value();
     const unsigned int last     = type->getNumElements() - 1;
@@ -1087,6 +1161,11 @@ check_color_layout(string_view arch, string_view filename)
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_color_abi_address"));
     OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_diagnostic_abi_probe"));
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_diagnostic_abi_address"));
+    OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_texture_abi_probe"));
+    OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_userdata_abi_probe"));
+    OIIO_CHECK_ASSERT(
+        !shadeops.getNamedGlobal("osl_hart_userdata_desc_abi_probe"));
+    OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_userdata_abi_addresses"));
     int setters = 0;
     for (const auto& setter : shadeops) {
         if (setter.getName().find("11ColorSystem14set_colorspace")
@@ -1192,6 +1271,8 @@ check_diagnostic_abi(llvm::Module& module, int optimize,
             if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
                 if (call->getCalledFunction() == callback) {
                     ++forwards;
+                    OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                     callback->getCallingConv());
                     OIIO_CHECK_EQUAL(call->arg_size(), signature.size());
                     OIIO_CHECK_EQUAL(call->getCallingConv(),
                                      callback->getCallingConv());
@@ -4585,6 +4666,875 @@ check_interactive_modules(string_view arch, string_view stdosl)
         OIIO_CHECK_EQUAL(renderer.copies.size(), 0);
         OIIO_CHECK_EQUAL(renderer.frees, 0);
         OIIO_CHECK_ASSERT(!renderer.storage);
+    }
+    return true;
+}
+
+
+
+void
+check_userdata_host_layout()
+{
+    using namespace testshade;
+    OIIO_CHECK_EQUAL(sizeof(HartTextureState), 48);
+    OIIO_CHECK_EQUAL(alignof(HartTextureState), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, textures), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, count), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, errors), 16);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, colorsystem), 24);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, diagnostics), 32);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, userdata), 40);
+    OIIO_CHECK_ASSERT((std::is_same<decltype(HartTextureState::userdata),
+                                    const HartUserdataState*>::value));
+    OIIO_CHECK_EQUAL(sizeof(HartUserdataDesc), 48);
+    OIIO_CHECK_EQUAL(alignof(HartUserdataDesc), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, name), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, type), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, offset), 16);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, stride), 24);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, presence), 32);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, size), 40);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataDesc, derivatives), 44);
+    OIIO_CHECK_EQUAL(sizeof(HartUserdataState), 48);
+    OIIO_CHECK_EQUAL(alignof(HartUserdataState), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, entries), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, count), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, data), 16);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, bytes), 24);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, points), 32);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, grid_defaults), 40);
+    OIIO_CHECK_EQUAL(offsetof(HartUserdataState, reserved), 44);
+    OIIO_CHECK_EQUAL(sizeof(HartRenderState), 16);
+    OIIO_CHECK_EQUAL(alignof(HartRenderState), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartRenderState, textures), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartRenderState, closure_pool), 8);
+    OIIO_CHECK_EQUAL(sizeof(HartGeneratedParams), 80);
+    OIIO_CHECK_EQUAL(alignof(HartGeneratedParams), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, output), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, scratch), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, group_stride), 16);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, scratch_bytes), 24);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, point_count), 32);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, raytype), 40);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, textures), 48);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, transforms), 56);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, closure_capacity), 64);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, interactive), 72);
+}
+
+
+
+bool
+check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
+                  cspan<HartUserdataServices::Request> requests, bool connected,
+                  bool lazy, bool missing_spec)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_userdata"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module       = **parsed;
+    const auto& layout = module.getDataLayout();
+    OIIO_CHECK_ASSERT(layout.isLittleEndian());
+    int count               = 0;
+    const ustring* names    = nullptr;
+    const TypeDesc* types   = nullptr;
+    const int* offsets      = nullptr;
+    const char* derivatives = nullptr;
+    OIIO_CHECK_ASSERT(ss.getattribute(&group, "num_userdata", count));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "userdata_names", TypeDesc::PTR, &names));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "userdata_types", TypeDesc::PTR, &types));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "userdata_offsets", TypeDesc::PTR, &offsets));
+    OIIO_CHECK_ASSERT(ss.getattribute(&group, "userdata_derivs", TypeDesc::PTR,
+                                      &derivatives));
+    OIIO_CHECK_ASSERT(count > 0 && names && types && offsets && derivatives);
+    if (count <= 0 || !names || !types || !offsets || !derivatives)
+        return false;
+    auto* storage = llvm::StructType::getTypeByName(context, "Groupdata");
+    OIIO_CHECK_ASSERT(storage
+                      && storage->getNumElements() >= unsigned(2 + count));
+    if (!storage || storage->getNumElements() < unsigned(2 + count))
+        return false;
+    const auto* fields = layout.getStructLayout(storage);
+    auto* flags = llvm::dyn_cast<llvm::ArrayType>(storage->getElementType(1));
+    OIIO_CHECK_ASSERT(flags && flags->getElementType()->isIntegerTy(8));
+    if (!flags)
+        return false;
+    const uint64_t flag_bytes = (count + 3) & ~3;
+    OIIO_CHECK_EQUAL(flags->getNumElements(), flag_bytes);
+    const uint64_t flags_offset = fields->getElementOffset(1);
+    auto at = [&](const llvm::Value* pointer, const llvm::Function& function,
+                  int64_t expected) {
+        int64_t offset = 0;
+        return llvm::GetPointerBaseWithConstantOffset(pointer, offset, layout)
+                   == function.getArg(1)
+               && offset == expected;
+    };
+    auto peel = [](const llvm::Value* value) {
+        while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(value))
+            value = cast->getOperand(0);
+        return value;
+    };
+    auto integer = [](const llvm::Value* value, uint64_t expected) {
+        const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+        return constant && constant->getZExtValue() == expected;
+    };
+    auto status_call =
+        [&](const llvm::StoreInst* store) -> const llvm::CallBase* {
+        const auto* sum = llvm::dyn_cast<llvm::BinaryOperator>(
+            peel(store->getValueOperand()));
+        if (sum && sum->getOpcode() == llvm::Instruction::Add)
+            for (unsigned a = 0; a < 2; ++a)
+                if (integer(sum->getOperand(a), 1))
+                    return llvm::dyn_cast<llvm::CallBase>(
+                        peel(sum->getOperand(1 - a)));
+        return nullptr;
+    };
+    for (int i = 0; i < count; ++i) {
+        OIIO_CHECK_ASSERT(names[i] != "never");
+        OIIO_CHECK_EQUAL(fields->getElementOffset(2 + i), uint64_t(offsets[i]));
+        auto* data = storage->getElementType(2 + i);
+        OIIO_CHECK_EQUAL(layout.getTypeAllocSize(data).getFixedValue(),
+                         types[i].size()
+                             * (types[i].basetype == TypeDesc::FLOAT ? 3 : 1));
+        const auto typed = [&](const auto& self, llvm::Type* type) -> bool {
+            if (auto* array = llvm::dyn_cast<llvm::ArrayType>(type))
+                return self(self, array->getElementType());
+            if (auto* record = llvm::dyn_cast<llvm::StructType>(type)) {
+                if (record->isOpaque())
+                    return false;
+                for (auto* element : record->elements())
+                    if (!self(self, element))
+                        return false;
+                return true;
+            }
+            return types[i].basetype == TypeDesc::FLOAT
+                       ? type->isFloatTy()
+                       : type->isIntegerTy(
+                             types[i].basetype == TypeDesc::STRING ? 64 : 32);
+        };
+        OIIO_CHECK_ASSERT(typed(typed, data));
+        if (names[i] == "shared" || names[i] == "gain" || names[i] == "tint")
+            OIIO_CHECK_EQUAL(int(derivatives[i]), 1);
+        if (types[i].basetype != TypeDesc::FLOAT)
+            OIIO_CHECK_EQUAL(int(derivatives[i]), 0);
+    }
+    const auto* wrapper  = module.getFunction("osl_hart_get_userdata");
+    const auto* callback = module.getFunction("rs_hart_get_userdata");
+    for (const auto* function : { wrapper, callback }) {
+        if (missing_spec) {
+            OIIO_CHECK_ASSERT(!function || function->use_empty());
+            continue;
+        }
+        OIIO_CHECK_ASSERT(function && !function->use_empty());
+        if (!function)
+            return false;
+        OIIO_CHECK_EQUAL(function->isDeclaration(), function == callback);
+        OIIO_CHECK_ASSERT(function->getReturnType()->isIntegerTy(1));
+        OIIO_CHECK_ASSERT(!function->isVarArg());
+        OIIO_CHECK_EQUAL(function->arg_size(), 6);
+        for (const auto& arg : function->args()) {
+            const unsigned index = arg.getArgNo();
+            OIIO_CHECK_ASSERT(
+                index == 0 || index == 5
+                    ? arg.getType()->isPointerTy()
+                          && arg.getType()->getPointerAddressSpace() == 0
+                    : arg.getType()->isIntegerTy(index == 1   ? 32
+                                                 : index == 4 ? 1
+                                                              : 64));
+        }
+    }
+    for (const char* legacy : { "osl_bind_interpolated_param",
+                                "rend_get_userdata", "rs_get_userdata" }) {
+        const auto* function = module.getFunction(legacy);
+        OIIO_CHECK_ASSERT(!function || function->use_empty());
+    }
+    if (!missing_spec && wrapper && callback) {
+        int forwards = 0;
+        for (const auto& block : *wrapper)
+            for (const auto& inst : block)
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                    if (call->getCalledFunction() == callback) {
+                        ++forwards;
+                        OIIO_CHECK_EQUAL(call->arg_size(), 6);
+                        for (unsigned a = 0; a < call->arg_size() && a < 6; ++a)
+                            OIIO_CHECK_EQUAL(call->getArgOperand(a),
+                                             wrapper->getArg(a));
+                        const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(
+                            block.getTerminator());
+                        OIIO_CHECK_ASSERT(ret && ret->getReturnValue() == call);
+                    }
+        OIIO_CHECK_EQUAL(forwards, 1);
+    }
+
+    int resets = 0, calls = 0;
+    std::vector<int> slot_calls(count, 0);
+    std::vector<unsigned> slot_layers(count, 0);
+    for (auto& function : module) {
+        const bool init  = function.getName().find("osl_init_group_") == 0;
+        const bool layer = function.getName().find("osl_layer_group_") == 0;
+        if ((!init && !layer) || function.arg_size() != 6)
+            continue;
+        OIIO_CHECK_ASSERT(!function.getName().contains("_name_unused"));
+        llvm::DominatorTree dominators(function);
+        // LLVM10 preserves the i1 -> i32 spill/load -> nonzero test used by if.
+        auto comparison_source =
+            [&](const llvm::Value* condition) -> const llvm::FCmpInst* {
+            const llvm::Value* value = condition;
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(value)) {
+                if (cmp->getPredicate() != llvm::CmpInst::ICMP_NE)
+                    return nullptr;
+                if (integer(cmp->getOperand(1), 0))
+                    value = cmp->getOperand(0);
+                else if (integer(cmp->getOperand(0), 0))
+                    value = cmp->getOperand(1);
+                else
+                    return nullptr;
+            }
+            value = peel(value);
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(value)) {
+                const auto* temporary = llvm::dyn_cast<llvm::AllocaInst>(
+                    load->getPointerOperand());
+                if (!temporary
+                    || temporary->getAllocatedType() != load->getType())
+                    return nullptr;
+                const llvm::StoreInst* writer = nullptr;
+                for (const auto* user : temporary->users()) {
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(
+                            user)) {
+                        if (writer || store->getPointerOperand() != temporary)
+                            return nullptr;
+                        writer = store;
+                    } else if (!llvm::isa<llvm::LoadInst>(user)) {
+                        return nullptr;
+                    }
+                }
+                if (!writer || !dominators.dominates(writer, load))
+                    return nullptr;
+                value = peel(writer->getValueOperand());
+            }
+            return llvm::dyn_cast<llvm::FCmpInst>(value);
+        };
+        const llvm::BranchInst* varying_branch = nullptr;
+        if (connected && layer) {
+            for (const auto& candidate : function) {
+                const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                    candidate.getTerminator());
+                const auto* comparison = branch && branch->isConditional()
+                                             ? comparison_source(
+                                                   branch->getCondition())
+                                             : nullptr;
+                if (!comparison)
+                    continue;
+                const auto* threshold = llvm::dyn_cast<llvm::ConstantFP>(
+                    comparison->getOperand(1));
+                OIIO_CHECK_ASSERT(
+                    (comparison->getPredicate() == llvm::CmpInst::FCMP_UGT
+                     || comparison->getPredicate() == llvm::CmpInst::FCMP_OGT)
+                    && threshold
+                    && threshold->getValueAPF().convertToFloat() == 0.25f);
+                OIIO_CHECK_ASSERT(!varying_branch);
+                varying_branch = branch;
+            }
+            OIIO_CHECK_ASSERT(varying_branch);
+        }
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                if (const auto* clear = llvm::dyn_cast<llvm::MemSetInst>(
+                        &inst)) {
+                    int64_t offset = 0;
+                    if (llvm::GetPointerBaseWithConstantOffset(
+                            clear->getRawDest(), offset, layout)
+                            == function.getArg(1)
+                        && offset >= int64_t(flags_offset)
+                        && offset < int64_t(flags_offset + flag_bytes)) {
+                        ++resets;
+                        OIIO_CHECK_ASSERT(init);
+                        OIIO_CHECK_EQUAL(offset, flags_offset);
+                        OIIO_CHECK_ASSERT(integer(clear->getValue(), 0));
+                        OIIO_CHECK_ASSERT(
+                            integer(clear->getLength(), flag_bytes));
+                    }
+                }
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                    int64_t offset = 0;
+                    if (llvm::GetPointerBaseWithConstantOffset(
+                            store->getPointerOperand(), offset, layout)
+                            == function.getArg(1)
+                        && offset >= int64_t(flags_offset)
+                        && offset < int64_t(flags_offset + flag_bytes)) {
+                        const auto* lookup = status_call(store);
+                        OIIO_CHECK_ASSERT(
+                            layer && lookup
+                            && lookup->getCalledFunction() == wrapper
+                            && lookup->getParent() == store->getParent()
+                            && dominators.dominates(lookup, store)
+                            && store->getValueOperand()->getType()->isIntegerTy(
+                                8));
+                    }
+                }
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+                if (!call || call->getCalledFunction() != wrapper || !wrapper)
+                    continue;
+                ++calls;
+                OIIO_CHECK_ASSERT(layer && !missing_spec);
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 wrapper->getCallingConv());
+                OIIO_CHECK_EQUAL(call->arg_size(), 6);
+                if (call->arg_size() != 6)
+                    continue;
+                OIIO_CHECK_EQUAL(call->getArgOperand(0)->stripPointerCasts(),
+                                 function.getArg(0));
+                OIIO_CHECK_EQUAL(call->getArgOperand(1), function.getArg(4));
+                int slot = -1;
+                for (int i = 0; i < count; ++i) {
+                    uint64_t encoded_type = 0;
+                    static_assert(sizeof(TypeDesc) == sizeof(encoded_type));
+                    std::memcpy(&encoded_type, &types[i], sizeof(encoded_type));
+                    if (integer(call->getArgOperand(2), names[i].hash())
+                        && integer(call->getArgOperand(3), encoded_type))
+                        slot = i;
+                }
+                OIIO_CHECK_ASSERT(slot >= 0);
+                if (slot < 0)
+                    continue;
+                ++slot_calls[slot];
+                if (connected) {
+                    const bool producer = function.getName().contains(
+                        "_name_producer");
+                    OIIO_CHECK_ASSERT(
+                        producer
+                        || function.getName().contains("_name_consumer"));
+                    slot_layers[slot] |= producer ? 1u : 2u;
+                }
+                OIIO_CHECK_ASSERT(
+                    integer(call->getArgOperand(4), derivatives[slot] ? 1 : 0));
+                OIIO_CHECK_ASSERT(
+                    at(call->getArgOperand(5), function, offsets[slot]));
+                const uint64_t flag_offset = flags_offset + slot;
+                auto status_is = [&](const llvm::Value* value, int status) {
+                    const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(value);
+                    if (!cmp || cmp->getPredicate() != llvm::CmpInst::ICMP_EQ)
+                        return false;
+                    for (unsigned a = 0; a < 2; ++a)
+                        if (integer(cmp->getOperand(a), status))
+                            if (const auto* load
+                                = llvm::dyn_cast<llvm::LoadInst>(
+                                    peel(cmp->getOperand(1 - a))))
+                                if (load->getType()->isIntegerTy(8)
+                                    && at(load->getPointerOperand(), function,
+                                          flag_offset))
+                                    return true;
+                    return false;
+                };
+                // Pair this binding with its own flag-0, flag-2 and default
+                // diamonds, not other valid bindings of the same cache slot.
+                const auto* predecessor
+                    = call->getParent()->getSinglePredecessor();
+                const auto* lookup_guard
+                    = predecessor ? llvm::dyn_cast<llvm::BranchInst>(
+                                        predecessor->getTerminator())
+                                  : nullptr;
+                const auto* lookup_exit = llvm::dyn_cast<llvm::BranchInst>(
+                    call->getParent()->getTerminator());
+                OIIO_CHECK_ASSERT(lookup_guard && lookup_guard->isConditional()
+                                  && lookup_exit
+                                  && lookup_exit->isUnconditional());
+                if (!lookup_guard || !lookup_guard->isConditional()
+                    || !lookup_exit || !lookup_exit->isUnconditional())
+                    continue;
+                OIIO_CHECK_ASSERT(status_is(lookup_guard->getCondition(), 0));
+                OIIO_CHECK_EQUAL(lookup_guard->getSuccessor(0),
+                                 call->getParent());
+                OIIO_CHECK_EQUAL(lookup_guard->getSuccessor(1),
+                                 lookup_exit->getSuccessor(0));
+                int marks = 0;
+                for (const auto& operation : *call->getParent())
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(
+                            &operation))
+                        if (status_call(store) == call) {
+                            ++marks;
+                            OIIO_CHECK_ASSERT(at(store->getPointerOperand(),
+                                                 function, flag_offset));
+                            OIIO_CHECK_ASSERT(
+                                dominators.dominates(call, store));
+                        }
+                OIIO_CHECK_EQUAL(marks, 1);
+                if (varying_branch) {
+                    if (lazy) {
+                        OIIO_CHECK_ASSERT(dominators.dominates(
+                            varying_branch->getSuccessor(0), predecessor));
+                        OIIO_CHECK_ASSERT(!dominators.dominates(
+                            varying_branch->getSuccessor(1), call->getParent()));
+                    } else {
+                        OIIO_CHECK_ASSERT(
+                            dominators.dominates(predecessor,
+                                                 varying_branch->getParent()));
+                    }
+                }
+                const auto* hit_guard = llvm::dyn_cast<llvm::BranchInst>(
+                    lookup_exit->getSuccessor(0)->getTerminator());
+                OIIO_CHECK_ASSERT(hit_guard && hit_guard->isConditional());
+                if (!hit_guard || !hit_guard->isConditional())
+                    continue;
+                const auto* hit_condition = hit_guard->getCondition();
+                OIIO_CHECK_ASSERT(status_is(hit_condition, 2));
+                const auto* hit_block = hit_guard->getSuccessor(0);
+                OIIO_CHECK_EQUAL(hit_block->getSinglePredecessor(),
+                                 hit_guard->getParent());
+                const llvm::MemCpyInst* hit_copy = nullptr;
+                for (const auto& operation : *hit_block)
+                    if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(
+                            &operation)) {
+                        OIIO_CHECK_ASSERT(!hit_copy);
+                        OIIO_CHECK_ASSERT(
+                            at(copy->getRawSource(), function, offsets[slot]));
+                        hit_copy = copy;
+                    }
+                OIIO_CHECK_ASSERT(hit_copy);
+                const auto* hit_exit = llvm::dyn_cast<llvm::BranchInst>(
+                    hit_block->getTerminator());
+                OIIO_CHECK_ASSERT(hit_exit && hit_exit->isUnconditional());
+                if (!hit_copy || !hit_exit || !hit_exit->isUnconditional())
+                    continue;
+                OIIO_CHECK_EQUAL(hit_exit->getSuccessor(0),
+                                 hit_guard->getSuccessor(1));
+                int64_t symbol_offset = 0;
+                OIIO_CHECK_EQUAL(llvm::GetPointerBaseWithConstantOffset(
+                                     hit_copy->getRawDest(), symbol_offset,
+                                     layout),
+                                 function.getArg(1));
+                const pvt::Symbol* symbol = nullptr;
+                for (int l = 0; l < group.nlayers(); ++l)
+                    if (function.getName().str()
+                        == fmtformat("osl_layer_group_hart_test_group_name_{}",
+                                     group.layer(l)->layername()))
+                        for (const auto& candidate : group.layer(l)->symbols())
+                            if (candidate.name() == names[slot])
+                                symbol = &candidate;
+                OIIO_CHECK_ASSERT(symbol);
+                if (!symbol)
+                    continue;
+                const size_t value_size = types[slot].size();
+                const size_t cache_size = value_size
+                                          * (derivatives[slot] ? 3 : 1);
+                if (connected && names[slot] == "shared") {
+                    const bool producer = function.getName().contains(
+                        "_name_producer");
+                    OIIO_CHECK_EQUAL(symbol->has_derivs(), !producer);
+                    OIIO_CHECK_EQUAL(value_size, 4);
+                    OIIO_CHECK_EQUAL(cache_size, 12);
+                    OIIO_CHECK_ASSERT(
+                        integer(hit_copy->getLength(), producer ? 4 : 12));
+                }
+                OIIO_CHECK_ASSERT(
+                    integer(hit_copy->getLength(),
+                            std::min(size_t(symbol->derivsize()), cache_size)));
+                const auto* default_branch = llvm::dyn_cast<llvm::BranchInst>(
+                    hit_guard->getSuccessor(1)->getTerminator());
+                const auto* miss_test
+                    = default_branch && default_branch->isConditional()
+                          ? llvm::dyn_cast<llvm::ICmpInst>(
+                                default_branch->getCondition())
+                          : nullptr;
+                bool only_on_miss = false;
+                if (miss_test
+                    && miss_test->getPredicate() == llvm::CmpInst::ICMP_EQ)
+                    for (unsigned a = 0; a < 2; ++a)
+                        only_on_miss |= integer(miss_test->getOperand(a), 0)
+                                        && peel(miss_test->getOperand(1 - a))
+                                               == hit_condition;
+                OIIO_CHECK_ASSERT(only_on_miss);
+                if (!only_on_miss)
+                    continue;
+                const auto* missing = default_branch->getSuccessor(0);
+                OIIO_CHECK_EQUAL(missing->getSinglePredecessor(),
+                                 default_branch->getParent());
+                OIIO_CHECK_ASSERT(
+                    !dominators.dominates(missing,
+                                          default_branch->getSuccessor(1)));
+                bool default_write = false, scalar_default = false;
+                bool zero_derivatives = false;
+                for (const auto& candidate : function) {
+                    if (!dominators.dominates(missing, &candidate))
+                        continue;
+                    for (const auto& operation : candidate) {
+                        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(
+                                &operation))
+                            if (at(store->getPointerOperand(), function,
+                                   symbol_offset)) {
+                                default_write = true;
+                                if (names[slot] == "shared"
+                                    || names[slot] == "gain") {
+                                    const auto* value
+                                        = llvm::dyn_cast<llvm::ConstantFP>(
+                                            store->getValueOperand());
+                                    const float expected
+                                        = names[slot] == "gain" ? 1.25f
+                                          : function.getName().contains(
+                                                "_name_producer")
+                                              ? 2.0f
+                                              : 5.0f;
+                                    scalar_default
+                                        |= value
+                                           && value->getValueAPF()
+                                                      .convertToFloat()
+                                                  == expected;
+                                } else if (names[slot] == "tag") {
+                                    const ustring expected(
+                                        function.getName().contains(
+                                            "_name_producer")
+                                            ? "producer-default"
+                                            : "consumer-default");
+                                    scalar_default
+                                        |= integer(store->getValueOperand(),
+                                                   expected.hash());
+                                }
+                            }
+                        if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(
+                                &operation))
+                            default_write |= at(copy->getRawDest(), function,
+                                                symbol_offset);
+                        if (const auto* clear
+                            = llvm::dyn_cast<llvm::MemSetInst>(&operation))
+                            zero_derivatives |= at(clear->getRawDest(),
+                                                   function,
+                                                   symbol_offset + value_size)
+                                                && integer(clear->getValue(), 0)
+                                                && integer(clear->getLength(),
+                                                           2 * value_size);
+                    }
+                }
+                OIIO_CHECK_ASSERT(default_write);
+                if (names[slot] == "shared" || names[slot] == "gain"
+                    || names[slot] == "tag") {
+                    OIIO_CHECK_ASSERT(scalar_default);
+                    if (symbol->has_derivs())
+                        OIIO_CHECK_ASSERT(zero_derivatives);
+                }
+            }
+    }
+    OIIO_CHECK_EQUAL(resets, 1);
+    OIIO_CHECK_EQUAL(calls, missing_spec ? 0 : requests.size());
+    if (missing_spec) {
+        int defaults = 0;
+        for (const auto& function : module) {
+            if (function.getName().find("osl_layer_group_") != 0)
+                continue;
+            for (const auto& block : function)
+                for (const auto& inst : block) {
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst);
+                    const auto* value = store
+                                            ? llvm::dyn_cast<llvm::ConstantFP>(
+                                                  store->getValueOperand())
+                                            : nullptr;
+                    if (!value
+                        || value->getValueAPF().convertToFloat() != 1.75f)
+                        continue;
+                    ++defaults;
+                    int64_t offset = 0;
+                    OIIO_CHECK_EQUAL(llvm::GetPointerBaseWithConstantOffset(
+                                         store->getPointerOperand(), offset,
+                                         layout),
+                                     function.getArg(1));
+                    OIIO_CHECK_ASSERT(offset != offsets[0]);
+                    bool zero_derivatives = false;
+                    for (const auto& operation : block)
+                        if (const auto* clear
+                            = llvm::dyn_cast<llvm::MemSetInst>(&operation))
+                            zero_derivatives
+                                |= at(clear->getRawDest(), function, offset + 4)
+                                   && integer(clear->getValue(), 0)
+                                   && integer(clear->getLength(), 8);
+                    OIIO_CHECK_ASSERT(zero_derivatives);
+                }
+        }
+        OIIO_CHECK_EQUAL(defaults, 1);
+    }
+    if (connected)
+        for (int i = 0; i < count; ++i)
+            OIIO_CHECK_EQUAL(slot_layers[i],
+                             names[i] == "shared" || names[i] == "tag" ? 3u
+                                                                       : 0u);
+    std::vector<int> requested_sites(count, 0);
+    for (const auto& request : requests) {
+        bool matched = false;
+        for (int i = 0; i < count; ++i)
+            if (names[i] == request.name && types[i] == request.type) {
+                matched = true;
+                ++requested_sites[i];
+                OIIO_CHECK_EQUAL(request.derivatives, derivatives[i] != 0);
+            }
+        OIIO_CHECK_ASSERT(matched);
+    }
+    for (int i = 0; i < count; ++i)
+        OIIO_CHECK_EQUAL(slot_calls[i], missing_spec ? 0 : requested_sites[i]);
+    return true;
+}
+
+
+
+bool
+check_userdata_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_userdata("
+        "int count=7 [[int interpolated=1]], "
+        "float gain=1.25 [[int interpolated=1]], "
+        "color tint=color(0.25,0.5,0.75) [[int interpolated=1]], "
+        "matrix basis=1 [[int interpolated=1]], "
+        "int indices[3]={7,11,13} [[int interpolated=1]], "
+        "float weights[]={0.125,0.25} [[int interpolated=1]], "
+        "string label=\"alpha\" [[int interpolated=1]], "
+        "string tags[2]={\"beta\",\"\"} [[int interpolated=1]], "
+        "string choices[]={\"alpha\",\"\"} [[int interpolated=1]], "
+        "float fallback=u+2*v [[int interpolated=1]], output color Cout=0) { "
+        "color dx=Dx(tint), dy=Dy(tint); "
+        "float value=count+gain+tint[0]+tint[1]+tint[2]+basis[0][1]"
+        "+basis[3][2]+indices[0]+indices[1]+indices[2]+weights[0]+weights[1]"
+        "+arraylength(weights)+(label==\"alpha\")+2*(tags[0]==label)"
+        "+4*(tags[1]==\"\")+8*(choices[0]==label)+16*(choices[1]==\"\")"
+        "+arraylength(choices)+fallback; "
+        "Cout=color(value,Dx(gain)+dx[0],Dy(gain)+dy[1]); }",
+        "shader hart_userdata_producer("
+        "float shared=2 [[int interpolated=1]], "
+        "string tag=\"producer-default\" [[int interpolated=1]], "
+        "output float value=0) { "
+        "if(u>0.25) value=shared+(tag==\"hit\"); else value=u; }",
+        "shader hart_userdata_consumer("
+        "float value=0 [[int interpolated=1]], "
+        "float shared=5 [[int interpolated=1]], "
+        "string tag=\"consumer-default\" [[int interpolated=1]], "
+        "output color Cout=0) { "
+        "if(v>0.25) Cout=color(value+shared+(tag==\"hit\"),"
+        "Dx(shared),Dy(shared)); else Cout=0; }",
+        "shader hart_userdata_unused(float never=13 [[int interpolated=1]], "
+        "output color Cout=0) { Cout=color(never*u); }",
+        "shader hart_userdata_default("
+        "float fallback=1.75 [[int interpolated=1]], output color Cout=0) "
+        "{ Cout=color(fallback,Dx(fallback),Dy(fallback)); }",
+        "shader hart_userdata_conflict("
+        "float gain=1 [[int interpolated=1,int interactive=1]], "
+        "output color Cout=0) { Cout=color(gain*u); }",
+        "shader hart_userdata_closure("
+        "closure color c=0 [[int interpolated=1]], output color Cout=0) "
+        "{ Cout=color(u,v,0); }",
+    };
+    std::string oso[std::size(sources)];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], oso[i], { }, stdosl))
+            return false;
+    }
+    const struct {
+        int osl, llvm, length;
+        bool local, lazy, connected, missing;
+    } variants[] = {
+        { 0, 10, 2, false, true, false, false },
+        { 2, 10, 5, true, false, false, false },
+        { 2, 3, 3, true, true, false, false },
+        { 0, 10, 0, false, true, true, false },
+        { 0, 10, 0, true, false, true, false },
+        { 2, 3, 0, true, true, true, false },
+        { 0, 10, 0, false, true, false, true },
+        { 2, 3, 0, true, false, false, true },
+    };
+    for (const auto& variant : variants) {
+        HartUserdataServices renderer;
+        renderer.missing_spec = variant.missing;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", variant.osl);
+        ss.attribute("llvm_optimize", variant.llvm);
+        ss.attribute("lazy_userdata", int(variant.lazy));
+        ss.attribute("lazy_unconnected", 1);
+        ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+        ShaderGroupRef group;
+        if (variant.connected) {
+            for (int i : { 1, 2, 3 })
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader(fmtformat("userdata{}", i),
+                                                oso[i]));
+            group = ss.ShaderGroupBegin("hart_test_group");
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "userdata3", "unused"));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "userdata1", "producer"));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "userdata2", "consumer"));
+            OIIO_CHECK_ASSERT(
+                ss.ConnectShaders("producer", "value", "consumer", "value"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+        } else {
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_test",
+                                            oso[variant.missing ? 4 : 0]));
+            group = ss.ShaderGroupBegin("hart_test_group");
+            if (!variant.missing && variant.length != 2) {
+                const float weights[]   = { 1, 2, 3, 4, 5 };
+                const ustring choices[] = { ustring("chosen"), ustring(""),
+                                            ustring("alpha"), ustring("beta"),
+                                            ustring("") };
+                OIIO_CHECK_ASSERT(
+                    ss.Parameter("weights",
+                                 TypeDesc(TypeDesc::FLOAT, variant.length),
+                                 weights, ParamHints::interpolated));
+                OIIO_CHECK_ASSERT(
+                    ss.Parameter("choices",
+                                 TypeDesc(TypeDesc::STRING, variant.length),
+                                 choices, ParamHints::interpolated));
+            }
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+        }
+        const SymLocationDesc output(variant.connected ? "consumer.Cout"
+                                                       : "layer0.Cout",
+                                     TypeColor, false, SymArena::Outputs, 0,
+                                     12);
+        ss.add_symlocs(group.get(), { &output, 1 });
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr,
+                  "Userdata (OSL {}, LLVM {}, lazy {}, connected {}, "
+                  "missing {}):\n{}",
+                  variant.osl, variant.llvm, variant.lazy, variant.connected,
+                  variant.missing, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+        const std::vector<string_view> expected_names
+            = variant.connected ? std::vector<string_view> { "shared", "tag" }
+              : variant.missing
+                  ? std::vector<string_view> { "fallback" }
+                  : std::vector<string_view> { "count",   "gain",    "tint",
+                                               "basis",   "indices", "weights",
+                                               "label",   "tags",    "choices",
+                                               "fallback" };
+        // Lazy value/Dx/Dy uses can have separate guarded binding sites.
+        // Require complete name coverage; the IR check accounts for every site.
+        std::vector<ustring> requested_names;
+        for (const auto& request : renderer.requests) {
+            OIIO_CHECK_ASSERT(request.name != "never"
+                              && request.name != "value");
+            OIIO_CHECK_ASSERT(std::find(expected_names.begin(),
+                                        expected_names.end(),
+                                        string_view(request.name.c_str()))
+                              != expected_names.end());
+            if (std::find(requested_names.begin(), requested_names.end(),
+                          request.name)
+                == requested_names.end())
+                requested_names.push_back(request.name);
+            if (request.name == "weights")
+                OIIO_CHECK_ASSERT(request.type
+                                  == TypeDesc(TypeDesc::FLOAT, variant.length));
+            if (request.name == "choices")
+                OIIO_CHECK_ASSERT(
+                    request.type == TypeDesc(TypeDesc::STRING, variant.length));
+            if (request.name == "shared" || request.name == "gain"
+                || request.name == "tint")
+                OIIO_CHECK_ASSERT(request.derivatives);
+        }
+        OIIO_CHECK_EQUAL(requested_names.size(), expected_names.size());
+        check_module(
+            ss, *group, arch,
+            variant.missing
+                ? std::initializer_list<string_view> { }
+                : std::initializer_list<string_view> { "osl_hart_get_userdata",
+                                                       "rs_hart_get_userdata" },
+            variant.llvm, variant.connected, variant.connected, false,
+            variant.connected ? 2 : 0, false, true);
+        if (variant.llvm == 10)
+            OIIO_CHECK_ASSERT(check_userdata_ir(ss, *group, renderer.requests,
+                                                variant.connected, variant.lazy,
+                                                variant.missing));
+        int allocated = -1, group_size = 0;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", group_size));
+        OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+        const void* artifact = nullptr;
+        uint64_t size        = 0;
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                          TypeDesc::PTR, &artifact));
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                          TypeUInt64, &size));
+        if (!artifact || !size)
+            return false;
+        const std::string original(static_cast<const char*>(artifact), size);
+        const size_t requests = renderer.requests.size();
+        renderer.missing_spec = !renderer.missing_spec;
+        ss.optimize_group(group.get(), nullptr);
+        const void* current   = nullptr;
+        uint64_t current_size = 0;
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                          TypeDesc::PTR, &current));
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                          TypeUInt64, &current_size));
+        OIIO_CHECK_EQUAL(current, artifact);
+        OIIO_CHECK_EQUAL(current_size, size);
+        if (current && current_size == size)
+            OIIO_CHECK_ASSERT(
+                string_view(static_cast<const char*>(current), current_size)
+                == string_view(original));
+        OIIO_CHECK_EQUAL(renderer.requests.size(), requests);
+        OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+    }
+    for (int failure = 0; failure < 6; ++failure) {
+        HartUserdataServices renderer;
+        renderer.userdata = failure != 0;
+        renderer.getter   = failure != 5;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        const int source = failure == 0 || failure == 5 ? 0
+                           : failure <= 2               ? 5
+                           : failure == 3               ? 6
+                                                        : 4;
+        auto group       = make_group(ss, oso[source]);
+        if (failure == 2) {
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("userdata_valid", oso[4]));
+            group = ss.ShaderGroupBegin("hart_test_group");
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "unused"));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "userdata_valid", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("layer0.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+        }
+        if (failure == 4) {
+            const SymLocationDesc input("layer0.fallback", TypeFloat, false,
+                                        SymArena::UserData, 0, 4);
+            ss.add_symlocs(group.get(), { &input, 1 });
+        }
+        check_rejected_group(ss, *group, errors,
+                             failure == 4 ? "pre-placement" : "interpolated");
+        if (failure == 1 || failure == 2)
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error, "interactive"));
+        if (failure == 3)
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error, "closure"));
+        OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+        OIIO_CHECK_ASSERT(renderer.requests.empty());
     }
     return true;
 }
@@ -8183,6 +9133,7 @@ main(int argc, char* argv[])
         return 1;
     }
     const string_view arch(argv[1]);
+    check_userdata_host_layout();
     if (!check_color_layout(arch, argv[3]) || unit_test_failures)
         return 1;
     if (!check_closure_modules(arch, argv[2]) || unit_test_failures)
@@ -8437,6 +9388,7 @@ main(int argc, char* argv[])
         || !check_output_placement_modules(arch, argv[2], oso[0], oso[5], oso[6])
         || !check_explicit_entry_modules(arch, argv[2], oso[0], oso[5])
         || !check_interactive_modules(arch, argv[2])
+        || !check_userdata_modules(arch, argv[2])
         || !check_diagnostic_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])

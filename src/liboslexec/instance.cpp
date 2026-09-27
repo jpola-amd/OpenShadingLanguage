@@ -865,13 +865,22 @@ ShaderInstance::validate_hart() const
         if (!validate_type(sym))
             return false;
         const auto& hints = m_instoverrides[i];
+        if (hints.interpolated()
+            && (hints.interactive() || sym.typespec().is_closure_based())) {
+            shadingsys().errorfmt(
+                "HART: interpolated parameter '{}' cannot be interactive "
+                "or closure-based",
+                sym.name());
+            return false;
+        }
         if (hints.interactive() && sym.typespec().is_closure_based()) {
             shadingsys().errorfmt("HART: interactive closure parameter '{}' "
                                   "is unsupported",
                                   sym.name());
             return false;
         }
-        if (hints.interpolated()
+        if ((hints.interpolated()
+             && !shadingsys().renderer()->supports("HARTUserdata"))
             || (hints.interactive()
                 && !shadingsys().renderer()->supports("HARTInteractive"))) {
             shadingsys().errorfmt(

@@ -147,6 +147,9 @@ struct HartTextureStore::Impl {
         , errors(handler)
         , colorsystem(handler)
         , diagnostics(handler)
+        , userdata_entries(handler)
+        , userdata_data(handler)
+        , userdata_state(handler)
         , diagnostic_host(std::make_unique<HartDiagnosticBuffer>())
     {
     }
@@ -252,6 +255,7 @@ struct HartTextureStore::Impl {
     }
 
     DeviceBuffer descriptors, state, errors, colorsystem, diagnostics;
+    DeviceBuffer userdata_entries, userdata_data, userdata_state;
     std::unique_ptr<HartDiagnosticBuffer> diagnostic_host;
     size_t colorsystem_bytes = 0;
     bool dirty               = true;
@@ -459,6 +463,124 @@ HartTextureStore::copy_to_device(int device, void* dst, const void* src,
 
 
 bool
+HartTextureStore::prepare_userdata(cspan<HartUserdataBinding> bindings,
+                                   size_t points, bool grid_defaults)
+{
+    auto& impl = *m_impl;
+    auto fail  = [&](string_view message) {
+        impl.err.errorfmt("HART userdata: {}", message);
+        return false;
+    };
+    if (!points || points > size_t(std::numeric_limits<int>::max()))
+        return fail("invalid point count");
+    std::vector<testshade::HartUserdataDesc> entries;
+    std::vector<unsigned char> data;
+    for (const auto& binding : bindings) {
+        const auto type = binding.type;
+        if (binding.name.empty() || type.arraylen < 0 || !type.aggregate
+            || (type.basetype != TypeDesc::INT
+                && type.basetype != TypeDesc::FLOAT
+                && type.basetype != TypeDesc::STRING)
+            || (binding.derivatives && type.basetype != TypeDesc::FLOAT))
+            return fail("unsupported name, type, or derivatives");
+        const size_t size = type.size();
+        if (!size || size > size_t(std::numeric_limits<int>::max()) / 3)
+            return fail("unsupported size");
+        const size_t record = size * (binding.derivatives ? 3 : 1);
+        const size_t count  = binding.stride ? points : 1;
+        if (!binding.data.data() || binding.data.size() < record
+            || (binding.stride
+                && (binding.stride < record
+                    || count - 1
+                           > (binding.data.size() - record) / binding.stride))
+            || (!binding.present.empty() && binding.present.size() != points))
+            return fail("invalid data extent, stride, or presence count");
+        if (std::any_of(binding.present.begin(), binding.present.end(),
+                        [](uint8_t v) { return v > 1; }))
+            return fail("presence values must be zero or one");
+        const uint64_t name = ustring(binding.name).hash();
+        for (const auto& existing : entries)
+            if (existing.name == name)
+                return fail("duplicate userdata name or hash");
+        if (data.size() > data.max_size() - 7)
+            return fail("data size overflow");
+        const size_t offset = (data.size() + 7) & ~size_t(7);
+        if (count > (data.max_size() - offset) / record)
+            return fail("data size overflow");
+        data.resize(offset + count * record);
+        for (size_t point = 0; point < count; ++point) {
+            if (binding.stride && !binding.present.empty()
+                && !binding.present[point])
+                continue;
+            const auto* source = binding.data.data() + point * binding.stride;
+            auto* destination  = data.data() + offset + point * record;
+            if (type.basetype == TypeDesc::STRING) {
+                for (size_t element = 0; element < size / sizeof(ustring);
+                     ++element) {
+                    ustring text;
+                    memcpy(&text, source + element * sizeof(ustring),
+                           sizeof(text));
+                    const auto hash = ustringhash_from(text);
+                    memcpy(destination + element * sizeof(hash), &hash,
+                           sizeof(hash));
+                }
+            } else {
+                memcpy(destination, source, record);
+            }
+        }
+        uint64_t presence = UINT64_MAX;
+        if (!binding.present.empty()) {
+            if (binding.present.size() > data.max_size() - data.size())
+                return fail("presence size overflow");
+            presence = data.size();
+            data.insert(data.end(), binding.present.begin(),
+                        binding.present.end());
+        }
+        uint64_t encoded_type;
+        static_assert(sizeof(encoded_type) == sizeof(type));
+        memcpy(&encoded_type, &type, sizeof(type));
+        entries.push_back({ name, encoded_type, offset,
+                            binding.stride ? record : 0, presence,
+                            uint32_t(size), uint32_t(binding.derivatives) });
+    }
+    DeviceBuffer device_entries(impl.err), device_data(impl.err),
+        state(impl.err);
+    const size_t entry_bytes = entries.size()
+                               * sizeof(testshade::HartUserdataDesc);
+    auto upload = [&](DeviceBuffer& buffer, const void* source, size_t size) {
+        return !size
+               || (buffer.allocate(size)
+                   && hip_check(impl.err,
+                                hipMemcpy(buffer.data, source, size,
+                                          hipMemcpyHostToDevice),
+                                "hipMemcpy userdata"));
+    };
+    if (!upload(device_entries, entries.data(), entry_bytes)
+        || !upload(device_data, data.data(), data.size()))
+        return false;
+    const testshade::HartUserdataState host {
+        static_cast<const testshade::HartUserdataDesc*>(device_entries.data),
+        uint64_t(entries.size()),
+        static_cast<const unsigned char*>(device_data.data),
+        uint64_t(data.size()),
+        uint64_t(points),
+        uint32_t(grid_defaults),
+        0
+    };
+    if (!upload(state, &host, sizeof(host)))
+        return false;
+    std::swap(device_entries.data, impl.userdata_entries.data);
+    std::swap(device_data.data, impl.userdata_data.data);
+    std::swap(state.data, impl.userdata_state.data);
+    impl.dirty = true;
+    bool ok    = state.clear();
+    ok         = device_entries.clear() && ok;
+    return device_data.clear() && ok;
+}
+
+
+
+bool
 HartTextureStore::prepare()
 {
     auto& impl = *m_impl;
@@ -489,9 +611,12 @@ HartTextureStore::prepare()
         return false;
     const testshade::HartTextureState host_state {
         static_cast<const testshade::HartTextureDesc*>(descriptors.data),
-        uint64_t(host.size()), static_cast<unsigned int*>(errors.data),
+        uint64_t(host.size()),
+        static_cast<unsigned int*>(errors.data),
         impl.colorsystem.data,
-        static_cast<HartDiagnosticBuffer*>(diagnostics.data)
+        static_cast<HartDiagnosticBuffer*>(diagnostics.data),
+        static_cast<const testshade::HartUserdataState*>(
+            impl.userdata_state.data)
     };
     if (!hip_check(impl.err,
                    hipMemcpy(state.data, &host_state, sizeof(host_state),
@@ -595,7 +720,7 @@ HartTextureStore::check_errors()
     if (!errors)
         return diagnostics_ok;
     impl.err.errorfmt(
-        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
@@ -632,7 +757,9 @@ HartTextureStore::check_errors()
             ? "invalid diagnostic payload; "
             : "",
         errors & testshade::HartShaderError ? "shader error; " : "",
-        errors & ~16383u ? "unknown error; " : "");
+        errors & testshade::HartInvalidUserdata ? "invalid userdata binding; "
+                                                : "",
+        errors & ~32767u ? "unknown error; " : "");
     return false;
 }
 
@@ -647,6 +774,9 @@ HartTextureStore::clear()
     ok                     = impl.errors.clear() && ok;
     ok                     = impl.diagnostics.clear() && ok;
     ok                     = impl.colorsystem.clear() && ok;
+    ok                     = impl.userdata_state.clear() && ok;
+    ok                     = impl.userdata_entries.clear() && ok;
+    ok                     = impl.userdata_data.clear() && ok;
     impl.colorsystem_bytes = 0;
     for (auto& texture : impl.textures)
         ok = texture->clear() && ok;

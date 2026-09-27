@@ -3788,7 +3788,7 @@ try:
     base = ["--hart", "hart_first"]
     for option in (
         ["--batched"], ["--center"],
-        ["--userdata", "value", "1"], ["--use_rs_bitcode"],
+        ["--use_rs_bitcode"],
         ["--no-output-placement"], ["--shadeimage"], ["--raytype", "shadow"],
         ["--scaleuv", "2", "2"], ["--offsetuv", "1", "1"],
         ["--options", "optimize=0"], ["--saveptx"],
@@ -3818,7 +3818,6 @@ try:
     run(base + ["--iters", "0"], "must be positive")
     run(base + ["--hart-device", "-1"], "must be nonnegative")
     run(base + ["--hart-device", "not-an-integer"], "error")
-    run(base + ["--param:interpolated=1", "value", "2"], "interpolated")
     run(base + ["-d", "invalid"], "output format")
     run(["--hart", "--param", "scale", "2"], "requires an OSL shader")
     for option in ("TESTSHADE_BATCHED", "TESTSHADE_RS_BITCODE"):
@@ -4130,7 +4129,6 @@ try:
             ("hart_closure", "does not support parameter"),
             ("hart_string", "unsupported operation 'strlen'"),
             ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),
-            ("hart_userdata", "HART"),
         ):
             run(["--hart", "-v", shader], error)
         run(["--hart", "--shader", "hart_surface_incident", "unused",
@@ -4138,8 +4136,7 @@ try:
              "--shader", "hart_sine", "surface", "-v"],
             "HART: unsupported shader global 'Ps'")
         # Even an unused producer must be validated before optimization.
-        for shader in ("hart_closure", "hart_string",
-                       "hart_texture", "hart_userdata"):
+        for shader in ("hart_closure", "hart_string", "hart_texture"):
             run(["--hart", "--shader", shader, "producer",
                  "--shader", "hart_sine", "consumer", "-v"],
                 "HART: texture requires explicit closest or linear interpolation"
@@ -4151,6 +4148,14 @@ try:
         branch = lambda u, v: (u, v, math.sin(u + v) if u > v else 0)
         for shader_args, evaluate in (
             (["hart_first"], arithmetic), (["hart_sine"], sine),
+            (["hart_userdata"], lambda u, v: (1, u, v)),
+            (["--userdata", "value", "2.0", "hart_userdata"],
+             lambda u, v: (2, u, v)),
+            (["--param:interpolated=1", "value", "3.0",
+              "--userdata", "value", "2.0", "hart_userdata"],
+             lambda u, v: (2, u, v)),
+            (["--shader", "hart_userdata", "unused",
+              "--shader", "hart_sine", "surface"], sine),
             (["--llvm_opt", "10"] + connected, sine),
             (["--llvm_opt", "3"] + connected, sine),
             (["--llvm_opt", "10"] + connected_group("hart_branch"), branch),

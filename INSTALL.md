@@ -856,8 +856,8 @@ shader code or filenames.
 `Dz`, unlisted noise forms, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `Ps` and `dtime`, unlisted coordinate spaces and transforms,
-string allocation and character operations, interpolated
-parameters, other renderer-service callbacks, batched execution, instrumentation,
+string allocation and character operations,
+other renderer-service callbacks, batched execution, instrumentation,
 and unlisted frontend
 options are unsupported.
 They fail explicitly; there is **no CPU fallback**.
@@ -887,8 +887,42 @@ launches and image publication. A successful update restores the full arena
 from the last committed host values before accepting new values.
 `hart-interactive-runtime` and the four `hart-interactive-rebind-*` GPU tests
 cover CLI updates, derivatives, scalar/array/string values, warmup, errors,
-immutable artifacts and A-B-A cache reuse. Interpolated userdata remains a
-separate, unsupported renderer service.
+immutable artifacts and A-B-A cache reuse.
+
+Generated testshade also supports interpolated parameters, including int32,
+float-based scalar/aggregate/array values and string hashes. Use
+`[[int interpolated=1]]` or `--param:interpolated=1`; a parameter cannot be both
+interpolated and interactive, and interpolated closures are unsupported.
+The grid supplies the same `s`, `t`, `face_idx` and conditional `red`, `green`,
+`blue` userdata as CPU testshade, with their meaningful derivatives.
+`--userdata[:type=TYPE] NAME VALUE` adds uniform values. Missing, absent or
+type-mismatched entries use each shader parameter's own default; they are not
+device errors. Values supplied without derivatives have zero gradients.
+
+The generated-renderer API accepts `HartOptions::userdata_bindings`. Each
+`HartUserdataBinding` borrows host bytes for one typed record (`stride=0`) or
+one record per grid point, with an optional per-point 0/1 presence mask.
+Derivative records contain the complete value, Dx and Dy blocks in that order.
+String input elements must be host `ustring` values, not character pointers or
+precomputed hashes; upload converts each to a device hash. Bindings are copied
+to renderer-owned device tables before launch, after previous GPU work has
+finished. A-B-A rebinding does not modify compiled group artifacts or cache
+identity. Invalid extents, strides, types, presence masks or duplicate names
+fail before launch; malformed device bindings report a service error and
+prevent output publication.
+
+Custom renderers opt in with `HARTUserdata` and `build_interpolated_getter`,
+using an `InterpolatedGetterSpec` to call the typed shadeop
+`osl_hart_get_userdata`; they supply its device callback `rs_hart_get_userdata`.
+The callback receives execution context, shade index, name hash, encoded type,
+derivative demand and destination. It must return true only for supplied data
+and fill all requested derivative blocks. Derivative demand includes every
+layer sharing that cached userdata, even if the first layer only needs its
+value. The six callable arguments are unchanged; tables are reached through
+renderer state. Raw `SymArena::UserData` pre-placement and native path-tracer
+userdata are not yet enabled. The `hart-userdata-runtime` and four
+`hart-userdata-rebind-*` opt-in GPU tests cover typed/default values, gradients,
+per-point presence, A-B-A artifact/cache reuse and invalid host bindings.
 
 Numeric and string arrays and flattened structs support initialization, copying,
 length queries, runtime indexing, nested members and whole-aggregate connections.

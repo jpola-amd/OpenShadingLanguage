@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "hartclosureparams.h"
+#include "harttexture.h"
 
 OSL_NAMESPACE_BEGIN
 
@@ -33,6 +34,7 @@ struct HartOptions {
     std::vector<std::string> shader_entries;
     std::vector<std::string> entry_outputs;
     std::function<bool()> update_parameters;
+    std::vector<HartUserdataBinding> userdata_bindings;
 };
 
 struct HartOutputRequest {

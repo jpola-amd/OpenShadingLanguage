@@ -210,7 +210,8 @@ public:
                || feature == "HARTTransforms" || feature == "HARTArrayBounds"
                || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
                || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
-               || feature == "HARTInteractive"
+               || feature == "HARTInteractive" || feature == "HARTUserdata"
+               || feature == "build_interpolated_getter"
                || (m_closures && feature == "HARTClosures");
     }
 
@@ -233,6 +234,32 @@ public:
 
     HartTextureStore& textures() { return m_textures; }
     int device() const { return m_device; }
+
+    void build_interpolated_getter(const ShaderGroup&, const ustring&, TypeDesc,
+                                   bool, InterpolatedGetterSpec& spec) override
+    {
+        spec.set(ustring("osl_hart_get_userdata"),
+                 InterpolatedSpecBuiltinArg::OpaqueExecutionContext,
+                 InterpolatedSpecBuiltinArg::ShadeIndex,
+                 InterpolatedSpecBuiltinArg::ParamName,
+                 InterpolatedSpecBuiltinArg::Type,
+                 InterpolatedSpecBuiltinArg::Derivatives);
+    }
+
+    bool prepare_userdata(cspan<HartUserdataBinding> extra, size_t points)
+    {
+        std::vector<HartUserdataBinding> bindings;
+        for (const auto& value : userdata)
+            bindings.push_back({ value.name().string(),
+                                 value.type(),
+                                 false,
+                                 0,
+                                 { static_cast<const std::byte*>(value.data()),
+                                   value.type().size() },
+                                 { } });
+        bindings.insert(bindings.end(), extra.begin(), extra.end());
+        return m_textures.prepare_userdata(bindings, points, true);
+    }
 
 private:
     HartTextureStore m_textures;
@@ -733,7 +760,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.exit_on_error(false);
     std::string device = "0";
     std::string format;
-    bool parameter_hints = false, has_shader = false;
+    bool has_shader = false;
     // clang-format off
     ap.arg("filename")
       .action([&](cspan<const char*>) { has_shader = true; });
@@ -757,14 +784,11 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--entry %s:LAYERNAME");
     ap.arg("--entryoutput %s:NAME");
     ap.arg("--reparam %s:LAYERNAME %s:PARAMNAME %s:VALUE");
+    ap.arg("--userdata %s:NAME %s:VALUE");
     ap.arg("--shader %s:SHADER %s:LAYER")
       .action([&](cspan<const char*>) { has_shader = true; });
     ap.arg("--connect %s:FROMLAYER %s:FROMOUTPUT %s:TOLAYER %s:TOINPUT");
-    ap.arg("--param %s:NAME %s:VALUE")
-      .action([&](cspan<const char*> args) {
-          const string_view option(args[0]);
-          parameter_hints |= option.find("interpolated=") != string_view::npos;
-      });
+    ap.arg("--param %s:NAME %s:VALUE");
     ap.arg("-O0");
     ap.arg("-O1");
     ap.arg("-O2");
@@ -796,11 +820,6 @@ testshade_hart_validate_generated(int argc, const char* argv[],
         || device_index < std::numeric_limits<int>::min()
         || device_index > std::numeric_limits<int>::max()) {
         err.errorfmt("Invalid HART device index '{}'", device);
-        return false;
-    }
-    if (parameter_hints) {
-        err.errorfmt("Generated HART mode does not support interpolated "
-                     "parameters");
         return false;
     }
     if (!has_shader) {
@@ -898,7 +917,9 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!embedded_raygen(arch, modules[0], err))
         return false;
     auto& textures = generated->textures();
-    if (!textures.prepare(shadingsys))
+    if (!generated->prepare_userdata(options.userdata_bindings,
+                                     size_t(width) * size_t(height))
+        || !textures.prepare(shadingsys))
         return false;
     const char* entry = !group          ? "__raygen__testshade_closure_pool"
                         : options.fused ? "__raygen__testshade_closures_fused"
@@ -1221,7 +1242,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         || !embedded_raygen(arch, modules[0], err))
         return false;
     auto& textures = generated->textures();
-    if (!textures.prepare(shadingsys))
+    if (!generated->prepare_userdata(options.userdata_bindings, count)
+        || !textures.prepare(shadingsys))
         return false;
     int entry_count = 0;
     void* interactive = nullptr;

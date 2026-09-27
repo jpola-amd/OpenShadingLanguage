@@ -11,6 +11,7 @@
 #include "noise.h"
 #include "texture.h"
 #include "transform.h"
+#include "userdata.h"
 
 #include <OSL/oslclosure.h>
 #include <OSL/oslconfig.h>

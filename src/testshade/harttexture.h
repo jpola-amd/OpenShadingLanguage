@@ -7,12 +7,22 @@
 #include <OSL/oslconfig.h>
 
 #include <memory>
+#include <string>
 
 #include "harttextureparams.h"
 
 OSL_NAMESPACE_BEGIN
 
 class ShadingSystem;
+
+struct HartUserdataBinding {
+    std::string name;
+    TypeDesc type;
+    bool derivatives = false;
+    size_t stride    = 0;
+    cspan<std::byte> data;
+    cspan<uint8_t> present;
+};
 
 // Test renderer resources, used only between synchronous HART launches.
 // Files are read as numeric data: first subimage, no color conversion,
@@ -30,6 +40,8 @@ public:
     bool prepare();
     // Refresh color-system data before each render, even for cached groups.
     bool prepare(ShadingSystem& shadingsys);
+    bool prepare_userdata(cspan<HartUserdataBinding> bindings, size_t points,
+                          bool grid_defaults);
     bool reset_errors();
     bool check_errors();
     bool clear();
