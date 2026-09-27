@@ -7,8 +7,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <vector>
+
+#include <OSL/oslexec.h>
 
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
@@ -138,13 +141,18 @@ udim_pattern(OIIO::ustring filename)
 
 struct HartTextureStore::Impl {
     explicit Impl(OIIO::ErrorHandler& handler)
-        : err(handler), descriptors(handler), state(handler), errors(handler)
+        : err(handler)
+        , descriptors(handler)
+        , state(handler)
+        , errors(handler)
+        , colorsystem(handler)
     {
     }
 
     OIIO::ErrorHandler& err;
     std::vector<std::unique_ptr<Texture>> textures;
-    DeviceBuffer descriptors, state, errors;
+    DeviceBuffer descriptors, state, errors, colorsystem;
+    size_t colorsystem_bytes = 0;
     bool dirty = true;
 };
 
@@ -338,7 +346,8 @@ HartTextureStore::prepare()
         return false;
     const testshade::HartTextureState host_state {
         static_cast<const testshade::HartTextureDesc*>(descriptors.data),
-        uint64_t(host.size()), static_cast<unsigned int*>(errors.data)
+        uint64_t(host.size()), static_cast<unsigned int*>(errors.data),
+        impl.colorsystem.data
     };
     if (!hip_check(impl.err,
                    hipMemcpy(state.data, &host_state, sizeof(host_state),
@@ -352,6 +361,56 @@ HartTextureStore::prepare()
     bool ok    = state.clear();
     ok         = descriptors.clear() && ok;
     return errors.clear() && ok;
+}
+
+
+
+bool
+HartTextureStore::prepare(ShadingSystem& shadingsys)
+{
+    auto& impl         = *m_impl;
+    void* data         = nullptr;
+    long long sizes[2] = { };
+    if (!shadingsys.getattribute("colorsystem", TypeDesc::PTR, &data)
+        || !shadingsys.getattribute("colorsystem:sizes",
+                                    TypeDesc(TypeDesc::LONGLONG, 2), sizes)
+        || !data || sizes[0] <= 0 || sizes[1] < 0
+        || uint64_t(sizes[0]) > std::numeric_limits<size_t>::max()
+        || uint64_t(sizes[1]) > uint64_t(sizes[0]) / sizeof(ustringhash)) {
+        impl.err.errorfmt("HART cannot retrieve a valid color-system payload");
+        return false;
+    }
+    static_assert(sizeof(ustringhash) == sizeof(uint64_t),
+                  "HART color-system strings require 64-bit hashes");
+    const size_t bytes     = size_t(sizes[0]);
+    const size_t strings   = size_t(sizes[1]);
+    const size_t pod_bytes = bytes - strings * sizeof(ustringhash);
+    std::vector<unsigned char> host(bytes);
+    std::memcpy(host.data(), data, pod_bytes);
+    const auto* hashes = reinterpret_cast<const ustringhash*>(
+        static_cast<const unsigned char*>(data) + pod_bytes);
+    for (size_t i = 0; i < strings; ++i) {
+        const uint64_t hash = hashes[i].hash();
+        std::memcpy(host.data() + pod_bytes + i * sizeof(hash), &hash,
+                    sizeof(hash));
+    }
+    if (impl.colorsystem.data && impl.colorsystem_bytes != bytes) {
+        impl.err.errorfmt("HART color-system payload size changed from {} to {}",
+                          impl.colorsystem_bytes, bytes);
+        return false;
+    }
+    if (!impl.colorsystem.data) {
+        if (!impl.colorsystem.allocate(bytes))
+            return false;
+        impl.colorsystem_bytes = bytes;
+        impl.dirty             = true;
+    }
+    if (!hip_check(impl.err,
+                   hipMemcpy(impl.colorsystem.data, host.data(), bytes,
+                             hipMemcpyHostToDevice),
+                   "hipMemcpy color system"))
+        return false;
+    return prepare();
 }
 
 
@@ -382,7 +441,7 @@ HartTextureStore::check_errors()
     if (!errors)
         return true;
     impl.err.errorfmt(
-        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}",
+        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}",
         errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
@@ -406,7 +465,10 @@ HartTextureStore::check_errors()
             : "",
         errors & testshade::HartInvalidSpline ? "invalid spline arguments; "
                                               : "",
-        errors & ~511u ? "unknown error; " : "");
+        errors & testshade::HartUnsupportedColorTransform
+            ? "unsupported color transform; "
+            : "",
+        errors & ~1023u ? "unknown error; " : "");
     return false;
 }
 
@@ -419,6 +481,8 @@ HartTextureStore::clear()
     bool ok    = impl.state.clear();
     ok         = impl.descriptors.clear() && ok;
     ok         = impl.errors.clear() && ok;
+    ok                     = impl.colorsystem.clear() && ok;
+    impl.colorsystem_bytes = 0;
     for (auto& texture : impl.textures)
         ok = texture->clear() && ok;
     impl.textures.clear();

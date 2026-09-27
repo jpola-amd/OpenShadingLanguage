@@ -3,6 +3,7 @@
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 import argparse
+import colorsys
 import json
 import math
 import os
@@ -42,6 +43,8 @@ suites.add_argument("--numeric-math", action="store_true",
                     help="Run transcendental, geometric and IEEE classification cases")
 suites.add_argument("--splines", action="store_true",
                     help="Run spline derivatives, knot bounds and nonfinite guards")
+suites.add_argument("--colors", action="store_true",
+                    help="Run built-in color conversions and color-system shadeops")
 suites.add_argument("--procedural", action="store_true",
                     help="Run connected procedural material runtime cases")
 suites.add_argument("--textures", action="store_true",
@@ -73,7 +76,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
 if (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-        or args.noise or args.noise_families or args.math or args.numeric_math or args.splines
+        or args.noise or args.noise_families or args.math or args.numeric_math or args.splines or args.colors
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
         or args.spaces or args.geometry or args.groups
@@ -139,10 +142,10 @@ def reference(width, height, evaluate):
     return result
 
 
-def compare(actual, expected, tolerance=2e-6):
+def compare(actual, expected, tolerance=2e-6, relative_tolerance=1e-6):
     assert len(actual) == len(expected)
     for index, (a, b) in enumerate(zip(actual, expected)):
-        assert math.isclose(a, b, abs_tol=tolerance, rel_tol=1e-6), (
+        assert math.isclose(a, b, abs_tol=tolerance, rel_tol=relative_tolerance), (
             index, a, b, tolerance
         )
 
@@ -2258,8 +2261,11 @@ def check_fused_benchmark():
 
 
 def check_image_render(shaders, flags, mode, width, height, expected,
-                       tolerance=None, cpu_value_tolerance=None):
+                       tolerance=None, cpu_value_tolerance=None,
+                       value_relative_tolerance=1e-6,
+                       cpu_value_relative_tolerance=None, cpu_expected=None):
     assert len(expected) == width * height * 3
+    assert cpu_expected is None or len(cpu_expected) == len(expected)
     host, device = root / "exact-cpu.pfm", root / "exact-gpu.pfm"
     for path in (host, device):
         if path.exists():
@@ -2278,19 +2284,27 @@ def check_image_render(shaders, flags, mode, width, height, expected,
     for path in (host, device):
         actual = image_pixels(path, width, height)
         images.append(actual)
+        target_image = cpu_expected if path == host and cpu_expected is not None else expected
         if tolerance is None:
-            for i, (value, target) in enumerate(zip(actual, expected)):
+            for i, (value, target) in enumerate(zip(actual, target_image)):
                 assert value == target, (shaders, path.name, i, value, target)
         else:
             for channel in range(3):
                 limit = (cpu_value_tolerance if path == host and channel == 0
                          and cpu_value_tolerance is not None else tolerance)
-                compare(actual[channel::3], expected[channel::3], limit)
-    if tolerance is not None:
+                relative = (cpu_value_relative_tolerance if path == host
+                            and cpu_value_relative_tolerance is not None
+                            else value_relative_tolerance) if channel == 0 else 1e-6
+                compare(actual[channel::3], target_image[channel::3], limit, relative)
+    if tolerance is not None and cpu_expected is None:
         for channel in range(3):
             limit = (cpu_value_tolerance if channel == 0
                      and cpu_value_tolerance is not None else tolerance)
-            compare(images[1][channel::3], images[0][channel::3], limit)
+            relative = max(value_relative_tolerance,
+                           cpu_value_relative_tolerance or value_relative_tolerance)
+            compare(images[1][channel::3], images[0][channel::3], limit,
+                    relative if channel == 0 else 1e-6)
+    return images
 
 
 def check_control_flow_suite():
@@ -2650,6 +2664,261 @@ def check_spline_suite():
     run(["--hart", "-v", "--param:type=float[3]", "knots", "0,1,2",
          "-o", "Cout", str(rejected), "spline_parameters"], "spline knot")
     assert not rejected.exists()
+
+
+def check_color_suite():
+    # Double-precision solution from source primaries and its D65 y=.3291.
+    to_xyz = ((.412135323427, .357675002654, .180356796374),
+              (.212507276142, .715350005308, .072142718550),
+              (.019318843286, .119225000885, .949879127571))
+    from_xyz = ((3.242978965321, -1.538336175857, -.498919840819),
+                (-.968997952917, 1.875491982259, .041544524053),
+                (.055668324368, -.204117189350, 1.057698162996))
+
+    def matrix(m, q):
+        return tuple(sum(a*b for a, b in zip(row, q)) for row in m)
+
+    def convert(space, inverse, q):
+        if space in ("rgb", "RGB", "linear", "Rec709"):
+            return q
+        if space == "XYZ":
+            return matrix(from_xyz if inverse else to_xyz, q)
+        if space == "YIQ":
+            return matrix(((1, .9557, .6199), (1, -.2716, -.6469),
+                           (1, -1.1082, 1.7051)) if inverse
+                          else ((.299, .587, .114), (.596, -.275, -.321),
+                                (.212, -.523, .311)), q)
+        if space == "xyY":
+            if inverse:
+                x, y, luminance = q
+                return matrix(from_xyz, (x*luminance/y, luminance,
+                                         (1-x-y)*luminance/y))
+            x, y, z = matrix(to_xyz, q)
+            return x/(x+y+z), y/(x+y+z), y
+        if space == "hsv":
+            return (colorsys.hsv_to_rgb if inverse else colorsys.rgb_to_hsv)(*q)
+        if space == "hsl":
+            if inverse:
+                return colorsys.hls_to_rgb(q[0], q[2], q[1])
+            h, l, s = colorsys.rgb_to_hls(*q)
+            return h, s, l
+        assert space == "sRGB", space
+        if inverse:
+            return tuple(x/12.92 if x <= .04045 else ((x+.055)/1.055)**2.4
+                         for x in q)
+        return tuple(12.92*x if x <= .0031308 else 1.055*x**(1/2.4)-.055
+                     for x in q)
+
+    width, height = 9, 5
+    configurations = [("-O0", "10", []),
+                      ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"])]
+    inputs = "color(.05+.05*u,.25+.1*v,.7+.05*u+.1*v)"
+
+    def coordinates(u, v):
+        return (.05+.05*u, .25+.1*v, .7+.05*u+.1*v)
+
+    gradients = ((.05/(width-1), 0, .05/(width-1)),
+                 (0, .1/(height-1), .1/(height-1)))
+
+    def sampled(evaluate, u, v, zero_derivatives=False):
+        q = coordinates(u, v)
+        component = int(7*u+3*v) % 3
+        answer = [evaluate(q)[component]]
+        if zero_derivatives:
+            return answer + [0, 0]
+        for gradient in gradients:
+            h = 1e-4
+            plus = evaluate(tuple(x+h*d for x, d in zip(q, gradient)))
+            minus = evaluate(tuple(x-h*d for x, d in zip(q, gradient)))
+            answer.append((plus[component]-minus[component])/(2*h))
+        return answer
+
+    report = ("int c=int(7*u+3*v)%3;float component_value=result[c];"
+              "Cout=color(component_value,Dx(component_value),Dy(component_value));")
+    cases = []
+    for space in ("XYZ", "xyY", "YIQ", "hsv", "hsl", "sRGB", "rgb", "RGB", "linear", "Rec709"):
+        for inverse in ((False, True) if space not in ("rgb", "RGB", "linear", "Rec709")
+                        else (True,)):
+            expression = (f'transformc("{space}", "rgb", q)' if inverse
+                          else f'transformc("rgb", "{space}", q)')
+            cases.append((expression, lambda q, s=space, inv=inverse: convert(s, inv, q), False))
+    cases.append(("color(luminance(q))",
+                  lambda q: (sum(a*b for a, b in zip(to_xyz[1], q)),)*3, False))
+    for space in ("XYZ", "xyY", "YIQ", "hsv", "hsl", "rgb", "RGB", "Rec709"):
+        cases.append((f'color("{space}",q[0],q[1],q[2])',
+                      lambda q, s=space: convert(s, True, q), True))
+    for index, (expression, evaluate, zero_derivatives) in enumerate(cases):
+        name = f"color_math_{index}"
+        source = root / (name + ".osl")
+        source.write_text(
+            f"shader {name}(output color Cout=0) {{color q={inputs};"
+            f"color result={expression};" + report + "}",
+            encoding="ascii")
+        compile_fixture(source)
+        target = reference(width, height, lambda u, v:
+                           sampled(evaluate, u, v, zero_derivatives))
+        for osl_opt, llvm_opt, mode in configurations:
+            print("Checking color", expression, osl_opt, mode, flush=True)
+            check_image_render([name], [osl_opt, "--llvm_opt", llvm_opt],
+                               mode, width, height, target, tolerance=2e-6)
+
+    for name, source in (
+        ("color_inputs", f"shader color_inputs(output color value=0) {{value={inputs};}}"),
+        ("color_connected", "shader color_connected(color value=0, output color Cout=0) {"
+         'color result=transformc("rgb","XYZ",value);' + report + "}"),
+    ):
+        path = root / (name + ".osl")
+        path.write_text(source, encoding="ascii")
+        compile_fixture(path)
+    target = reference(width, height,
+                       lambda u, v: sampled(lambda q: matrix(to_xyz, q), u, v))
+    for osl_opt, llvm_opt, mode in configurations + [
+            ("-O2", "3", []), ("-O2", "3", ["--hart-fused"])]:
+        check_image_render(connected_group("color_connected", producer="color_inputs"),
+                           [osl_opt, "--llvm_opt", llvm_opt], mode,
+                           width, height, target, tolerance=2e-6)
+
+    for index, expression in enumerate((
+            'transformc("not-a-built-in","rgb",color(u,v,1))',
+            'transformc("rgb","not-a-built-in",color(u,v,1))',
+            'transformc("not-a-built-in","not-a-built-in",color(u,v,1))',
+            'color("not-a-built-in",u,v,1)')):
+        name = f"color_rejected_{index}"
+        source = root / (name + ".osl")
+        source.write_text(f"shader {name}(output color Cout=0) {{"
+                          f"if(u<0) Cout={expression};}}", encoding="ascii")
+        compile_fixture(source)
+        image = root / (name + ".pfm")
+        for shaders in ([name], ["--shader", name, "unused", "--shader", "hart_first", "last"]):
+            run(["--hart", "-v", "-o", "Cout", str(image)] + shaders,
+                "not-a-built-in")
+            assert not image.exists()
+
+    for inverse in (False, True):
+        name = "color_transfer_" + str(int(inverse))
+        expression = ('transformc("sRGB","rgb",q)' if inverse
+                      else 'transformc("rgb","sRGB",q)')
+        source = root / (name + ".osl")
+        source.write_text(f"shader {name}(output color Cout=0) {{"
+                          "color q=color(-.01+.08*u,.001+.006*v,.3);"
+                          f"color result={expression};" + report + "}",
+                          encoding="ascii")
+        compile_fixture(source)
+
+        def expected_transfer(u, v):
+            q = (-.01+.08*u, .001+.006*v, .3)
+            c = int(7*u+3*v) % 3
+            x = q[c]
+            if inverse:
+                slope = (1/12.92 if x <= .04045
+                         else 2.4/1.055*((x+.055)/1.055)**1.4)
+            else:
+                slope = (12.92 if x <= .0031308
+                         else 1.055/2.4*x**(1/2.4-1))
+            return (convert("sRGB", inverse, q)[c],
+                    slope*.08/(width-1) if c == 0 else 0,
+                    slope*.006/(height-1) if c == 1 else 0)
+
+        target = reference(width, height, expected_transfer)
+        for osl_opt, llvm_opt, mode in configurations:
+            check_image_render([name], [osl_opt, "--llvm_opt", llvm_opt],
+                               mode, width, height, target, tolerance=2e-6)
+
+    cie = {0: (.0014, 0, .0065), 1: (.0022, .0001, .0105),
+           2: (.0042, .0001, .0201), 23: (.0147, .2586, .3533),
+           24: (.0049, .3230, .2720), 25: (.0024, .4073, .2123),
+           26: (.0093, .5030, .1582), 78: (.0001, 0, 0),
+           79: (.0001, 0, 0), 80: (0, 0, 0)}
+
+    def wavelength(nm):
+        if not 375 < nm < 780:
+            return (0, 0, 0)
+        position = (nm-380)/5
+        index = int(position)
+        t = position-index
+        xyz = tuple(a+(b-a)*t for a, b in zip(cie[index], cie[index+1]))
+        return tuple(max(0, c/2.52) for c in matrix(from_xyz, xyz))
+
+    for index, (expression, function) in enumerate((
+            ("375+10*u", lambda u, v: 375+10*u),
+            ("498+10*u", lambda u, v: 498+10*u),
+            ("770+20*u", lambda u, v: 770+20*u))):
+        name = f"color_wavelength_{index}"
+        source = root / (name + ".osl")
+        source.write_text(f"shader {name}(output color Cout=0) {{"
+                          f"color result=wavelength_color({expression});"
+                          + report + "}", encoding="ascii")
+        compile_fixture(source)
+        target = reference(width, height, lambda u, v:
+                           (wavelength(function(u, v))[int(7*u+3*v) % 3], 0, 0))
+        for osl_opt, llvm_opt, mode in configurations:
+            check_image_render([name], [osl_opt, "--llvm_opt", llvm_opt],
+                               mode, width, height, target, tolerance=2e-6)
+
+    # Share only the CIE sampling data, not the shader's LUT or computation.
+    table_source = (fixtures.parents[1] / "src" / "liboslexec" / "opcolor_impl.h").read_text()
+    table_match = re.search(r"^\{\s*([\d.,\s]+)\};", table_source, re.M)
+    assert table_match, "Missing CIE color-matching data"
+    cie_samples = [float(x) for x in table_match.group(1).replace("\n", "").split(",")]
+    assert len(cie_samples) == 81*3
+
+    def blackbody(t):
+        if t < 800:
+            return (struct.unpack("<f", struct.pack("<f", 1e-12))[0], 0, 0)
+        xyz = [0.0]*3
+        for i in range(81):
+            wavelength = (380+5*i)*1e-9
+            energy = 3.74183e-16/(wavelength**5
+                                 * math.expm1(.014388/(wavelength*t)))*5e-9
+            for c in range(3):
+                xyz[c] += energy*cie_samples[3*i+c]
+        return tuple(max(0, c)/1e6 for c in matrix(from_xyz, xyz))
+
+    for index, (expression, temperature) in enumerate((
+            ("-1000+1000*u", lambda u, v: -1000+1000*u),
+            ("790+40*u", lambda u, v: 790+40*u),
+            ("3000+4000*u+500*v", lambda u, v: 3000+4000*u+500*v),
+            ("11990+30*u", lambda u, v: 11990+30*u),
+            ("16000+4000*u", lambda u, v: 16000+4000*u))):
+        name = f"color_blackbody_{index}"
+        source = root / (name + ".osl")
+        source.write_text(f"shader {name}(output color Cout=0) {{"
+                          f"color result=blackbody({expression})/1000000;"
+                          + report + "}", encoding="ascii")
+        compile_fixture(source)
+        target = reference(width, height, lambda u, v:
+                           (blackbody(temperature(u, v))[int(7*u+3*v) % 3], 0, 0))
+        for osl_opt, llvm_opt, mode in configurations:
+            print("Checking blackbody", expression, osl_opt, mode, flush=True)
+            flags = [osl_opt, "--llvm_opt", llvm_opt]
+            # LUT interpolation is approximate; above the LUT, retain a tight
+            # GPU integration bound and account separately for CPU fast_expm1.
+            images = check_image_render(
+                [name], flags, mode, width, height, target,
+                tolerance=None if index == 0 else (2e-12 if index == 1 else 2e-6),
+                value_relative_tolerance=2e-6 if index == 4 else 4e-5,
+                cpu_value_relative_tolerance=1.3e-5 if index == 4 else 4e-5)
+            for image in images:
+                assert image[1::3] == image[2::3] == [0]*(width*height)
+
+    source = root / "color_special.osl"
+    source.write_text(
+        "shader color_special(float special=0, int kind=0, output color Cout=0) {"
+        "float x=special+u; color result=kind ? blackbody(x) : wavelength_color(x);"
+        "Cout=color(isnan(result[0]),isinf(result[0]),isfinite(result[0]));}",
+        encoding="ascii")
+    compile_fixture(source)
+    for kind in (0, 1):
+        for special in ("nan", "inf", "-inf", "1e38", "-1e38"):
+            shaders = ["--param:type=float", "special", special,
+                       "--param", "kind", str(kind), "color_special"]
+            flags = ["-O0", "--llvm_opt", "10"]
+            gpu_nan = kind == 1 and special in ("nan", "inf", "1e38")
+            cpu_nan = kind == 1 and special in ("inf", "1e38")
+            target = [int(gpu_nan), 0, int(not gpu_nan)]*(width*height)
+            cpu_target = [int(cpu_nan), 0, int(not cpu_nan)]*(width*height)
+            check_image_render(shaders, flags, [], width, height, target,
+                               cpu_expected=cpu_target)
 
 
 def check_numeric_math_suite():
@@ -3173,6 +3442,8 @@ try:
         check_numeric_math_suite()
     if args.splines:
         check_spline_suite()
+    if args.colors:
+        check_color_suite()
 
     if args.procedural:
         check_procedural_suite()
@@ -3217,7 +3488,7 @@ try:
         check_fused_benchmark()
 
     if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-                         or args.noise or args.noise_families or args.math or args.numeric_math or args.splines
+                         or args.noise or args.noise_families or args.math or args.numeric_math or args.splines or args.colors
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
                          or args.matrices
@@ -3315,7 +3586,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.splines:
+if args.colors:
+    suite = "color systems"
+elif args.splines:
     suite = "splines"
 elif args.numeric_math:
     suite = "numeric math"

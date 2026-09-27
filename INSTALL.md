@@ -461,7 +461,7 @@ nonfinite input classification. HIP `asin`/`acos` explicitly retain OSL's domain
 clamp. CPU-only approximation tolerances do not loosen GPU reference or
 derivative checks. The existing shared `atan2` duals' reversed derivative signs
 are preserved for backend parity, not corrected by this change.
-This does not enable color-system or additional noise selectors.
+Additional noise selectors still require explicit support.
 
 HART also supports `spline` and `splineinverse` with literal `catmull-rom`,
 `bezier`, `bspline`, `hermite`, `linear` and `constant` bases. Renderers opt in
@@ -477,6 +477,37 @@ ignores knot derivatives, and can drop derivatives at solver segment boundaries.
 `hart-spline-runtime` checks nonlinear bases, derivatives, connected/resized
 arrays, endpoints and pre/post-launch failures. Path-tracer tests also compose
 spline weights with textures and verify device failure propagation.
+
+The grid and path renderers bind color-system data through their device service
+state, not host addresses or general userdata. `HARTColorSystem` renderers
+provide `rs_hart_get_colorsystem` and `rs_hart_color_error`. This enables
+`luminance`, `blackbody`, `wavelength_color` and supported literal built-in color
+conversions: RGB/rgb, hsv/hsl, YIQ, XYZ, xyY and the current working-space name.
+`transformc` also accepts linear and sRGB; these are not additional named
+constructor spaces. Custom OCIO conversions and dynamic space names are not enabled.
+Unsupported literal spaces are rejected before optimization, including in
+unused layers. A conversion that becomes unsupported after rebinding reports a
+device error and prevents output publication rather than returning an identity
+transform silently.
+
+Color-system-dependent HART expressions retain runtime data access even with
+constant shader inputs. The shared resource owner refreshes the POD data and
+trailing string hashes before each render, reusing its device allocation.
+`hart-color-rebind-*` tests use one optimized group through A-B-A working-space
+changes, check values and derivatives independently, and require actual native
+pipeline cache hits. `hart-color-runtime` covers numerical conversions and
+connected values; path tests compose color operations with textured spline
+weights. Named color constructors, blackbody and wavelength shadeops retain
+OSL's zero output-derivative convention. The existing Rec709 D65 white point
+uses y=0.3291; tests derive matrices from that value, not a different standard
+white point. HIP wavelength lookup returns zero outside the existing table
+domain (including nonfinite inputs), without undefined float-to-index conversion;
+the existing first-bin extrapolation between 375 and 380 nm is retained.
+Blackbody tests use an independent double-precision Planck integral over the
+same CIE sampling data. The existing interpolated lookup table is approximate;
+direct HIP integration is checked more tightly than CPU `fast_expm1`.
+CPU fast-math can turn a NaN temperature into a finite result, while HIP's
+libm path propagates NaN; classification tests preserve that backend distinction.
 
 `Dx` and `Dy` expose OSL's propagated first-order derivatives. For example:
 

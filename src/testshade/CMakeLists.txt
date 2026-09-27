@@ -308,6 +308,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --splines)
             set_tests_properties (hart-spline-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-color-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --colors)
+            set_tests_properties (hart-color-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-procedural-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
@@ -381,7 +387,7 @@ if (BUILD_TESTING AND OSL_USE_HART)
     if (OSL_BUILD_TESTS)
         add_executable (hart_texture_test hart_texture_test.cpp harttexture.cpp)
         target_include_directories (hart_texture_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
-        target_link_libraries (hart_texture_test PRIVATE OpenImageIO::OpenImageIO hip::host)
+        target_link_libraries (hart_texture_test PRIVATE oslexec OpenImageIO::OpenImageIO hip::host)
         add_dependencies (hart_texture_test testshade)
         set_target_properties (hart_texture_test PROPERTIES FOLDER "Unit Tests")
         if (USE_LLVM_BITCODE)
@@ -414,6 +420,15 @@ if (BUILD_TESTING AND OSL_USE_HART)
             add_dependencies (hart_transform_test testshade)
             set_target_properties (hart_transform_test PROPERTIES FOLDER "Unit Tests")
             if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+                foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    add_test (NAME hart-color-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                        "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                        --mode ${mode} --kind color)
+                    set_tests_properties (hart-color-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                endforeach ()
                 add_test (NAME hart-transform-rebind COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
                     "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")

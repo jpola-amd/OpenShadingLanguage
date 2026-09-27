@@ -1950,7 +1950,8 @@ DECLFOLDER(constfold_triple)
     Symbol& A(*rop.inst()->argsymbol(op.firstarg() + 1 + using_space));
     Symbol& B(*rop.inst()->argsymbol(op.firstarg() + 2 + using_space));
     Symbol& C(*rop.inst()->argsymbol(op.firstarg() + 3 + using_space));
-    if (using_space) {
+    if (using_space
+        && !(rop.shadingsys().use_hart() && op.opname() == ustring("color"))) {
         // If we're using a space name and it's equivalent to "common",
         // just pretend it doesn't exist.
         Symbol& Space(*rop.inst()->argsymbol(op.firstarg() + 1));
@@ -2200,12 +2201,28 @@ DECLFOLDER(constfold_transformc)
             from = Strings::rgb;
         if (to == Strings::RGB)
             to = Strings::rgb;
+        const auto independent_space = [](ustring space) {
+            return space == Strings::rgb || space == Strings::linear
+                   || space == Strings::hsv || space == Strings::hsl
+                   || space == Strings::YIQ;
+        };
         if (from == to) {
+            // A current-system alias must still be checked after HART rebinds
+            // the color system; unsupported aliases must not become identity.
+            if (rop.shadingsys().use_hart() && !independent_space(from)
+                && from != Strings::XYZ && from != Strings::xyY
+                && from != Strings::sRGB)
+                return 0;
             rop.turn_into_assign(op, rop.inst()->arg(op.firstarg() + 3),
                                  "transformc by identity");
             return 1;
         }
         if (C.is_constant()) {
+            // XYZ/xyY matrices, sRGB's current-system alias, and other current
+            // RGB names depend on the launch-time ColorSystem, even for const C.
+            if (rop.shadingsys().use_hart()
+                && (!independent_space(from) || !independent_space(to)))
+                return 0;
             Color3 Cin(C.get_float(0), C.get_float(1), C.get_float(2));
             Color3 result = rop.shadingsys().colorsystem().transformc(
                 from, to, Cin, rop.shaderglobals()->context, nullptr);

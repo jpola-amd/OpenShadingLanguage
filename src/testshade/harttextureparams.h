@@ -19,7 +19,8 @@ enum HartDeviceError : unsigned int {
     HartClosureInvalidTree          = 32,
     HartInvalidRayHit               = 64,
     HartArrayIndexOutOfBounds       = 128,
-    HartInvalidSpline               = 256
+    HartInvalidSpline               = 256,
+    HartUnsupportedColorTransform   = 512
 };
 
 // Texture IDs are one-based indices into the launch-time descriptor table.
@@ -32,12 +33,13 @@ struct HartTextureState {
     const HartTextureDesc* textures;
     uint64_t count;
     unsigned int* errors;
+    const void* colorsystem;
 };
 
 static_assert(
     sizeof(void*) == 8 && sizeof(HartTextureDesc) == 24
-        && sizeof(HartTextureState) == 24,
-    "The HART texture ABI requires 64-bit pointers and 24-byte records");
+        && sizeof(HartTextureState) == 32,
+    "The HART texture ABI requires 64-bit pointers and fixed record sizes");
 static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureDesc, width) == 8
                   && offsetof(HartTextureDesc, height) == 12
@@ -45,7 +47,8 @@ static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureDesc, channels) == 20
                   && offsetof(HartTextureState, textures) == 0
                   && offsetof(HartTextureState, count) == 8
-                  && offsetof(HartTextureState, errors) == 16,
+                  && offsetof(HartTextureState, errors) == 16
+                  && offsetof(HartTextureState, colorsystem) == 24,
               "Unexpected HART texture ABI offsets");
 static_assert(std::is_trivial<HartTextureDesc>::value
                   && std::is_standard_layout<HartTextureDesc>::value

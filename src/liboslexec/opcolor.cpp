@@ -25,6 +25,14 @@
 
 OSL_NAMESPACE_BEGIN
 
+#if defined(__HIP__)
+extern "C" OSL_DEVICE const void*
+rs_hart_get_colorsystem(OpaqueExecContextPtr oec);
+
+extern "C" OSL_DEVICE void
+rs_hart_color_error(OpaqueExecContextPtr oec);
+#endif
+
 namespace pvt {
 
 // clang-format off
@@ -224,8 +232,11 @@ ColorSystem::ocio_transform(ustringhash fromspace, ustringhash tospace,
                             const Color& C, ShadingContext* ctx,
                             ExecContextPtr ec) const
 {
-// Currently CPU only supports ocio by going through ShadingContext
-#if !OSL_GPU_DEVICE && !defined(OSL_COMPILING_TO_BITCODE)
+    // Currently CPU only supports ocio by going through ShadingContext.
+#if defined(__HIP_DEVICE_COMPILE__)
+    rs_hart_color_error(ec);
+    return Color(Color3(0.0f));
+#elif !OSL_GPU_DEVICE && !defined(OSL_COMPILING_TO_BITCODE)
     Color Cout;
 
     assert(ctx);
@@ -244,7 +255,7 @@ ColorSystem::ocio_transform(ustringhash fromspace, ustringhash tospace,
         OSL::errorfmt(ec, "Unknown color space transformation \"{}\" -> \"{}\"",
                       fromspace, tospace);
     }
-#endif  // !OSL_GPU_DEVICE && !defined(OSL_COMPILING_TO_BITCODE)
+#endif
 
     return C;
 }
@@ -401,7 +412,16 @@ ColorSystem::transformc(ustringhash fromspace, ustringhash tospace,
 
 
 // On GPUs, this will be defined by the renderer. Otherwise inline a getter.
-#if OSL_GPU_COMPILER
+#if defined(__HIP__)
+namespace {
+
+__device__ static inline const ColorSystem&
+get_colorsystem(OSL::OpaqueExecContextPtr oec)
+{ return *static_cast<const ColorSystem*>(rs_hart_get_colorsystem(oec)); }
+
+}  // namespace
+
+#elif OSL_GPU_COMPILER
 extern "C" __device__ int
 rend_get_userdata(ustringhash name, void* data, int data_size,
                   const OSL::TypeDesc& type, int index);
@@ -484,7 +504,11 @@ osl_prepend_color_from(OpaqueExecContextPtr oec, void* c_,
     auto from             = ustringhash_from(from_);
     const ColorSystem& cs = get_colorsystem(oec);
     auto ec               = pvt::get_ec(oec);
-    COL(c_)               = cs.to_rgb(from, COL(c_), ec->context, ec);
+#if defined(__HIP_DEVICE_COMPILE__)
+    COL(c_) = cs.to_rgb(from, COL(c_), nullptr, ec);
+#else
+    COL(c_) = cs.to_rgb(from, COL(c_), ec->context, ec);
+#endif
 }
 
 
@@ -499,10 +523,15 @@ osl_transformc(OpaqueExecContextPtr oec, void* Cin, int Cin_derivs, void* Cout,
     auto to   = ustringhash_from(to_);
 
     auto ec = pvt::get_ec(oec);
+#if defined(__HIP_DEVICE_COMPILE__)
+    ShadingContext* ctx = nullptr;
+#else
+    ShadingContext* ctx = ec->context;
+#endif
 
     if (Cout_derivs) {
         if (Cin_derivs) {
-            DCOL(Cout) = cs.transformc(from, to, DCOL(Cin), ec->context, ec);
+            DCOL(Cout) = cs.transformc(from, to, DCOL(Cin), ctx, ec);
             return true;
         } else {
             // We had output derivs, but not input. Zero the output
@@ -513,7 +542,7 @@ osl_transformc(OpaqueExecContextPtr oec, void* Cin, int Cin_derivs, void* Cout,
     }
 
     // No-derivs case
-    COL(Cout) = cs.transformc(from, to, COL(Cin), ec->context, ec);
+    COL(Cout) = cs.transformc(from, to, COL(Cin), ctx, ec);
     return true;
 }
 

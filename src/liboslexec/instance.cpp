@@ -590,6 +590,59 @@ ShaderInstance::validate_hart() const
         }
         return true;
     };
+    auto validate_color = [&](const Opcode& op) {
+        const bool constructor = op.opname() == ustring("color");
+        if (constructor && op.nargs() == 4)
+            return true;
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTColorSystem"))
+            return fail("renderer lacks HARTColorSystem");
+        const bool transform = op.opname() == ustring("transformc");
+        const bool luminance = op.opname() == ustring("luminance");
+        if (op.nargs() != (constructor ? 5 : (transform ? 4 : 2)))
+            return fail("invalid color operation arguments");
+        const TypeSpec& result = symbol(0).typespec();
+        if (result.is_array()
+            || (luminance ? !result.is_float() : !result.is_triple()))
+            return fail("invalid color operation result type");
+        const int first_value = constructor ? 2 : (transform ? 3 : 1);
+        for (int a = first_value; a < op.nargs(); ++a) {
+            const TypeSpec& type = symbol(a).typespec();
+            if (type.is_array()
+                || ((luminance || transform) ? !type.is_triple()
+                                             : !type.is_float()))
+                return fail("invalid color operation value type");
+        }
+        if (!constructor && !transform)
+            return true;
+        for (int a = 1; a < first_value; ++a) {
+            const Symbol& space = symbol(a);
+            if (!space.is_constant() || !space.typespec().is_string())
+                return fail("color spaces must be literal strings");
+            const ustring name = space.get_string();
+            // Constructors use to_rgb, whose built-ins intentionally differ
+            // from transformc. Other RGB system names are only current aliases.
+            const bool builtin
+                = name == ustring("RGB") || name == ustring("rgb")
+                  || name == ustring("hsv") || name == ustring("hsl")
+                  || name == ustring("YIQ") || name == ustring("XYZ")
+                  || name == ustring("xyY")
+                  || (transform
+                      && (name == ustring("linear") || name == ustring("sRGB")));
+            if (!builtin
+                && ustringhash(name) != shadingsys().colorsystem().colorspace())
+                return fail(fmtformat("unsupported color space '{}'", name));
+        }
+        return true;
+    };
     for (int i = firstparam(); i < lastparam(); ++i) {
         const Symbol& sym = *mastersymbol(i);
         if (!validate_type(sym))
@@ -603,63 +656,123 @@ ShaderInstance::validate_hart() const
         }
     }
     static const ustring supported[] = {
-        ustring("nop"),          ustring("end"),
-        ustring("useparam"),     ustring("assign"),
-        ustring("add"),          ustring("sub"),
-        ustring("mul"),          ustring("div"),
-        ustring("neg"),          ustring("color"),
-        ustring("sin"),          ustring("compref"),
-        ustring("compassign"),   ustring("if"),
-        ustring("lt"),           ustring("le"),
-        ustring("eq"),           ustring("ge"),
-        ustring("gt"),           ustring("neq"),
-        ustring("for"),          ustring("while"),
-        ustring("dowhile"),      ustring("break"),
-        ustring("continue"),     ustring("return"),
-        ustring("exit"),         ustring("and"),
-        ustring("or"),           ustring("bitand"),
-        ustring("bitor"),        ustring("xor"),
-        ustring("compl"),        ustring("shl"),
-        ustring("shr"),          ustring("mod"),
-        ustring("arraycopy"),    ustring("arraylength"),
-        ustring("aref"),         ustring("aassign"),
-        ustring("Dx"),           ustring("Dy"),
-        ustring("point"),        ustring("vector"),
-        ustring("normal"),       ustring("dot"),
-        ustring("length"),       ustring("normalize"),
-        ustring("filterwidth"),  ustring("noise"),
-        ustring("snoise"),       ustring("abs"),
-        ustring("min"),          ustring("max"),
-        ustring("clamp"),        ustring("mix"),
-        ustring("step"),         ustring("smoothstep"),
-        ustring("floor"),        ustring("ceil"),
-        ustring("fmod"),         ustring("cos"),
-        ustring("sqrt"),         ustring("pow"),
-        ustring("functioncall"), ustring("pnoise"),
-        ustring("psnoise"),      ustring("cellnoise"),
-        ustring("hashnoise"),    ustring("texture"),
-        ustring("matrix"),       ustring("mxcompref"),
-        ustring("mxcompassign"), ustring("transpose"),
-        ustring("determinant"),  ustring("transform"),
-        ustring("transformv"),   ustring("transformn"),
-        ustring("getmatrix"),    ustring("closure"),
-        ustring("tan"),          ustring("asin"),
-        ustring("acos"),         ustring("atan"),
-        ustring("atan2"),        ustring("sinh"),
-        ustring("cosh"),         ustring("tanh"),
-        ustring("sincos"),       ustring("log"),
-        ustring("log2"),         ustring("log10"),
-        ustring("logb"),         ustring("exp"),
-        ustring("exp2"),         ustring("expm1"),
-        ustring("erf"),          ustring("erfc"),
-        ustring("cbrt"),         ustring("inversesqrt"),
-        ustring("round"),        ustring("trunc"),
-        ustring("sign"),         ustring("isnan"),
-        ustring("isinf"),        ustring("isfinite"),
-        ustring("fabs"),         ustring("cross"),
-        ustring("distance"),     ustring("area"),
+        ustring("nop"),
+        ustring("end"),
+        ustring("useparam"),
+        ustring("assign"),
+        ustring("add"),
+        ustring("sub"),
+        ustring("mul"),
+        ustring("div"),
+        ustring("neg"),
+        ustring("color"),
+        ustring("sin"),
+        ustring("compref"),
+        ustring("compassign"),
+        ustring("if"),
+        ustring("lt"),
+        ustring("le"),
+        ustring("eq"),
+        ustring("ge"),
+        ustring("gt"),
+        ustring("neq"),
+        ustring("for"),
+        ustring("while"),
+        ustring("dowhile"),
+        ustring("break"),
+        ustring("continue"),
+        ustring("return"),
+        ustring("exit"),
+        ustring("and"),
+        ustring("or"),
+        ustring("bitand"),
+        ustring("bitor"),
+        ustring("xor"),
+        ustring("compl"),
+        ustring("shl"),
+        ustring("shr"),
+        ustring("mod"),
+        ustring("arraycopy"),
+        ustring("arraylength"),
+        ustring("aref"),
+        ustring("aassign"),
+        ustring("Dx"),
+        ustring("Dy"),
+        ustring("point"),
+        ustring("vector"),
+        ustring("normal"),
+        ustring("dot"),
+        ustring("length"),
+        ustring("normalize"),
+        ustring("filterwidth"),
+        ustring("noise"),
+        ustring("snoise"),
+        ustring("abs"),
+        ustring("min"),
+        ustring("max"),
+        ustring("clamp"),
+        ustring("mix"),
+        ustring("step"),
+        ustring("smoothstep"),
+        ustring("floor"),
+        ustring("ceil"),
+        ustring("fmod"),
+        ustring("cos"),
+        ustring("sqrt"),
+        ustring("pow"),
+        ustring("functioncall"),
+        ustring("pnoise"),
+        ustring("psnoise"),
+        ustring("cellnoise"),
+        ustring("hashnoise"),
+        ustring("texture"),
+        ustring("matrix"),
+        ustring("mxcompref"),
+        ustring("mxcompassign"),
+        ustring("transpose"),
+        ustring("determinant"),
+        ustring("transform"),
+        ustring("transformv"),
+        ustring("transformn"),
+        ustring("getmatrix"),
+        ustring("closure"),
+        ustring("tan"),
+        ustring("asin"),
+        ustring("acos"),
+        ustring("atan"),
+        ustring("atan2"),
+        ustring("sinh"),
+        ustring("cosh"),
+        ustring("tanh"),
+        ustring("sincos"),
+        ustring("log"),
+        ustring("log2"),
+        ustring("log10"),
+        ustring("logb"),
+        ustring("exp"),
+        ustring("exp2"),
+        ustring("expm1"),
+        ustring("erf"),
+        ustring("erfc"),
+        ustring("cbrt"),
+        ustring("inversesqrt"),
+        ustring("round"),
+        ustring("trunc"),
+        ustring("sign"),
+        ustring("isnan"),
+        ustring("isinf"),
+        ustring("isfinite"),
+        ustring("fabs"),
+        ustring("cross"),
+        ustring("distance"),
+        ustring("area"),
         ustring("calculatenormal"),
-        ustring("spline"),       ustring("splineinverse"),
+        ustring("spline"),
+        ustring("splineinverse"),
+        ustring("blackbody"),
+        ustring("wavelength_color"),
+        ustring("luminance"),
+        ustring("transformc"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),    ustring("v"),  ustring("P"),
@@ -682,6 +795,13 @@ ShaderInstance::validate_hart() const
         if ((op.opname() == ustring("spline")
              || op.opname() == ustring("splineinverse"))
             && !validate_spline(op))
+            return false;
+        if ((op.opname() == ustring("color")
+             || op.opname() == ustring("blackbody")
+             || op.opname() == ustring("wavelength_color")
+             || op.opname() == ustring("luminance")
+             || op.opname() == ustring("transformc"))
+            && !validate_color(op))
             return false;
         if (op.opname() == ustring("mxcompref")
             || op.opname() == ustring("mxcompassign")) {
@@ -743,6 +863,9 @@ ShaderInstance::validate_hart() const
             if (a == 1 && (op.opname() == ustring("spline")
                            || op.opname() == ustring("splineinverse")))
                 continue;  // Validated literal basis, not a device string.
+            if ((op.opname() == ustring("color") && op.nargs() == 5 && a == 1)
+                || (op.opname() == ustring("transformc") && (a == 1 || a == 2)))
+                continue;  // Validated literal color spaces, not device strings.
             if (sym.typespec().is_string()
                 && (op.opname() == ustring("matrix")
                     || op.opname() == ustring("getmatrix")

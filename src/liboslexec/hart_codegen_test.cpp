@@ -23,11 +23,15 @@
 #include <OSL/rendererservices.h>
 #include <OSL/shaderglobals.h>
 
+#include "hart_bitcode.h"
+#include "opcolor.h"
+
 #include <OpenImageIO/unittest.h>
 
 #include <algorithm>
 #include <initializer_list>
 
+#include <llvm/ADT/APInt.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Config/llvm-config.h>
@@ -54,12 +58,13 @@ class HartServices final : public RendererServices {
 public:
     explicit HartServices(bool textures = false, bool transforms = false,
                           bool closures = false, bool arrays = false,
-                          bool splines = false)
+                          bool splines = false, bool colors = false)
         : m_textures(textures)
         , m_transforms(transforms)
         , m_closures(closures)
         , m_arrays(arrays)
         , m_splines(splines)
+        , m_colors(colors)
     {
     }
     int supports(string_view feature) const override
@@ -68,7 +73,8 @@ public:
                || (m_transforms && feature == "HARTTransforms")
                || (m_closures && feature == "HARTClosures")
                || (m_arrays && feature == "HARTArrayBounds")
-               || (m_splines && feature == "HARTSplineErrors");
+               || (m_splines && feature == "HARTSplineErrors")
+               || (m_colors && feature == "HARTColorSystem");
     }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -94,6 +100,7 @@ private:
     bool m_closures;
     bool m_arrays;
     bool m_splines;
+    bool m_colors;
 };
 
 
@@ -306,11 +313,258 @@ check_wrapper(const llvm::Function* wrapper,
 
 
 void
+check_color_abi(const llvm::Module& module, int optimize,
+                int expected_transforms)
+{
+    int transforms = 0;
+    const struct {
+        const char* name;
+        const char* args;
+        char result;
+    } signatures[] = {
+        { "osl_blackbody_vf", "ppf", 'v' },
+        { "osl_wavelength_color_vf", "ppf", 'v' },
+        { "osl_luminance_fv", "ppp", 'v' },
+        { "osl_luminance_dfdv", "ppp", 'v' },
+        { "osl_prepend_color_from", "ppl", 'v' },
+        { "osl_transformc", "ppipill", 'i' },
+        { "rs_hart_get_colorsystem", "p", 'p' },
+        { "rs_hart_color_error", "p", 'v' },
+    };
+    for (const auto& signature : signatures) {
+        const auto* function = module.getFunction(signature.name);
+        if (!function || function->use_empty())
+            continue;
+        const bool callback = OIIO::Strutil::starts_with(signature.name, "rs_");
+        bool original_call  = false;
+        if (!callback && optimize == 10)
+            for (const auto* user : function->users())
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
+                    if (call->getCalledFunction() == function) {
+                        const auto caller = call->getFunction()->getName();
+                        original_call |= caller.find("osl_layer_group_") == 0
+                                         || caller.find("osl_init_group_") == 0;
+                        if (string_view(signature.name) == "osl_transformc"
+                            && (caller.find("osl_layer_group_") == 0
+                                || caller.find("osl_init_group_") == 0))
+                            ++transforms;
+                    }
+        if (!callback && !original_call)
+            continue;  // Internal specializations may drop original arguments.
+        OIIO_CHECK_EQUAL(function->isDeclaration(), callback);
+        OIIO_CHECK_ASSERT(!function->isVarArg());
+        const auto* result = function->getReturnType();
+        OIIO_CHECK_ASSERT(
+            signature.result == 'p'
+                ? result->isPointerTy() && result->getPointerAddressSpace() == 0
+                : (signature.result == 'i' ? result->isIntegerTy(32)
+                                           : result->isVoidTy()));
+        const string_view args(signature.args);
+        OIIO_CHECK_EQUAL(function->arg_size(), args.size());
+        for (const auto& arg : function->args()) {
+            if (arg.getArgNo() >= args.size())
+                continue;
+            const char kind = args[arg.getArgNo()];
+            OIIO_CHECK_ASSERT(
+                kind == 'p'
+                    ? arg.getType()->isPointerTy()
+                          && arg.getType()->getPointerAddressSpace() == 0
+                    : (kind == 'f' ? arg.getType()->isFloatTy()
+                                   : arg.getType()->isIntegerTy(
+                                         kind == 'i' ? 32 : 64)));
+        }
+    }
+    if (optimize == 10 && expected_transforms >= 0)
+        OIIO_CHECK_EQUAL(transforms, expected_transforms);
+    const auto* getter = module.getFunction("rs_hart_get_colorsystem");
+    if (!getter || getter->use_empty())
+        return;
+    const auto* legacy = module.getFunction("rend_get_userdata");
+    OIIO_CHECK_ASSERT(!legacy || legacy->use_empty());
+}
+
+
+
+bool
+check_color_layout(string_view arch, string_view filename)
+{
+    auto file = llvm::MemoryBuffer::getFile(std::string(filename));
+    if (!file) {
+        print(stderr, "Cannot read color ABI probe '{}': {}\n", filename,
+              file.getError().message());
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile((*file)->getMemBufferRef(), context);
+    if (!parsed) {
+        print(stderr, "Cannot parse color ABI probe: {}\n",
+              llvm::toString(parsed.takeError()));
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    auto& module = **parsed;
+    std::string error;
+    llvm::raw_string_ostream diagnostic(error);
+    OIIO_CHECK_ASSERT(!llvm::verifyModule(module, &diagnostic));
+    if (!error.empty())
+        print(stderr, "{}\n", error);
+    const llvm::Triple triple(module.getTargetTriple());
+    OIIO_CHECK_EQUAL(triple.getArch(), llvm::Triple::amdgcn);
+    OIIO_CHECK_EQUAL(triple.getOS(), llvm::Triple::AMDHSA);
+    const auto* address = module.getFunction("osl_hart_color_abi_address");
+    OIIO_CHECK_ASSERT(address && !address->isDeclaration());
+    if (address)
+        OIIO_CHECK_EQUAL(
+            address->getFnAttribute("target-cpu").getValueAsString().str(),
+            std::string(arch));
+    const auto* object = module.getNamedGlobal("osl_hart_color_abi_probe");
+    OIIO_CHECK_ASSERT(object && object->isDeclaration()
+                      && !object->use_empty());
+    if (!object)
+        return false;
+    auto* type = llvm::dyn_cast<llvm::StructType>(object->getValueType());
+    OIIO_CHECK_ASSERT(type && !type->isOpaque() && type->getNumElements() > 0);
+    if (!type || type->isOpaque() || !type->getNumElements())
+        return false;
+    OIIO_CHECK_EQUAL(object->getAddressSpace(), 1);
+    const auto& layout = module.getDataLayout();
+    OIIO_CHECK_EQUAL(layout.getAllocaAddrSpace(), 5);
+    OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
+    const uint64_t target_size  = layout.getTypeAllocSize(type).getFixedValue();
+    const uint64_t target_align = layout.getABITypeAlign(type).value();
+    const unsigned int last     = type->getNumElements() - 1;
+    const uint64_t target_hash = layout.getStructLayout(type)->getElementOffset(
+        last);
+    OIIO_CHECK_ASSERT(object->getAlign());
+    if (object->getAlign())
+        OIIO_CHECK_EQUAL(object->getAlign()->value(), target_align);
+
+    // Inspect the real target class, not a fabricated layout or host-size
+    // assumption. The public upload protocol supplies the independent CPU ABI.
+    RendererServices renderer;
+    Diagnostics errors;
+    ShadingSystem ss(&renderer, nullptr, &errors);
+    const void* host_data = nullptr;
+    long long sizes[2]    = { };
+    OIIO_CHECK_ASSERT(
+        ss.getattribute("colorsystem", TypeDesc::PTR, &host_data));
+    OIIO_CHECK_ASSERT(ss.getattribute("colorsystem:sizes",
+                                      TypeDesc(TypeDesc::LONGLONG, 2), sizes));
+    OIIO_CHECK_ASSERT(host_data && sizes[0] > 0 && sizes[1] == 1);
+    if (!host_data || sizes[0] <= 0 || sizes[1] != 1)
+        return false;
+    const auto* host       = static_cast<const pvt::ColorSystem*>(host_data);
+    const auto hash_offset = reinterpret_cast<const char*>(&host->colorspace())
+                             - static_cast<const char*>(host_data);
+    OIIO_CHECK_EQUAL(uint64_t(hash_offset),
+                     uint64_t(sizes[0] - sizeof(ustringhash)));
+    const auto pointer_free = [](const auto& self, llvm::Type* type) -> bool {
+        if (auto* record = llvm::dyn_cast<llvm::StructType>(type)) {
+            if (record->isOpaque())
+                return false;
+            for (auto* field : record->elements())
+                if (!self(self, field))
+                    return false;
+            return true;
+        }
+        if (auto* array = llvm::dyn_cast<llvm::ArrayType>(type))
+            return self(self, array->getElementType());
+        if (auto* vector = llvm::dyn_cast<llvm::VectorType>(type))
+            return self(self, vector->getElementType());
+        return type->isIntegerTy() || type->isFloatingPointTy();
+    };
+    OIIO_CHECK_ASSERT(pointer_free(pointer_free, type));
+    OIIO_CHECK_EQUAL(target_size, uint64_t(sizes[0]));
+    OIIO_CHECK_EQUAL(target_align, uint64_t(alignof(pvt::ColorSystem)));
+    OIIO_CHECK_EQUAL(target_hash, uint64_t(hash_offset));
+    OIIO_CHECK_EQUAL(
+        layout.getTypeAllocSize(type->getElementType(last)).getFixedValue(),
+        sizeof(ustringhash));
+
+    // Cross-check the probe against the actual embedded shadeops, whose record
+    // type may already have disappeared during HIP frontend optimization.
+    const auto bytes = pvt::hart_shadeops_bitcode(arch, errors);
+    OIIO_CHECK_EQUAL(errors.errors, 0);
+    OIIO_CHECK_ASSERT(!bytes.empty());
+    if (bytes.empty())
+        return false;
+    llvm::LLVMContext production_context;
+    const llvm::StringRef data(reinterpret_cast<const char*>(bytes.data()),
+                               bytes.size());
+    auto production
+        = llvm::parseBitcodeFile(llvm::MemoryBufferRef(data, "hart_shadeops"),
+                                 production_context);
+    if (!production) {
+        print(stderr, "{}\n", llvm::toString(production.takeError()));
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    const auto& shadeops = **production;
+    OIIO_CHECK_EQUAL(triple.str(),
+                     llvm::Triple(shadeops.getTargetTriple()).str());
+    OIIO_CHECK_EQUAL(module.getDataLayoutStr(), shadeops.getDataLayoutStr());
+    OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_color_abi_probe"));
+    OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_color_abi_address"));
+    int setters = 0;
+    for (const auto& setter : shadeops) {
+        if (setter.getName().find("11ColorSystem14set_colorspace")
+            == llvm::StringRef::npos)
+            continue;
+        ++setters;
+        OIIO_CHECK_ASSERT(!setter.isDeclaration());
+        OIIO_CHECK_EQUAL(setter.arg_size(), 2);
+        if (setter.arg_size() != 2)
+            continue;
+        OIIO_CHECK_EQUAL(
+            setter.getFnAttribute("target-cpu").getValueAsString().str(),
+            std::string(arch));
+        const auto alignment
+            = setter.getAttributes().getParamAttr(0,
+                                                  llvm::Attribute::Alignment);
+        const auto size = setter.getAttributes().getParamAttr(
+            0, llvm::Attribute::Dereferenceable);
+        OIIO_CHECK_ASSERT(alignment.isIntAttribute() && size.isIntAttribute());
+        if (alignment.isIntAttribute())
+            OIIO_CHECK_EQUAL(alignment.getValueAsInt(), target_align);
+        if (size.isIntAttribute())
+            OIIO_CHECK_EQUAL(size.getValueAsInt(), target_size);
+        bool hash_load = false;
+        for (const auto& block : setter)
+            for (const auto& inst : block) {
+                const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(
+                    &inst);
+                if (!gep
+                    || gep->getPointerOperand()->stripPointerCasts()
+                           != setter.getArg(0))
+                    continue;
+                llvm::APInt offset(shadeops.getDataLayout().getIndexSizeInBits(
+                                       gep->getPointerAddressSpace()),
+                                   0);
+                if (!gep->accumulateConstantOffset(shadeops.getDataLayout(),
+                                                   offset)
+                    || offset.getZExtValue() != target_hash)
+                    continue;
+                for (const auto* user : gep->users())
+                    if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
+                        hash_load |= load->getPointerOperand() == gep
+                                     && load->getType()->isIntegerTy(64);
+            }
+        OIIO_CHECK_ASSERT(hash_load);
+    }
+    OIIO_CHECK_EQUAL(setters, 1);
+    return true;
+}
+
+
+
+void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
              bool looping = false, int used_layers = 0, bool closures = false,
-             bool aggregates = false, int spline_arraylen = 0)
+             bool aggregates = false, int spline_arraylen = 0,
+             int color_transforms = -1)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -341,6 +595,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     if (!error.empty())
         print(stderr, "{}\n", error);
     OIIO_CHECK_EQUAL(module.getDataLayout().getAllocaAddrSpace(), 5);
+    check_color_abi(module, optimize, color_transforms);
     if (closures) {
         const auto& layout = module.getDataLayout();
         OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
@@ -3578,6 +3833,280 @@ check_spline_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_color_modules(string_view arch, string_view stdosl)
+{
+    auto check = [&](string_view label, string_view producer,
+                     string_view consumer, string_view colorspace,
+                     std::initializer_list<string_view> shadeops,
+                     int transforms, int osl_optimize, int optimize,
+                     bool local = false) {
+        HartServices renderer(false, false, false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("colorspace", colorspace));
+        // A coordinate-space synonym must not erase a named color constructor.
+        OIIO_CHECK_ASSERT(ss.attribute("commonspace", "XYZ"));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", local ? 4096 : 0));
+        const bool connected = !consumer.empty();
+        auto group = connected ? make_connected_group(ss, producer, consumer)
+                               : make_group(ss, producer);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Color {} (OSL {}, LLVM {}, {}): {}\n", label,
+                  osl_optimize, optimize, colorspace, errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, local ? size : 0);
+        const int previous_failures = unit_test_failures;
+        check_module(ss, *group, arch, shadeops, optimize, connected, false,
+                     false, connected ? 2 : 0, false, false, 0, transforms);
+        if (unit_test_failures != previous_failures)
+            print("Color module checks failed: {} (OSL {}, LLVM {}, {})\n",
+                  label, osl_optimize, optimize, colorspace);
+
+        // The GPU tests check numerical rebinding. Here even constant inputs
+        // must retain runtime calls and the same published A-B-A artifact.
+        const void* original   = nullptr;
+        uint64_t original_size = 0;
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                          TypeDesc::PTR, &original));
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                          TypeUInt64, &original_size));
+        if (!original || !original_size)
+            return;
+        const std::string snapshot(static_cast<const char*>(original),
+                                   original_size);
+        for (string_view binding : {
+                 colorspace == "Rec709" ? string_view("ACEScg")
+                                        : string_view("Rec709"),
+                 colorspace,
+             }) {
+            OIIO_CHECK_ASSERT(ss.attribute("colorspace", binding));
+            const void* bytes = nullptr;
+            uint64_t size     = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                              TypeDesc::PTR, &bytes));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                              TypeUInt64, &size));
+            OIIO_CHECK_EQUAL(bytes, original);
+            OIIO_CHECK_EQUAL(size, original_size);
+            if (bytes && size == original_size)
+                OIIO_CHECK_ASSERT(
+                    snapshot
+                    == std::string(static_cast<const char*>(bytes), size));
+        }
+    };
+    const struct {
+        const char* label;
+        const char* source;
+        std::initializer_list<string_view> shadeops;
+        int transforms;
+        int osl_optimize;
+    } fixtures[] = {
+        { "values",
+          "shader color_values(output color Cout=0) { "
+          "color c=color(0.2+0.1*u,0.3+0.1*v,0.4+0.1*u*v); "
+          "color a=transformc(\"XYZ\",c); "
+          "color b=transformc(\"XYZ\",\"RGB\",a); "
+          "Cout=0.001*blackbody(4000+300*u)+wavelength_color(450+100*v)"
+          "+b+color(luminance(c)); }",
+          { "osl_blackbody_vf", "osl_wavelength_color_vf", "osl_luminance_fv",
+            "osl_transformc", "rs_hart_get_colorsystem", "rs_hart_color_error" },
+          2,
+          0 },
+        { "derivatives",
+          "shader color_derivatives(output color Cout=0) { "
+          "color c=color(0.15+0.3*u,0.25+0.2*v,0.45+0.1*u*v); "
+          "color a=transformc(\"rgb\",\"hsv\",c); "
+          "color b=transformc(\"hsv\",\"hsl\",a); "
+          "color d=transformc(\"hsl\",\"YIQ\",b); "
+          "color e=transformc(\"YIQ\",\"XYZ\",d); "
+          "color f=transformc(\"XYZ\",\"xyY\",e); "
+          "color g=transformc(\"xyY\",\"sRGB\",f); "
+          "color h=transformc(\"sRGB\",\"linear\",g); "
+          "color t=transformc(\"linear\",\"rgb\",h); "
+          "float y=luminance(t); "
+          "Cout=t+Dx(t)+Dy(t)+color(y+Dx(y)+Dy(y)); }",
+          { "osl_transformc", "osl_luminance_dfdv", "rs_hart_get_colorsystem",
+            "rs_hart_color_error" },
+          8,
+          0 },
+        { "constructors",
+          "shader color_constructors(output color Cout=0) { "
+          "color c=color(\"RGB\",u,v,0.2)+color(\"rgb\",v,u,0.3)"
+          "+color(\"hsv\",u,0.4,0.6)+color(\"hsl\",v,0.3,0.7)"
+          "+color(\"YIQ\",0.4,u,v)+color(\"XYZ\",u,v,0.5)"
+          "+color(\"xyY\",0.3,0.4,0.5+0.1*u); "
+          "color s=blackbody(4000+300*u)+wavelength_color(450+100*v); "
+          "Cout=c+Dx(c)+Dy(c)+0.001*(s+Dx(s)+Dy(s)); }",
+          { "osl_prepend_color_from", "osl_blackbody_vf",
+            "osl_wavelength_color_vf", "rs_hart_get_colorsystem",
+            "rs_hart_color_error" },
+          0,
+          0 },
+        { "constant inputs",
+          "shader color_constants(output color Cout=0) { "
+          "color x=transformc(\"XYZ\",\"rgb\",color(0.2,0.3,0.4)); "
+          "color y=transformc(\"rgb\",\"XYZ\",color(0.3,0.4,0.5)); "
+          "color z=transformc(\"sRGB\",\"rgb\",color(0.4,0.5,0.6)); "
+          "Cout=0.001*blackbody(4000)+wavelength_color(520)+x+y+z"
+          "+color(luminance(color(0.3,0.4,0.5)))"
+          "+color(\"XYZ\",0.2,0.3,0.4); }",
+          { "osl_blackbody_vf", "osl_wavelength_color_vf", "osl_luminance_fv",
+            "osl_transformc", "osl_prepend_color_from",
+            "rs_hart_get_colorsystem", "rs_hart_color_error" },
+          3,
+          2 },
+    };
+    for (const auto& fixture : fixtures) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(fixture.source, bytecode, { }, stdosl))
+            return false;
+        for (int optimize : { 10, 3 })
+            check(fixture.label, bytecode, "", "Rec709", fixture.shadeops,
+                  fixture.transforms, optimize == 10 ? fixture.osl_optimize : 2,
+                  optimize);
+    }
+    for (string_view space : { "Rec709", "ACEScg" }) {
+        const auto source
+            = fmtformat("shader color_alias(output color Cout=0) {{ "
+                        "Cout=transformc(\"{0}\",\"{0}\",color(0.2,0.3,0.4))"
+                        "+transformc(\"{0}\",\"rgb\",color(0.3,0.4,0.5))"
+                        "+transformc(\"rgb\",\"{0}\",color(0.4,0.5,0.6))"
+                        "+color(\"{0}\",0.2,0.3,0.4); }}",
+                        space);
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        for (int optimize : { 10, 3 })
+            check("current-name constants", bytecode, "", space,
+                  { "osl_transformc", "osl_prepend_color_from",
+                    "rs_hart_get_colorsystem", "rs_hart_color_error" },
+                  3, 2, optimize);
+    }
+    {
+        OSLCompiler producer_compiler, consumer_compiler;
+        std::string producer, consumer;
+        if (!producer_compiler.compile_buffer(
+                "shader color_producer(output color value=0) { "
+                "value=transformc(\"rgb\",\"XYZ\","
+                "color(0.2+0.3*u,0.3+0.2*v,0.4+0.1*u*v)); }",
+                producer, { }, stdosl)
+            || !consumer_compiler.compile_buffer(
+                "shader color_consumer(color value=0, output color Cout=0) { "
+                "color c=transformc(\"XYZ\",\"rgb\",value); "
+                "float y=luminance(c); "
+                "Cout=c+Dx(c)+Dy(c)+color(y+Dx(y)+Dy(y)); }",
+                consumer, { }, stdosl))
+            return false;
+        for (const auto mode : { 0, 1, 2 })
+            check("connected derivatives", producer, consumer, "Rec709",
+                  { "osl_transformc", "osl_luminance_dfdv",
+                    "rs_hart_get_colorsystem", "rs_hart_color_error" },
+                  2, mode == 0 ? 0 : 2, mode == 2 ? 3 : 10, mode == 1);
+    }
+    const struct {
+        const char* source;
+        const char* error;
+    } rejected[] = {
+        { "shader bad(output color Cout=0) { "
+          "Cout=transformc(\"custom\",\"custom\",color(0.2,0.3,0.4)); }",
+          "unsupported color space" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=transformc(\"rgb\",\"ACEScg\",color(0.2,0.3,0.4)); }",
+          "unsupported color space" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=color(\"custom\",0.2,0.3,0.4); }",
+          "unsupported color space" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=color(\"linear\",0.2,0.3,0.4); }",
+          "unsupported color space" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=color(\"sRGB\",0.2,0.3,0.4); }",
+          "unsupported color space" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=color(\"common\",0.2,0.3,0.4); }",
+          "unsupported color space" },
+        { "shader bad(string space=\"rgb\", output color Cout=0) { "
+          "Cout=transformc(space,\"XYZ\",color(u)); }",
+          "unsupported type" },
+        { "shader bad(output color Cout=0) { "
+          "string space=u>v?\"rgb\":\"XYZ\"; Cout=color(space,u,v,0.5); }",
+          "unsupported type" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    for (string_view expression : {
+             "blackbody(4000)",
+             "wavelength_color(520)",
+             "color(luminance(color(0.2,0.3,0.4)))",
+             "transformc(\"rgb\",\"XYZ\",color(0.2,0.3,0.4))",
+             "color(\"XYZ\",0.2,0.3,0.4)",
+         }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source = fmtformat(
+            "shader missing_colors(output color Cout=0) {{ Cout={}; }}",
+            expression);
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check_rejection(arch, bytecode, "HARTColorSystem");
+    }
+    for (bool bad_arity : { false, true }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const char* source
+            = bad_arity ? "shader malformed(output color Cout=0) { "
+                          "Cout=transformc(\"rgb\",\"XYZ\",color(u)); }"
+                        : "shader malformed(output color Cout=0) { "
+                          "Cout=blackbody(4000+u); }";
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        const auto op = bytecode.find(bad_arity ? "\ttransformc\t"
+                                                : "\tblackbody\t");
+        OIIO_CHECK_ASSERT(op != std::string::npos);
+        if (op == std::string::npos)
+            return false;
+        bytecode.replace(op + 1, bad_arity ? 10 : 9,
+                         bad_arity ? "blackbody" : "luminance");
+        HartServices renderer(false, false, false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors,
+                             bad_arity ? "color operation arguments"
+                                       : "color operation result type");
+    }
+    return true;
+}
+
+
+
+bool
 check_procedural_modules(string_view arch, string_view stdosl)
 {
     const char* sources[] = {
@@ -3626,11 +4155,14 @@ check_procedural_modules(string_view arch, string_view stdosl)
 int
 main(int argc, char* argv[])
 {
-    if (argc != 3) {
-        print(stderr, "Usage: hart_codegen_test architecture stdosl.h\n");
+    if (argc != 4) {
+        print(stderr, "Usage: hart_codegen_test architecture stdosl.h "
+                      "color-abi-probe.bc\n");
         return 1;
     }
     const string_view arch(argv[1]);
+    if (!check_color_layout(arch, argv[3]) || unit_test_failures)
+        return 1;
     if (!check_closure_modules(arch, argv[2]) || unit_test_failures)
         return 1;
     const char* sources[] = {
@@ -3897,6 +4429,7 @@ main(int argc, char* argv[])
         || !check_math_modules(arch, argv[2])
         || !check_numeric_math_modules(arch, argv[2])
         || !check_spline_modules(arch, argv[2])
+        || !check_color_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])

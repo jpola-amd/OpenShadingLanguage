@@ -407,7 +407,7 @@ HartRaytracer::supports(string_view feature) const
 {
     return feature == "HART" || feature == "HARTClosures"
            || feature == "HARTTextures" || feature == "HARTArrayBounds"
-           || feature == "HARTSplineErrors";
+           || feature == "HARTSplineErrors" || feature == "HARTColorSystem";
 }
 
 
@@ -481,7 +481,7 @@ HartRaytracer::prepare_render()
                                     material_count)
         || !impl.m_context.create_pipeline(raygen, "__raygen__osl_hart_path",
                                            material_count, callables)
-        || !impl.m_textures.prepare()) {
+        || !impl.m_textures.prepare(*shadingsys)) {
         impl.m_failed = true;
         return;
     }
@@ -529,7 +529,8 @@ HartRaytracer::render(int xres, int yres)
         pixelbuf.clear();
         return;
     }
-    if (!impl.m_textures.prepare() || !impl.m_textures.reset_errors()) {
+    if (!impl.m_textures.prepare(*shadingsys)
+        || !impl.m_textures.reset_errors()) {
         impl.m_failed = true;
         pixelbuf.clear();
         return;

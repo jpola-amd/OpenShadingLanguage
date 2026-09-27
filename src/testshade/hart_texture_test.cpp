@@ -5,7 +5,11 @@
 #include <hip/hip_runtime_api.h>
 
 #include <array>
+#include <cstring>
 #include <vector>
+
+#include <OSL/oslexec.h>
+#include <OSL/rendererservices.h>
 
 #include <OpenImageIO/deepdata.h>
 #include <OpenImageIO/filesystem.h>
@@ -342,13 +346,21 @@ test_resources()
         return;
     OIIO_CHECK_EQUAL(state.count, uint64_t(6));
 
-    for (unsigned int bit : { 1u, 2u, 4u, 7u, 8u, 15u, 16u }) {
+    for (unsigned int bit :
+         { 1u, 2u, 4u, 7u, 8u, 15u, 16u, 128u, 256u, 512u }) {
         const int before_errors = errors.errors;
         if (!hip_ok(hipMemcpy(state.errors, &bit, sizeof(bit),
                               hipMemcpyHostToDevice)))
             return;
         OIIO_CHECK_ASSERT(!store.check_errors());
         OIIO_CHECK_EQUAL(errors.errors, before_errors + 1);
+        if (bit == testshade::HartUnsupportedColorTransform) {
+            OIIO_CHECK_ASSERT(
+                errors.last_message.find("unsupported color transform")
+                != std::string::npos);
+            OIIO_CHECK_ASSERT(errors.last_message.find("unknown error")
+                              == std::string::npos);
+        }
         OIIO_CHECK_ASSERT(store.reset_errors());
         OIIO_CHECK_ASSERT(store.check_errors());
     }
@@ -373,6 +385,75 @@ test_resources()
     OIIO_CHECK_EQUAL(errors.errors, before_cleanup);
 }
 
+
+
+void
+test_colorsystem()
+{
+    TestErrorHandler errors;
+    RendererServices renderer;
+    ShadingSystem ss(&renderer, nullptr, &errors);
+    HartTextureStore store(errors);
+    OIIO_CHECK_ASSERT(store.prepare());
+    testshade::HartTextureState state { };
+    if (!read_state(store, state))
+        return;
+    OIIO_CHECK_ASSERT(!state.colorsystem);
+    const void* allocation                     = nullptr;
+    const testshade::HartTextureState* binding = nullptr;
+    std::array<std::vector<unsigned char>, 3> images;
+    for (int pass = 0; pass < 3; ++pass) {
+        OIIO_CHECK_ASSERT(
+            ss.attribute("colorspace", pass == 1 ? "XYZ" : "Rec709"));
+        OIIO_CHECK_ASSERT(store.prepare(ss));
+        if (!read_state(store, state))
+            return;
+        OIIO_CHECK_ASSERT(state.colorsystem);
+        if (!state.colorsystem)
+            return;
+        if (pass == 0) {
+            allocation = state.colorsystem;
+            binding    = store.device_state();
+        }
+        OIIO_CHECK_EQUAL(allocation, state.colorsystem);
+        OIIO_CHECK_EQUAL(binding, store.device_state());
+        void* source       = nullptr;
+        long long sizes[2] = { };
+        OIIO_CHECK_ASSERT(
+            ss.getattribute("colorsystem", TypeDesc::PTR, &source));
+        OIIO_CHECK_ASSERT(ss.getattribute("colorsystem:sizes",
+                                          TypeDesc(TypeDesc::LONGLONG, 2),
+                                          sizes));
+        OIIO_CHECK_ASSERT(source && sizes[0] > 0 && sizes[1] == 1);
+        if (!source || sizes[0] <= 0 || sizes[1] != 1)
+            return;
+        auto& image = images[pass];
+        image.resize(size_t(sizes[0]));
+        if (!hip_ok(hipMemcpy(image.data(), state.colorsystem, image.size(),
+                              hipMemcpyDeviceToHost)))
+            return;
+        const size_t pod_bytes = image.size() - sizeof(ustringhash);
+        OIIO_CHECK_EQUAL(std::memcmp(image.data(), source, pod_bytes), 0);
+        const auto* hash = reinterpret_cast<const ustringhash*>(
+            static_cast<const unsigned char*>(source) + pod_bytes);
+        uint64_t uploaded_hash = 0;
+        std::memcpy(&uploaded_hash, image.data() + pod_bytes,
+                    sizeof(uploaded_hash));
+        OIIO_CHECK_EQUAL(uploaded_hash, hash->hash());
+        OIIO_CHECK_ASSERT(store.check_errors());
+    }
+    OIIO_CHECK_ASSERT(images[0] != images[1] && images[0] == images[2]);
+    OIIO_CHECK_ASSERT(store.clear());
+    OIIO_CHECK_ASSERT(!store.device_state());
+    OIIO_CHECK_ASSERT(store.prepare(ss));
+    if (!read_state(store, state))
+        return;
+    OIIO_CHECK_ASSERT(state.colorsystem);
+    OIIO_CHECK_ASSERT(store.clear());
+    OIIO_CHECK_ASSERT(store.clear());
+    OIIO_CHECK_EQUAL(errors.errors, 0);
+}
+
 }  // namespace
 
 
@@ -383,5 +464,6 @@ main()
     if (!hip_ok(hipSetDevice(0)) || !hip_ok(hipFree(nullptr)))
         return unit_test_failures;
     test_resources();
+    test_colorsystem();
     return unit_test_failures;
 }

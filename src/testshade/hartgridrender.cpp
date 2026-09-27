@@ -206,7 +206,7 @@ public:
     {
         return feature == "HART" || feature == "HARTTextures"
                || feature == "HARTTransforms" || feature == "HARTArrayBounds"
-               || feature == "HARTSplineErrors"
+               || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
                || (m_closures && feature == "HARTClosures");
     }
 
@@ -878,7 +878,7 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!embedded_raygen(arch, modules[0], err))
         return false;
     auto& textures = generated->textures();
-    if (!textures.prepare())
+    if (!textures.prepare(shadingsys))
         return false;
     const char* entry = !group          ? "__raygen__testshade_closure_pool"
                         : options.fused ? "__raygen__testshade_closures_fused"
@@ -976,7 +976,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     }
 
     auto& textures = generated->textures();
-    if (!textures.prepare())
+    if (!textures.prepare(shadingsys))
         return false;
     HartGridRenderer runtime(err);
     const char* entry = options.fused ? "__raygen__testshade_generated_fused"

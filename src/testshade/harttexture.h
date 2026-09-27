@@ -12,6 +12,8 @@
 
 OSL_NAMESPACE_BEGIN
 
+class ShadingSystem;
+
 // Test renderer resources, used only between synchronous HART launches.
 // Files are read as numeric data: first subimage, no color conversion,
 // existing mips followed by box-filtered levels down to 1x1. Missing channels
@@ -26,6 +28,8 @@ public:
     // Exact filenames are cached. IDs remain stable until clear(); zero fails.
     uint64_t load(OIIO::ustring filename);
     bool prepare();
+    // Refresh color-system data before each render, even for cached groups.
+    bool prepare(ShadingSystem& shadingsys);
     bool reset_errors();
     bool check_errors();
     bool clear();

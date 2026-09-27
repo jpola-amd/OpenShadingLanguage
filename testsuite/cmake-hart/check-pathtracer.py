@@ -77,6 +77,9 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
                    * texture("path_texture.pfm", u, v, "wrap", "clamp",
                              "interp", "linear")
                    * spline("bspline", u, knots);
+            weight *= color(normalize(vector(blackbody(4000+2000*v))))
+                    * transformc("hsv", "rgb", color(0.1+0.1*u,0.3,1))
+                    * (0.5+luminance(wavelength_color(500+100*v)));
         }""",
         "path_connected": """shader path_connected(color weight = 0) {
             Ci = weight * emission();
