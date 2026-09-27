@@ -29,6 +29,8 @@ suites.add_argument("--aggregates", action="store_true",
                     help="Run array/struct layout, derivatives and bounds cases")
 suites.add_argument("--strings", action="store_true",
                     help="Run hashed string parameters, copies, comparisons and connections")
+suites.add_argument("--selectors", action="store_true",
+                    help="Run integer/string hashes and checked dynamic noise selection")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
@@ -79,7 +81,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                     help="Benchmark host-synchronized launch latency for split, "
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
-if (args.loops or args.control_flow or args.aggregates or args.strings or args.derivatives or args.surface or args.filterwidth
+if (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
@@ -2485,13 +2487,178 @@ def check_string_suite():
                 assert not rejected.exists()
 
     for expression, operation in (('strlen(s)', "strlen"), ('getchar(s,0)', "getchar"),
-                                   ('hash(s)', "hash"), ('regex_match(s,"a")', "regex_match")):
+                                   ('regex_match(s,"a")', "regex_match")):
         source = root / "string_operation.osl"
         source.write_text(
             f'shader string_operation(string s="alpha",output color Cout=0){{'
             f'if(u<0)Cout=color({expression});}}', encoding="ascii")
         compile_fixture(source)
         run(["--hart", "-v", "string_operation"], f"unsupported operation '{operation}'")
+
+
+def check_selector_suite():
+    configurations = [
+        ("-O0", "10", []), ("-O2", "3", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"])]
+    source = root / "selector_grid.osl"
+    source.write_text(
+        'shader selector_grid(int derivatives=0,output color Cout=0){'
+        'Cout=derivatives?color(Dx(u),Dy(v),Dx(P[0])+Dy(P[1]))'
+        ':color(u,v,int(6*u)+8*int(6*v));}', encoding="ascii")
+    compile_fixture(source)
+    def float32(value):
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+    for width, height in ((7, 7), (1, 1)):
+        for derivatives in (False, True):
+            def expected_grid(u, v):
+                if derivatives:
+                    dx, dy = float32(1/max(1, width-1)), float32(1/max(1, height-1))
+                    return dx, dy, float32(dx+dy)
+                return (float32(u), float32(v),
+                        int(float32(6*float32(u))) + 8*int(float32(6*float32(v))))
+            for osl_opt, llvm_opt, mode in configurations:
+                check_image_render(
+                    ["--param", "derivatives", str(int(derivatives)), "selector_grid"],
+                    [osl_opt, "--llvm_opt", llvm_opt], mode, width, height,
+                    reference(width, height, expected_grid))
+    source = root / "selector_hash.osl"
+    source.write_text(
+        'shader selector_hash(string value="",output color Cout=0){'
+        'string names[5]={"","alpha","ALPHA","a-long-distinct-string","red"};'
+        'float x=u<=.5?.25:.75,y=v<=.5?.25:.75;point p=point(x,y,1);'
+        'int kind=int(5*u),h=0;'
+        'if(kind==0)h=hash(u==0?value:names[int(4*v)]);'
+        'else if(kind==1)h=hash(int(4*v)-2);'
+        'else if(kind==2)h=hash(x);else if(kind==3)h=hash(x,y);'
+        'else if(kind==4)h=hash(p);else h=hash(p,y);'
+        'Cout=color(h&65535,(h>>16)&65535,h<0);}', encoding="ascii")
+    compile_fixture(source)
+    width, height = 11, 5
+    # Published CPU hash regression vectors, packed without float precision loss.
+    golden = {
+        (2, .25, .25): -1518044388, (2, .25, .75): -1518044388,
+        (3, .75, .25): -802388107, (3, .75, .75): 2050085294,
+        (4, .75, .25): -1172708893, (4, .75, .75): 1398623619,
+        (5, .75, .25): 1884197054, (5, .75, .75): -626565092}
+    for shaders in (["selector_hash"],
+                    ["--param:type=string", "text", "alpha",
+                     "--shader", "hart_string_source", "producer",
+                     "--shader", "selector_hash", "consumer",
+                     "--connect", "producer", "value", "consumer", "value"]):
+        host = root / "hash-reference.pfm"
+        run(["-O0", "-t", "1", "-g", str(width), str(height), "-d", "float",
+             "-o", "Cout", str(host)] + shaders)
+        expected = image_pixels(host, width, height)
+        assert expected[3:6] == [0, 0, 0]  # Empty string's hash.
+        assert set(expected[2::3]) == {0, 1}
+        for row in range(height):
+            for column in range(width):
+                key = (int(5*column/(width-1)),
+                       .25 if column <= (width-1)/2 else .75,
+                       .25 if row <= (height-1)/2 else .75)
+                if key in golden:
+                    h = golden[key]
+                    i = 3*(row*width+column)
+                    assert expected[i:i+3] == [h & 65535, (h >> 16) & 65535, int(h < 0)]
+        for osl_opt, llvm_opt, mode in configurations:
+            print("Checking HART hashes", shaders, osl_opt, mode, flush=True)
+            check_image_render(shaders, [osl_opt, "--llvm_opt", llvm_opt],
+                               mode, width, height, expected)
+
+    names = ["perlin", "uperlin", "noise", "snoise", "cell", "hash", "gabor",
+             "simplex", "usimplex"]
+    position = "point(.3125+u*.125,.125+v*.25,.25+u*.0625)"
+    source = root / "selector_source.osl"
+    source.write_text(
+        'shader selector_source(int periodic=0,output string name="",'
+        'output point position=0){string names[9]={'
+        + ",".join(f'"{name}"' for name in names)
+        + '};name=names[int((periodic?6:8)*u)];position=' + position + ";}",
+        encoding="ascii")
+    compile_fixture(source)
+    for periodic in (False, True):
+        selected_names = names[:7] if periodic else names
+        width, height = len(selected_names), 5
+        op = "pnoise" if periodic else "noise"
+        for dimension, coordinates in enumerate(
+                ("position[0]", "position[0],position[1]", "position",
+                 "position,.25+v*.125"), 1):
+            periods = ("4", "4,5", "point(4,5,6)", "point(4,5,6),7")[dimension-1]
+            operands = coordinates + ("," + periods if periodic else "")
+            for triple in (False, True):
+                kind = "color" if triple else "float"
+                label = f"selector_{op}_{dimension}_{kind}"
+                for literal in (False, True):
+                    shader = label + ("_literal" if literal else "")
+                    source = root / (shader + ".osl")
+                    body = (f'{kind} value={op}(name,{operands});' if not literal
+                            else f"{kind} value=0;" + "".join(
+                                f'if(name=="{name}")value={op}("{name}",{operands});'
+                                for name in selected_names))
+                    source.write_text(
+                        f'shader {shader}(string name="perlin",'
+                        f'point position=0,int derivatives=1,output color Cout=0){{'
+                        + body + ("float q=value[int(2*v)];" if triple else "float q=value;")
+                        + "Cout=derivatives?color(q,Dx(q),Dy(q)):color(value);}",
+                        encoding="ascii")
+                    compile_fixture(source)
+                def group(shader, derivatives=1):
+                    return ["--param", "periodic", str(int(periodic)),
+                            "--shader", "selector_source", "producer",
+                            "--param", "derivatives", str(derivatives),
+                            "--shader", shader, "consumer",
+                            "--connect", "producer", "name", "consumer", "name",
+                            "--connect", "producer", "position", "consumer", "position"]
+                for derivatives in (1, 0):
+                    host = root / "selector-reference.pfm"
+                    run(["-O0", "-t", "1", "-g", str(width), str(height),
+                         "-d", "float", "-o", "Cout", str(host)]
+                        + group(label + "_literal", derivatives))
+                    expected = image_pixels(host, width, height)
+                    assert all(math.isfinite(x) for x in expected)
+                    assert max(expected) - min(expected) > .01
+                    modes = (configurations if dimension == 3 and derivatives
+                             else (configurations[0], configurations[3]))
+                    for osl_opt, llvm_opt, mode in modes:
+                        print("Checking HART selectors", label, derivatives,
+                              osl_opt, mode, flush=True)
+                        check_image_render(group(label, derivatives),
+                                           [osl_opt, "--llvm_opt", llvm_opt],
+                                           mode, width, height, expected, tolerance=2e-6)
+                    if derivatives:
+                        check_image_render(group(label + "_literal"),
+                                           ["-O2", "--llvm_opt", "3"], [],
+                                           width, height, expected, tolerance=2e-6)
+
+    for periodic, options in ((False, False), (True, False), (False, True), (True, True)):
+        op = "pnoise" if periodic else "noise"
+        operands = 'P' + (',point(4)' if periodic else '')
+        operands += ',"bandwidth",1,"do_filter",0' if options else ''
+        source = root / "selector_bad.osl"
+        source.write_text(
+            'shader selector_bad(string bad="unknown",output color Cout=0){'
+            'string name=u>.5?bad:"gabor";'
+            f'Cout={op}(name,{operands});}}', encoding="ascii")
+        compile_fixture(source)
+        invalid = (["perlin", "cell"] if options else
+                   ["unknown", "", "cellnoise"] + (["simplex", "usimplex"] if periodic else []))
+        for osl_opt, llvm_opt, mode in (configurations[0], configurations[3]):
+            for name in invalid:
+                rejected = root / "selector-rejected.pfm"
+                run(["--hart", "--hart-no-cache", "-v", osl_opt, "--llvm_opt", llvm_opt]
+                    + mode + ["-g", "3", "2", "--param:type=string", "bad", name,
+                              "-o", "Cout", str(rejected), "selector_bad"],
+                    "invalid noise arguments", error_after_launch=True)
+                assert not rejected.exists()
+        if options:
+            host = root / "selector-gabor-reference.pfm"
+            shaders = ["--param:type=string", "bad", "gabor", "selector_bad"]
+            run(["-O0", "-t", "1", "-g", "3", "2", "-d", "float",
+                 "-o", "Cout", str(host)] + shaders)
+            for osl_opt, llvm_opt, mode in (configurations[0], configurations[3]):
+                check_image_render(shaders, [osl_opt, "--llvm_opt", llvm_opt],
+                                   mode, 3, 2, image_pixels(host, 3, 2), tolerance=2e-6)
 
 
 def check_spline_suite():
@@ -3571,6 +3738,9 @@ try:
     if args.strings:
         check_string_suite()
 
+    if args.selectors:
+        check_selector_suite()
+
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
                                     producer="hart_deriv_producer")
@@ -3741,7 +3911,6 @@ try:
             check_noise_suite()
         else:
             for shader, error in (
-                ("hart_noise_dynamic", "noise selectors must be literal strings"),
                 ("hart_noise_unknown", "unsupported noise type 'unknown'"),
                 ("hart_noise_empty", "unsupported noise type ''"),
             ):
@@ -3749,6 +3918,11 @@ try:
                 run(["--hart", "-v", "--shader", shader, "producer",
                      "--shader", "hart_first", "consumer"], error)
             check_noise_family_suite()
+            host = root / "dynamic-noise-reference.pfm"
+            run(["-O0", "-t", "1", "-g", "9", "5", "-d", "float",
+                 "-o", "Cout", str(host), "hart_noise_dynamic"])
+            check_image_render(["hart_noise_dynamic"], ["-O0", "--llvm_opt", "10"],
+                               [], 9, 5, image_pixels(host, 9, 5), tolerance=2e-6)
 
     if args.gabor:
         check_gabor_suite()
@@ -3805,7 +3979,7 @@ try:
     if args.fused_benchmark:
         check_fused_benchmark()
 
-    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.derivatives or args.surface or args.filterwidth
+    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
@@ -3912,6 +4086,8 @@ elif args.splines:
     suite = "splines"
 elif args.numeric_math:
     suite = "numeric math"
+elif args.selectors:
+    suite = "hashes and dynamic noise selectors"
 elif args.strings:
     suite = "string values"
 elif args.aggregates:

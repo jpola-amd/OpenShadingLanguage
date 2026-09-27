@@ -88,6 +88,9 @@ optix_cache_unwrap(string_view cache_value, std::string& ptx,
 std::string
 optix_cache_wrap(string_view ptx, size_t groupdata_size);
 
+bool
+hart_supports_noise(ustring name, bool periodic);
+
 // forward definitions
 class ShadingSystemImpl;
 class ShaderInstance;

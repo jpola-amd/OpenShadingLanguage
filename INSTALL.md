@@ -646,13 +646,17 @@ including at discontinuities. Hash noise depends on the coordinate bit
 patterns, so rounding differences in upstream arithmetic can change its
 value substantially even when the coordinates are numerically close.
 
-The literal selectors `"noise"` and `"snoise"` also select unsigned and signed
-Perlin, respectively, including periodic calls. Selectors resolve to existing
-device shadeops. String-valued parameters used as selectors, computed selectors,
-options on non-Gabor noise, and periodic simplex remain unsupported.
-Original-operation validation rejects them before specialization, even for
-constant inputs or unused layers;
-string storage does not by itself enable dynamic noise selection.
+The selectors `"noise"` and `"snoise"` also select unsigned and signed Perlin,
+respectively, including periodic calls. Literal selectors resolve to existing
+device shadeops. Runtime selectors (including parameters, arrays and connected
+strings) use the existing generic noise dispatch with a checked hash selector.
+They require renderer support for `HARTNoiseErrors`. The seven named families
+in the table plus these two aliases are accepted dynamically; periodic simplex
+and options on non-Gabor noise remain unsupported. Unknown literals and malformed
+option lists reject before launch. Runtime invalid selectors or non-Gabor selectors
+with options record a device error, initialize the result to zero and skip
+evaluation; the host rejects the render rather than publishing that zero.
+Parameter specialization cannot bypass selector or option validation.
 
 Gabor accepts five literal option names with numeric, possibly varying values:
 `"anisotropic"` (int, default 0), `"do_filter"` (int, default 1),
@@ -857,9 +861,23 @@ storage/optimization modes, plus explicit bounds failures. `string-empty-compare
 separately covers empty equality and inequality in ordinary CPU builds.
 The batched backend retains character-pointer comparisons and is excluded from
 this empty-representation regression pending separate qualification.
-Character operations, allocation, string hashing and dynamic service selectors
-remain explicit rejections in this storage-only subset; no placeholder
-`strlen`/`getchar` results are used.
+
+`hash(string)` returns the signed low 32 bits of the stored hash, matching scalar
+CPU and the reference CUDA implementation without reading character memory.
+Numeric `hash` overloads for int, float, float/float, triple and triple/float
+reuse the existing shadeops. `hart-string-selectors-runtime` checks all six
+overloads with lossless 16-bit output packing, including empty/case-distinct
+strings, connected strings and published numeric regression vectors. It also
+compares dynamic and literal noise in 1D-4D, scalar/color values and derivatives,
+all storage modes, and explicit runtime selector/option failures.
+
+Generated-grid UVs and their derivatives use non-approximate division, including
+on grids with non-power-of-two interval counts. This prevents rounding below a
+selection boundary (even the final UV of 1) from selecting the wrong string.
+The test checks exact CPU/GPU grid values and discrete indices; ordinary shader
+shadeops retain their existing fast-math settings.
+Character operations, allocation and other dynamic service selectors remain
+explicit rejections; no placeholder `strlen`/`getchar` results are used.
 
 `hart-generated-cli` checks the supported CLI boundary without GPU execution.
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,

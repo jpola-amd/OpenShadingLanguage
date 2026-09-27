@@ -90,8 +90,11 @@ if (OSL_USE_HART)
         set (hart_grid_architectures ${HART_TARGET_ARCHITECTURES})
         list (REMOVE_DUPLICATES hart_grid_architectures)
         foreach (arch IN LISTS hart_grid_architectures)
+            # UVs feed discrete selectors; approximate division can miss 1 at
+            # the last grid point. Keep shadeop fast-math settings unchanged.
             MAKE_HART_BITCODE ("hart/generated_grid.hip" "_hart_${arch}" "${arch}"
-                              generated_grid_bc "" "${hart_include_dirs}")
+                              generated_grid_bc "-fno-reciprocal-math;-fno-approx-func"
+                              "${hart_include_dirs}")
             set (symbol "testshade_hart_raygen_${arch}")
             set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/generated_grid.bc.cpp")
             MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${generated_grid_bc}")
@@ -271,6 +274,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --strings)
             set_tests_properties (hart-string-values-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-string-selectors-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --selectors)
+            set_tests_properties (hart-string-selectors-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-derivatives-runtime
                 COMMAND "${Python3_EXECUTABLE}"

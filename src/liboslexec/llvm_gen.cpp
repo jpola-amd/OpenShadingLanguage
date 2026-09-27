@@ -3181,6 +3181,38 @@ LLVMGEN(llvm_gen_noise)
     }
     derivs &= Result.has_derivs();  // ignore derivs if result doesn't need
 
+    if (rop.use_hart() && Name && Name->is_constant()
+        && !hart_supports_noise(name, periodic)) {
+        rop.shadingcontext()->errorfmt(
+            "HART: unsupported noise type '{}' ({}:{})", name, op.sourcefile(),
+            op.sourceline());
+        return false;
+    }
+    if (rop.use_hart() && !name.empty() && name != Strings::gabor
+        && arg != op.nargs()) {
+        rop.shadingcontext()->errorfmt(
+            "HART: noise options require gabor ({}:{})", op.sourcefile(),
+            op.sourceline());
+        return false;
+    }
+
+    llvm::BasicBlock* after_block = nullptr;
+    if (rop.use_hart() && Name && !Name->is_constant()) {
+        llvm::Value* checks[] = { rop.llvm_load_value(*Name), rop.sg_void_ptr(),
+                                  rop.ll.constant(int(periodic)),
+                                  rop.ll.constant(int(arg != op.nargs())) };
+        llvm::Value* valid    = rop.ll.call_function("osl_hart_noise_validate",
+                                                     checks);
+        auto* valid_block     = rop.ll.new_basic_block("noise_valid");
+        auto* error_block     = rop.ll.new_basic_block("noise_error");
+        after_block           = rop.ll.new_basic_block("noise_done");
+        rop.ll.op_branch(rop.ll.op_eq(valid, rop.ll.constant(0)), error_block,
+                         valid_block);
+        rop.llvm_assign_zero(Result);
+        rop.ll.op_branch(after_block);
+        rop.ll.set_insert_point(valid_block);
+    }
+
     bool pass_name = false, pass_sg = false, pass_options = false;
     if (name.empty()) {
         // name is not a constant
@@ -3313,6 +3345,9 @@ LLVMGEN(llvm_gen_noise)
 
     if (rop.shadingsys().profile() >= 1)
         rop.ll.call_function("osl_count_noise", rop.sg_void_ptr());
+
+    if (after_block)
+        rop.ll.op_branch(after_block);
 
     return true;
 }

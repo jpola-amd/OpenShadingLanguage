@@ -487,6 +487,25 @@ OSL_HOSTDEVICE bool hart_gabor_valid(const Dual2<Vec3>& p,
                                      const Vec3& period, bool periodic);
 extern "C" OSL_HOSTDEVICE void rs_hart_noise_error(OpaqueExecContextPtr ec);
 
+OSL_SHADEOP OSL_HOSTDEVICE int
+osl_hart_noise_validate(ustringhash_pod name_, void* sg, int periodic,
+                        int gabor_only)
+{
+    const ustringhash name(name_);
+    const bool supported
+        = name == Hashes::gabor
+          || (!gabor_only
+              && (name == Hashes::perlin || name == Hashes::uperlin
+                  || name == Hashes::noise || name == Hashes::snoise
+                  || name == Hashes::cell || name == Hashes::hash
+                  || (!periodic
+                      && (name == Hashes::simplex
+                          || name == Hashes::usimplex))));
+    if (!supported)
+        rs_hart_noise_error(sg);
+    return supported;
+}
+
 template<typename Result>
 OSL_HOSTDEVICE bool
 hart_gabor_check(ShaderGlobals* sg, Result& result, const Dual2<Vec3>& p,
@@ -838,6 +857,9 @@ struct GenericNoise {
         } else {
 #    if !OSL_GPU_DEVICE
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
+#    elif defined(__HIPCC__)
+            rs_hart_noise_error(sg);
+            result = Dual2<R>(Dual2<R>::zero());
 #    else
             // TODO: find a way to signal this error on the GPU
             result.clear_d();
@@ -886,6 +908,9 @@ struct GenericNoise {
         } else {
 #    if !OSL_GPU_DEVICE
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
+#    elif defined(__HIPCC__)
+            rs_hart_noise_error(sg);
+            result = Dual2<R>(Dual2<R>::zero());
 #    else
             // TODO: find a way to signal this error on the GPU
             result.clear_d();
@@ -931,6 +956,9 @@ struct GenericPNoise {
         } else {
 #    if !OSL_GPU_DEVICE
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
+#    elif defined(__HIPCC__)
+            rs_hart_noise_error(sg);
+            result = Dual2<R>(Dual2<R>::zero());
 #    else
             // TODO: find a way to signal this error on the GPU
             result.clear_d();
@@ -965,6 +993,9 @@ struct GenericPNoise {
         } else {
 #    if !OSL_GPU_DEVICE
             OSL::errorfmt(sg, "Unknown noise type \"{}\"", name);
+#    elif defined(__HIPCC__)
+            rs_hart_noise_error(sg);
+            result = Dual2<R>(Dual2<R>::zero());
 #    else
             // TODO: find a way to signal this error on the GPU
             result.clear_d();
@@ -1039,6 +1070,14 @@ osl_hash_ii(int x)
 {
     return inthashi(x);
 }
+
+#if defined(__HIPCC__)
+OSL_SHADEOP OSL_HOSTDEVICE int
+osl_hash_is(ustringhash_pod str)
+{
+    return static_cast<int>(str);
+}
+#endif
 
 OSL_SHADEOP OSL_HOSTDEVICE int
 osl_hash_if(float x)

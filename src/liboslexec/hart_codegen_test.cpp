@@ -33,6 +33,7 @@
 
 #include <llvm/ADT/APInt.h>
 #include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
@@ -320,11 +321,12 @@ check_wrapper(const llvm::Function* wrapper,
 
 
 void
-check_noise_abi(llvm::Module& module, int optimize)
+check_noise_abi(llvm::Module& module, int optimize, int expected_guard_flags)
 {
     const struct {
         const char* name;
         const char* args;
+        char result = 'v';
     } signatures[] = {
         { "osl_noise_dfdv", "pp" },
         { "osl_snoise_dfdv", "pp" },
@@ -346,6 +348,29 @@ check_noise_abi(llvm::Module& module, int optimize)
         { "osl_gaborpnoise_dvdfdfff", "lpppffpp" },
         { "osl_gaborpnoise_dvdvv", "lppppp" },
         { "osl_gaborpnoise_dvdvdfvf", "lppppfpp" },
+        { "osl_genericnoise_dfdf", "lpppp" },
+        { "osl_genericnoise_dfdfdf", "lppppp" },
+        { "osl_genericnoise_dfdv", "lpppp" },
+        { "osl_genericnoise_dfdvdf", "lppppp" },
+        { "osl_genericnoise_dvdf", "lpppp" },
+        { "osl_genericnoise_dvdfdf", "lppppp" },
+        { "osl_genericnoise_dvdv", "lpppp" },
+        { "osl_genericnoise_dvdvdf", "lppppp" },
+        { "osl_genericpnoise_dfdff", "lppfpp" },
+        { "osl_genericpnoise_dfdfdfff", "lpppffpp" },
+        { "osl_genericpnoise_dfdvv", "lppppp" },
+        { "osl_genericpnoise_dfdvdfvf", "lppppfpp" },
+        { "osl_genericpnoise_dvdff", "lppfpp" },
+        { "osl_genericpnoise_dvdfdfff", "lpppffpp" },
+        { "osl_genericpnoise_dvdvv", "lppppp" },
+        { "osl_genericpnoise_dvdvdfvf", "lppppfpp" },
+        { "osl_hart_noise_validate", "lpii", 'i' },
+        { "osl_hash_is", "l", 'i' },
+        { "osl_hash_ii", "i", 'i' },
+        { "osl_hash_if", "f", 'i' },
+        { "osl_hash_iff", "ff", 'i' },
+        { "osl_hash_iv", "p", 'i' },
+        { "osl_hash_ivf", "pf", 'i' },
         { "osl_init_noise_options", "pp" },
         { "osl_noiseparams_set_anisotropic", "pi" },
         { "osl_noiseparams_set_do_filter", "pi" },
@@ -356,8 +381,27 @@ check_noise_abi(llvm::Module& module, int optimize)
     };
     const auto& layout       = module.getDataLayout();
     const auto* init_options = module.getFunction("osl_init_noise_options");
+    const auto* validate     = module.getFunction("osl_hart_noise_validate");
+    auto same_pointer        = [&](const llvm::Value* a, const llvm::Value* b) {
+        int64_t a_offset = 0, b_offset = 0;
+        const auto* a_base = llvm::GetPointerBaseWithConstantOffset(a, a_offset,
+                                                                           layout);
+        const auto* b_base = llvm::GetPointerBaseWithConstantOffset(b, b_offset,
+                                                                           layout);
+        return a_base == b_base && a_offset == b_offset;
+    };
+    auto same_selector = [&](const llvm::Value* a, const llvm::Value* b) {
+        if (a == b)
+            return true;
+        const auto* a_load = llvm::dyn_cast<llvm::LoadInst>(a);
+        const auto* b_load = llvm::dyn_cast<llvm::LoadInst>(b);
+        return a_load && b_load && a_load->getType() == b_load->getType()
+               && same_pointer(a_load->getPointerOperand(),
+                               b_load->getPointerOperand());
+    };
     std::vector<const llvm::CallBase*> used_resets;
-    int gabor_calls = 0, initializers = 0;
+    std::vector<const llvm::CallBase*> used_guards;
+    int dual_calls = 0, initializers = 0, guard_flags = 0;
     for (const auto& signature : signatures) {
         auto* function = module.getFunction(signature.name);
         if (!function || function->use_empty())
@@ -365,6 +409,7 @@ check_noise_abi(llvm::Module& module, int optimize)
         const string_view name(signature.name), args(signature.args);
         const bool callback = name == "rs_hart_noise_error";
         const bool gabor    = OIIO::Strutil::starts_with(name, "osl_gabor");
+        const bool generic  = OIIO::Strutil::starts_with(name, "osl_generic");
         bool original_call  = false;
         if (!callback && optimize == 10)
             for (auto* user : function->users()) {
@@ -379,16 +424,19 @@ check_noise_abi(llvm::Module& module, int optimize)
                 OIIO_CHECK_EQUAL(call->getCallingConv(),
                                  function->getCallingConv());
                 initializers += name == "osl_init_noise_options";
-                if (!gabor)
+                if (!gabor && !generic)
                     continue;
-                ++gabor_calls;
+                ++dual_calls;
                 OIIO_CHECK_EQUAL(call->arg_size(), args.size());
                 if (call->arg_size() != args.size())
                     continue;
                 const auto* selector = llvm::dyn_cast<llvm::ConstantInt>(
                     call->getArgOperand(0));
-                OIIO_CHECK_ASSERT(selector);
-                if (selector)
+                OIIO_CHECK_ASSERT(
+                    call->getArgOperand(0)->getType()->isIntegerTy(64));
+                if (gabor)
+                    OIIO_CHECK_ASSERT(selector);
+                if (gabor && selector)
                     OIIO_CHECK_EQUAL(selector->getZExtValue(),
                                      ustringhash("gabor").hash());
                 OIIO_CHECK_EQUAL(
@@ -446,9 +494,152 @@ check_noise_abi(llvm::Module& module, int optimize)
                         OIIO_CHECK_ASSERT(fresh);
                         used_resets.push_back(reset);
                     }
+                    if (generic) {
+                        const llvm::CallBase* guard = nullptr;
+                        if (validate)
+                            for (const auto* guard_user : validate->users()) {
+                                const auto* candidate
+                                    = llvm::dyn_cast<llvm::CallBase>(
+                                        guard_user);
+                                if (!candidate
+                                    || candidate->getCalledFunction()
+                                           != validate
+                                    || candidate->getFunction()
+                                           != call->getFunction()
+                                    || candidate->arg_size() != 4
+                                    || !dominators.dominates(candidate, call)
+                                    || !same_selector(candidate->getArgOperand(
+                                                          0),
+                                                      call->getArgOperand(0)))
+                                    continue;
+                                if (!guard
+                                    || dominators.dominates(guard, candidate))
+                                    guard = candidate;
+                            }
+                        if (!guard)
+                            print(stderr,
+                                  "Missing selector guard for {} in {}\n", name,
+                                  caller.str());
+                        OIIO_CHECK_ASSERT(guard);
+                        if (!guard)
+                            continue;
+                        OIIO_CHECK_ASSERT(std::find(used_guards.begin(),
+                                                    used_guards.end(), guard)
+                                          == used_guards.end());
+                        used_guards.push_back(guard);
+                        OIIO_CHECK_EQUAL(
+                            guard->getArgOperand(1)->stripPointerCasts(),
+                            call->getFunction()->getArg(0));
+                        const auto* periodic = llvm::dyn_cast<llvm::ConstantInt>(
+                            guard->getArgOperand(2));
+                        const auto* only_gabor
+                            = llvm::dyn_cast<llvm::ConstantInt>(
+                                guard->getArgOperand(3));
+                        OIIO_CHECK_ASSERT(periodic && only_gabor);
+                        if (periodic)
+                            OIIO_CHECK_EQUAL(periodic->getZExtValue(),
+                                             uint64_t(OIIO::Strutil::starts_with(
+                                                 name, "osl_genericpnoise_")));
+                        bool has_options = false;
+                        if (reset)
+                            for (const auto& block : *call->getFunction())
+                                for (const auto& inst : block) {
+                                    const auto* setter
+                                        = llvm::dyn_cast<llvm::CallBase>(&inst);
+                                    const auto* callee
+                                        = setter ? setter->getCalledFunction()
+                                                 : nullptr;
+                                    if (callee
+                                        && callee->getName().find(
+                                               "osl_noiseparams_set_")
+                                               == 0
+                                        && setter->arg_size() > 0
+                                        && setter->getArgOperand(0)
+                                                   ->stripPointerCasts()
+                                               == options
+                                        && dominators.dominates(reset, setter)
+                                        && dominators.dominates(setter, call))
+                                        has_options = true;
+                                }
+                        if (only_gabor) {
+                            OIIO_CHECK_EQUAL(only_gabor->getZExtValue(),
+                                             uint64_t(has_options));
+                            if (only_gabor->getZExtValue() <= 1)
+                                guard_flags |= 1 << only_gabor->getZExtValue();
+                        }
+                        const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                            guard->getParent()->getTerminator());
+                        const auto* cmp = branch && branch->isConditional()
+                                              ? llvm::dyn_cast<llvm::ICmpInst>(
+                                                    branch->getCondition())
+                                              : nullptr;
+                        OIIO_CHECK_ASSERT(cmp && cmp->isEquality());
+                        if (!cmp || !cmp->isEquality())
+                            continue;
+                        const auto* zero = llvm::dyn_cast<llvm::ConstantInt>(
+                            cmp->getOperand(cmp->getOperand(0) == guard ? 1
+                                                                        : 0));
+                        OIIO_CHECK_ASSERT(zero && zero->isZero()
+                                          && (cmp->getOperand(0) == guard
+                                              || cmp->getOperand(1) == guard));
+                        const bool valid_on_true = cmp->getPredicate()
+                                                   == llvm::CmpInst::ICMP_NE;
+                        const auto* valid_block = branch->getSuccessor(
+                            valid_on_true ? 0 : 1);
+                        const auto* error_block = branch->getSuccessor(
+                            valid_on_true ? 1 : 0);
+                        OIIO_CHECK_ASSERT(
+                            dominators.dominates(valid_block,
+                                                 call->getParent()));
+                        OIIO_CHECK_ASSERT(
+                            !dominators.dominates(error_block,
+                                                  call->getParent()));
+                        const auto* error_exit
+                            = llvm::dyn_cast<llvm::BranchInst>(
+                                error_block->getTerminator());
+                        const auto* valid_exit
+                            = llvm::dyn_cast<llvm::BranchInst>(
+                                call->getParent()->getTerminator());
+                        OIIO_CHECK_ASSERT(
+                            error_exit && error_exit->isUnconditional()
+                            && valid_exit && valid_exit->isUnconditional());
+                        if (error_exit && error_exit->isUnconditional()
+                            && valid_exit && valid_exit->isUnconditional()) {
+                            OIIO_CHECK_EQUAL(error_exit->getSuccessor(0),
+                                             valid_exit->getSuccessor(0));
+                            OIIO_CHECK_ASSERT(error_exit->getSuccessor(0)
+                                              != call->getParent());
+                        }
+                        int clears = 0;
+                        for (const auto& inst : *error_block)
+                            if (const auto* clear
+                                = llvm::dyn_cast<llvm::MemSetInst>(&inst)) {
+                                ++clears;
+                                const auto* value
+                                    = llvm::dyn_cast<llvm::ConstantInt>(
+                                        clear->getValue());
+                                const auto* length
+                                    = llvm::dyn_cast<llvm::ConstantInt>(
+                                        clear->getLength());
+                                OIIO_CHECK_ASSERT(value && value->isZero()
+                                                  && length);
+                                const auto suffix = name.substr(
+                                    name.find_last_of('_') + 1);
+                                const uint64_t bytes
+                                    = (suffix[1] == 'f' ? 4 : 12)
+                                      * (same_pointer(clear->getRawDest(),
+                                                      call->getArgOperand(1))
+                                             ? 3
+                                             : 1);
+                                if (length)
+                                    OIIO_CHECK_EQUAL(length->getZExtValue(),
+                                                     bytes);
+                            }
+                        OIIO_CHECK_EQUAL(clears, 1);
+                    }
                 }
                 // Value-only results and constant/partial coordinates still
-                // need full dual temporaries for Gabor's filtering ABI.
+                // need full dual temporaries for generic/Gabor filtering.
                 const auto suffix = name.substr(name.find_last_of('_') + 1);
                 for (size_t i = 0; i + 1 < suffix.size() && suffix[i] == 'd';
                      i += 2) {
@@ -473,7 +664,9 @@ check_noise_abi(llvm::Module& module, int optimize)
             continue;
         OIIO_CHECK_EQUAL(function->isDeclaration(), callback);
         OIIO_CHECK_ASSERT(!function->isVarArg());
-        OIIO_CHECK_ASSERT(function->getReturnType()->isVoidTy());
+        OIIO_CHECK_ASSERT(signature.result == 'i'
+                              ? function->getReturnType()->isIntegerTy(32)
+                              : function->getReturnType()->isVoidTy());
         OIIO_CHECK_EQUAL(function->arg_size(), args.size());
         for (const auto& arg : function->args()) {
             if (arg.getArgNo() >= args.size())
@@ -487,10 +680,35 @@ check_noise_abi(llvm::Module& module, int optimize)
                                    : arg.getType()->isIntegerTy(
                                          kind == 'i' ? 32 : 64)));
         }
+        if (name == "osl_hash_is" && function->arg_size() == 1
+            && function->getArg(0)->getType()->isIntegerTy(64)
+            && function->getReturnType()->isIntegerTy(32)) {
+            auto* input = function->getArg(0)->getType();
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(input).getFixedValue(), 8);
+            OIIO_CHECK_EQUAL(layout.getABITypeAlign(input).value(), 8);
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(function->getReturnType())
+                                 .getFixedValue(),
+                             4);
+            int returns = 0;
+            for (const auto& block : *function)
+                if (const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(
+                        block.getTerminator())) {
+                    ++returns;
+                    const auto* low = llvm::dyn_cast_or_null<llvm::TruncInst>(
+                        ret->getReturnValue());
+                    OIIO_CHECK_ASSERT(low && low->getType()->isIntegerTy(32));
+                    if (low)
+                        OIIO_CHECK_EQUAL(low->getOperand(0),
+                                         function->getArg(0));
+                }
+            OIIO_CHECK_EQUAL(returns, 1);
+        }
     }
-    if (!gabor_calls)
+    if (optimize == 10 && expected_guard_flags >= 0)
+        OIIO_CHECK_EQUAL(guard_flags, expected_guard_flags);
+    if (!dual_calls)
         return;
-    OIIO_CHECK_EQUAL(initializers, gabor_calls);
+    OIIO_CHECK_EQUAL(initializers, dual_calls);
     auto* options = llvm::StructType::getTypeByName(module.getContext(),
                                                     "NoiseOptions");
     OIIO_CHECK_ASSERT(options && options->getNumElements() == 5);
@@ -768,7 +986,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              bool connected = false, bool branching = false,
              bool looping = false, int used_layers = 0, bool closures = false,
              bool aggregates = false, int spline_arraylen = 0,
-             int color_transforms = -1)
+             int color_transforms = -1, int noise_guard_flags = -1)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -800,7 +1018,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         print(stderr, "{}\n", error);
     OIIO_CHECK_EQUAL(module.getDataLayout().getAllocaAddrSpace(), 5);
     check_color_abi(module, optimize, color_transforms);
-    check_noise_abi(module, optimize);
+    check_noise_abi(module, optimize, noise_guard_flags);
     if (closures) {
         const auto& layout = module.getDataLayout();
         OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
@@ -2284,8 +2502,7 @@ check_noise_modules(string_view arch, string_view stdosl)
         std::string bytecode;
         if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
             return false;
-        check_rejection(arch, bytecode,
-                        "noise selectors must be literal strings");
+        check_rejection(arch, bytecode, "HARTNoiseErrors");
         for (string_view name :
              { "perlin", "uperlin", "cell", "hash", "noise", "snoise" }) {
             OSLCompiler named_compiler;
@@ -2324,6 +2541,416 @@ check_noise_modules(string_view arch, string_view stdosl)
                                 derivs ? "dfdv" : "fv", periodic ? "v" : "");
                 check_module(ss, *group, arch, { shadeop }, optimize);
             }
+        }
+    }
+    return true;
+}
+
+
+
+bool
+check_hash_modules(string_view arch, string_view stdosl)
+{
+    const string_view encode
+        = "Cout=color(value&65535,(value>>16)&65535,value<0);";
+    OSLCompiler consumer_compiler;
+    std::string consumer;
+    if (!consumer_compiler.compile_buffer(
+            fmtformat("shader hash_consumer(int value=0, output color Cout=0) "
+                      "{{ {} }}",
+                      encode),
+            consumer, {}, stdosl))
+        return false;
+    auto check = [&](string_view label, string_view producer, string_view input,
+                     std::initializer_list<string_view> helpers,
+                     int osl_optimize, int optimize, bool local) {
+        HartServices renderer(false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", osl_optimize);
+        ss.attribute("llvm_optimize", optimize);
+        ss.attribute("max_hart_groupdata_alloc", local ? 4096 : 0);
+        const bool connected = !input.empty();
+        auto group = connected ? make_connected_group(ss, producer, input)
+                               : make_group(ss, producer);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Hash {} (OSL {}, LLVM {}):\n{}", label, osl_optimize,
+                  optimize, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, local ? size : 0);
+        check_module(ss, *group, arch, helpers, optimize, connected, false,
+                     false, connected ? 2 : 0, false, true);
+    };
+    for (bool strings : { false, true }) {
+        const string_view params
+            = strings
+                  ? "string label=\"hart-hash-default\", string empty=\"\", "
+                  : "";
+        const string_view body
+            = strings ? "string names[4]={\"\",\"hart-hash-alpha\","
+                        "\"hart-hash-beta\",\"hart-hash-gamma\"}; "
+                        "value=hash(names[int(3*u)])^hash(label)^hash(empty); "
+                      : "float x=1.3*u-0.25, y=0.1+1.7*v; "
+                        "point p=point(x,y,u*v); "
+                        "value=hash(int(65535*u)-32768)^hash(x)^hash(x,y)"
+                        "^hash(p)^hash(p,u+v); ";
+        const std::string sources[] = {
+            fmtformat("shader hash_values({}output color Cout=0) {{ "
+                      "int value=0; {} {} }}",
+                      params, body, encode),
+            fmtformat("shader hash_producer({}output int value=0) {{ {} }}",
+                      params, body),
+        };
+        std::string bytecode[2];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], {}, stdosl))
+                return false;
+        }
+        const std::initializer_list<string_view> helpers = {
+            strings ? "osl_hash_is" : "osl_hash_ii",
+            strings ? "" : "osl_hash_if",
+            strings ? "" : "osl_hash_iff",
+            strings ? "" : "osl_hash_iv",
+            strings ? "" : "osl_hash_ivf",
+        };
+        check(strings ? "string array and defaults" : "numeric overloads",
+              bytecode[0], "", helpers, 0, 10, false);
+        for (int optimize : { 10, 3 })
+            check(strings ? "connected string hash results"
+                          : "connected numeric results",
+                  bytecode[1], consumer, helpers, 2, optimize, true);
+    }
+    {
+        const string_view sources[] = {
+            "shader hash_string_producer(output string value=\"\") { "
+            "value=u>v?\"hart-hash-connected\":\"\"; }",
+            "shader hash_string_consumer(string value=\"default\", "
+            "output color Cout=0) { int h=hash(value); "
+            "Cout=color(h&65535,(h>>16)&65535,h<0); }",
+        };
+        std::string bytecode[2];
+        for (size_t i = 0; i < std::size(sources); ++i) {
+            OSLCompiler compiler;
+            if (!compiler.compile_buffer(sources[i], bytecode[i], {}, stdosl))
+                return false;
+        }
+        for (int optimize : { 10, 3 })
+            check("connected string operand", bytecode[0], bytecode[1],
+                  { "osl_hash_is" }, optimize == 10 ? 0 : 2, optimize,
+                  optimize == 3);
+    }
+    const struct {
+        bool pair;
+        unsigned operand;
+        const char* replacement;
+    } malformed[] = {
+        { false, 1, "x" }, { false, 2, "m" },   { false, 2, "a" },
+        { true, 2, "n" },  { true, 2, "word" }, { true, 3, "word" },
+    };
+    for (const auto& test : malformed) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source = fmtformat(
+            "shader bad_hash(float x=0.2, int n=7, string word=\"alpha\", "
+            "matrix m=1, float a[2]={{0,1}}, output int value=0, "
+            "output color Cout=0) {{ value=hash(x{}); "
+            "Cout=color(value+n,x+m[0][0],a[0]); }}",
+            test.pair ? ",x" : "");
+        if (!compiler.compile_buffer(source, bytecode, {}, stdosl))
+            return false;
+        const auto op    = bytecode.find("\thash\t");
+        const auto end   = bytecode.find('\n', op);
+        const auto hints = bytecode.find('%', op);
+        OIIO_CHECK_ASSERT(op != std::string::npos && end != std::string::npos
+                          && hints < end);
+        if (op == std::string::npos || end == std::string::npos || hints >= end)
+            return false;
+        std::vector<std::string> words;
+        OIIO::Strutil::split(string_view(bytecode).substr(op, hints - op),
+                             words, "", -1);
+        OIIO_CHECK_EQUAL(words.size(), test.pair ? 4 : 3);
+        if (words.size() != (test.pair ? 4 : 3))
+            return false;
+        words[test.operand] = test.replacement;
+        bytecode.replace(op, hints - op,
+                         fmtformat("\t{}\t", OIIO::Strutil::join(words, "\t")));
+        HartServices renderer(false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, "invalid hash operands");
+    }
+    return true;
+}
+
+
+
+bool
+check_dynamic_noise_modules(string_view arch, string_view stdosl)
+{
+    auto check = [&](string_view label, string_view producer,
+                     string_view consumer,
+                     std::initializer_list<string_view> helpers,
+                     int osl_optimize, int optimize, bool local,
+                     int guard_flags) {
+        HartServices renderer(false, false, false, true, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", osl_optimize);
+        ss.attribute("llvm_optimize", optimize);
+        ss.attribute("max_hart_groupdata_alloc", local ? 4096 : 0);
+        const bool connected = !consumer.empty();
+        auto group = connected ? make_connected_group(ss, producer, consumer)
+                               : make_group(ss, producer);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Dynamic {} (OSL {}, LLVM {}):\n{}", label,
+                  osl_optimize, optimize, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, local ? size : 0);
+        const int previous_failures = unit_test_failures;
+        check_module(ss, *group, arch, helpers, optimize, connected, false,
+                     false, connected ? 2 : 0, false, true, 0, -1, guard_flags);
+        if (unit_test_failures != previous_failures)
+            print(stderr,
+                  "Dynamic noise module checks failed: {} "
+                  "(OSL {}, LLVM {})\n",
+                  label, osl_optimize, optimize);
+    };
+    // Invalid names in storage must compile; the dynamic guard rejects them
+    // only when selected. They are not literal-selector exceptions.
+    const string_view selection
+        = "string names[10]={\"perlin\",\"uperlin\",\"noise\",\"snoise\","
+          "\"cell\",\"hash\",\"gabor\",\"simplex\",\"usimplex\",\"unknown\"}; "
+          "string kind=names[int(9*u)]; ";
+    const string_view coordinates
+        = "float x=0.31+1.3*u, y=0.27+0.7*v, t=0.2+u*v; "
+          "point p=point(x,y,0.4+u*v); ";
+    const string_view record
+        = "struct HartDynamicNoiseInput { string kind; float x; float y; "
+          "point p; float t; }; ";
+    for (bool periodic : { false, true }) {
+        const string_view operation = periodic ? "pnoise" : "noise";
+        const string_view family = periodic ? "genericpnoise" : "genericnoise";
+        const string_view per1   = periodic ? ",3.0" : "";
+        const string_view per2   = periodic ? ",3.0,4.0" : "";
+        const string_view per3   = periodic ? ",point(3,4,5)" : "";
+        const string_view per4   = periodic ? ",point(3,4,5),7.0" : "";
+        for (string_view type : { "float", "color" }) {
+            const auto body
+                = fmtformat("{0} a={1}(kind,x{2}), b={1}(kind,x,y{3}), "
+                            "c={1}(kind,p{4}), d={1}(kind,p,t{5}), "
+                            "e={1}(kind,x,0.31{3}), "
+                            "f={1}(kind,point(0.2,0.3,0.4),t{5}); "
+                            "{0} result=a+0.7*b+0.6*c+0.5*d+0.4*e+0.3*f; ",
+                            type, operation, per1, per2, per3, per4);
+            const std::string sources[] = {
+                fmtformat("shader dynamic_noise_values(output color Cout=0) "
+                          "{{ {} {} {} Cout=color(result); }}",
+                          selection, coordinates, body),
+                fmtformat("{} shader dynamic_selector("
+                          "output HartDynamicNoiseInput value={{\"\",0,0,0,0}}) "
+                          "{{ {} {} value.kind=kind; value.x=x; value.y=y; "
+                          "value.p=p; value.t=t; }}",
+                          record, selection, coordinates),
+                fmtformat("{} shader dynamic_noise_consumer("
+                          "HartDynamicNoiseInput value={{\"gabor\",0,0,0,0}}, "
+                          "output color Cout=0) {{ string kind=value.kind; "
+                          "float x=value.x, y=value.y, t=value.t; "
+                          "point p=value.p; {} "
+                          "Cout=color(result+Dx(result)+Dy(result)); }}",
+                          record, body),
+            };
+            std::string bytecode[3];
+            for (size_t i = 0; i < std::size(sources); ++i) {
+                OSLCompiler compiler;
+                if (!compiler.compile_buffer(sources[i], bytecode[i], {},
+                                             stdosl))
+                    return false;
+            }
+            const auto prefix           = fmtformat("osl_{}_{}", family,
+                                          type == "float" ? "df" : "dv");
+            const std::string helpers[] = {
+                prefix + "df" + (periodic ? "f" : ""),
+                prefix + "dfdf" + (periodic ? "ff" : ""),
+                prefix + "dv" + (periodic ? "v" : ""),
+                prefix + "dvdf" + (periodic ? "vf" : ""),
+            };
+            const auto required = { string_view(helpers[0]),
+                                    string_view(helpers[1]),
+                                    string_view(helpers[2]),
+                                    string_view(helpers[3]),
+                                    string_view("osl_hart_noise_validate"),
+                                    string_view("osl_init_noise_options"),
+                                    string_view("rs_hart_noise_error") };
+            check(fmtformat("{} {} value only", operation, type), bytecode[0],
+                  "", required, 0, 10, false, 1);
+            for (int optimize : { 10, 3 })
+                check(fmtformat("{} {} connected derivatives", operation, type),
+                      bytecode[1], bytecode[2], required, 2, optimize, true, 1);
+        }
+        {
+            const auto source = fmtformat(
+                "shader dynamic_options(output color Cout=0) {{ "
+                "string names[2]={{\"gabor\",\"perlin\"}}; "
+                "string kind=names[int(u>v)]; {4} "
+                "float a={0}(kind,p{1},\"bandwidth\",0.9+0.2*u,"
+                "\"impulses\",8.0+v); "
+                "color b={0}(kind,p,t{2},\"anisotropic\",1,"
+                "\"do_filter\",int(u<0.75),\"direction\",vector(1,0.2*v,0.3),"
+                "\"bandwidth\",2,\"impulses\",8); "
+                "float c={0}(kind,x{3}); "
+                "Cout=color(a+Dx(a)+Dy(a)+c)+b+Dx(b)+Dy(b); }}",
+                operation, per3, per4, per1, coordinates);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, {}, stdosl))
+                return false;
+            for (int optimize : { 10, 3 })
+                check(fmtformat("{} options and reset", operation), bytecode,
+                      "",
+                      { fmtformat("osl_{}_dfdv{}", family, periodic ? "v" : ""),
+                        fmtformat("osl_{}_dvdvdf{}", family,
+                                  periodic ? "vf" : ""),
+                        fmtformat("osl_{}_dfdf{}", family, periodic ? "f" : ""),
+                        "osl_hart_noise_validate", "osl_init_noise_options",
+                        "osl_noiseparams_set_anisotropic",
+                        "osl_noiseparams_set_do_filter",
+                        "osl_noiseparams_set_direction",
+                        "osl_noiseparams_set_bandwidth",
+                        "osl_noiseparams_set_impulses", "rs_hart_noise_error" },
+                      optimize == 10 ? 0 : 2, optimize, optimize == 3, 3);
+        }
+        for (string_view option : { "\"anisotropic\",1.0", "\"direction\",0.5",
+                                    "\"impulses\",color(2)", "option,1.0" }) {
+            const auto source = fmtformat(
+                "shader bad_dynamic_noise(string kind=\"gabor\", "
+                "string option=\"bandwidth\", output color Cout=0) {{ "
+                "Cout={}(kind,P{},{}); }}",
+                operation, per3, option);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, {}, stdosl))
+                return false;
+            HartServices renderer(false, false, false, false, false, false,
+                                  true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", 2);
+            auto group = make_group(ss, bytecode);
+            check_rejected_group(
+                ss, *group, errors,
+                option == "option,1.0"
+                    ? "noise option names must be literal strings"
+                    : "unsupported noise option");
+        }
+        {
+            OSLCompiler compiler;
+            std::string bytecode;
+            const auto source
+                = fmtformat("shader specialized_noise(string kind=\"perlin\", "
+                            "output color Cout=0) {{ Cout={}(kind,P{},"
+                            "\"do_filter\",0); }}",
+                            operation, per3);
+            if (!compiler.compile_buffer(source, bytecode, {}, stdosl))
+                return false;
+            HartServices renderer(false, false, false, false, false, false,
+                                  true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", 2);
+            auto group = make_group(ss, bytecode);
+            check_rejected_group(ss, *group, errors,
+                                 "noise options require gabor");
+        }
+        const struct {
+            const char* name;
+            bool options;
+        } overrides[] = {
+            { "", false },       { "cellnoise", false }, { "hashnoise", false },
+            { "pnoise", false }, { "psnoise", false },   { "perlin", true },
+            { "cell", true },    { "hash", true },
+        };
+        for (const auto& test : overrides) {
+            // The master selector is a parameter; only OSL2 specialization
+            // exposes the invalid override, with coordinates eligible to fold.
+            OSLCompiler compiler;
+            std::string bytecode;
+            const auto source = fmtformat(
+                "shader folded_noise_override(string kind=\"gabor\" "
+                "[[int lockgeom=1]], output color Cout=0) {{ "
+                "Cout={}(kind,point(0.25,0.5,0.75){}{}); }}",
+                operation, per3, test.options ? ",\"do_filter\",0" : "");
+            if (!compiler.compile_buffer(source, bytecode, {}, stdosl))
+                return false;
+            HartServices renderer(false, false, false, false, false, false,
+                                  true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+            OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", 3));
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_test", bytecode));
+            auto group = ss.ShaderGroupBegin("hart_test_group");
+            const ustring name(test.name);
+            OIIO_CHECK_ASSERT(
+                ss.Parameter("kind", TypeString, &name, ParamHints::none));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("Cout", TypeColor, false,
+                                         SymArena::Outputs, 0,
+                                         3 * sizeof(float));
+            ss.add_symlocs(group.get(), { &output, 1 });
+            const int previous_failures = unit_test_failures;
+            check_rejected_group(ss, *group, errors,
+                                 test.options ? "noise options require gabor"
+                                              : "unsupported noise type");
+            if (unit_test_failures != previous_failures)
+                print(stderr,
+                      "OSL2 constant-coordinate {} override '{}' "
+                      "(options={}):\n{}",
+                      operation, test.name, test.options, errors.messages);
+        }
+        for (string_view name :
+             { "null", "unull", "simplexnoise", "unknown" }) {
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(
+                    fmtformat("shader bad_literal_noise(output color Cout=0) "
+                              "{{ Cout={}(\"{}\",P{}); }}",
+                              operation, name, per3),
+                    bytecode, {}, stdosl))
+                return false;
+            HartServices renderer(false, false, false, false, false, false,
+                                  true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            auto group = make_group(ss, bytecode);
+            check_rejected_group(ss, *group, errors, "unsupported noise type");
         }
     }
     return true;
@@ -2627,14 +3254,14 @@ check_gabor_modules(string_view arch, string_view stdosl)
             if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
                 return false;
             HartServices renderer(false, false, false, false, false, false,
-                                  true);
+                                  !selector);
             Diagnostics errors;
             ShadingSystem ss(&renderer, nullptr, &errors);
             ss.attribute("hart_arch", arch);
             auto group = make_group(ss, bytecode);
             check_rejected_group(
                 ss, *group, errors,
-                selector ? "noise selectors must be literal strings"
+                selector ? "HARTNoiseErrors"
                          : "noise option names must be literal strings");
         }
         {
@@ -5443,6 +6070,8 @@ main(int argc, char* argv[])
         || !check_spline_modules(arch, argv[2])
         || !check_color_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
+        || !check_hash_modules(arch, argv[2])
+        || !check_dynamic_noise_modules(arch, argv[2])
         || !check_gabor_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])

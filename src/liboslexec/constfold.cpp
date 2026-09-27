@@ -2836,6 +2836,15 @@ DECLFOLDER(constfold_noise)
         name = op.opname();
     }
 
+    // Preserve HART selector/option validation after parameter specialization.
+    if (rop.shadingsys().use_hart() && Name) {
+        if (!hart_supports_noise(name, op.opname() == Strings::pnoise))
+            return 0;
+        for (int a = arg; a < op.nargs(); ++a)
+            if (rop.opargsym(op, a)->typespec().is_string())
+                return 0;
+    }
+
     // Noise with name that is not a constant at osl-compile-time was marked
     // as taking the derivs of its coordinate arguments. If at this point we
     // can determine that the name is known and not "gabor", when we can

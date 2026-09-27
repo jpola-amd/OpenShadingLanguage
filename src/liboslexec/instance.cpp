@@ -367,6 +367,19 @@ ShaderInstance::parameters(const ParamValueList& params,
 
 
 bool
+hart_supports_noise(ustring name, bool periodic)
+{
+    return name == ustring("perlin") || name == ustring("uperlin")
+           || name == ustring("noise") || name == ustring("snoise")
+           || name == ustring("cell") || name == ustring("hash")
+           || name == ustring("gabor")
+           || (!periodic
+               && (name == ustring("simplex") || name == ustring("usimplex")));
+}
+
+
+
+bool
 ShaderInstance::validate_hart() const
 {
     // Check the original code before constant folding can execute host-only
@@ -426,12 +439,33 @@ ShaderInstance::validate_hart() const
                    && (name == ustring("eq") || name == ustring("neq"))) {
             valid = type(0).is_int() && type(1).is_string()
                     && type(2).is_string();
+        } else if (op.nargs() == 2 && name == ustring("hash")) {
+            valid = type(0).is_int() && type(1).is_string();
         }
         if (!valid)
             shadingsys().errorfmt(
                 "HART: unsupported string operands for '{}' in shader '{}' "
                 "({}:{})",
                 name, shadername(), op.sourcefile(), op.sourceline());
+        return valid;
+    };
+    auto validate_hash = [&](const Opcode& op) {
+        auto type = [&](int arg) -> const TypeSpec& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
+                .typespec();
+        };
+        const bool valid
+            = (op.nargs() == 2 || op.nargs() == 3) && type(0).is_int()
+              && !type(1).is_array()
+              && (op.nargs() == 2
+                      ? (type(1).is_int() || type(1).is_float()
+                         || type(1).is_triple() || type(1).is_string())
+                      : ((type(1).is_float() || type(1).is_triple())
+                         && type(2).is_float()));
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: invalid hash operands in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
         return valid;
     };
     auto validate_closure = [&](const Opcode& op) {
@@ -589,19 +623,12 @@ ShaderInstance::validate_hart() const
         const bool periodic = op.opname() == ustring("pnoise");
         int arg             = 1;
         ustring name        = op.opname();
+        bool dynamic        = false;
         if (symbol(arg).typespec().is_string()) {
-            if (!symbol(arg).is_constant())
-                return fail("noise selectors must be literal strings");
-            name = symbol(arg++).get_string();
-            const bool supported_name
-                = name == ustring("perlin") || name == ustring("uperlin")
-                  || name == ustring("noise") || name == ustring("snoise")
-                  || name == ustring("cell") || name == ustring("hash")
-                  || name == ustring("gabor")
-                  || (!periodic
-                      && (name == ustring("simplex")
-                          || name == ustring("usimplex")));
-            if (!supported_name)
+            dynamic = !symbol(arg).is_constant();
+            name    = dynamic ? ustring() : symbol(arg).get_string();
+            ++arg;
+            if (!dynamic && !hart_supports_noise(name, periodic))
                 return fail(fmtformat("unsupported noise type '{}'", name));
         }
         if (arg >= op.nargs() || !numeric(symbol(arg)))
@@ -632,7 +659,7 @@ ShaderInstance::validate_hart() const
                 ++arg;
             }
         }
-        if (name == ustring("gabor")) {
+        if (dynamic || name == ustring("gabor")) {
             if (!shadingsys().renderer()->supports("HARTNoiseErrors"))
                 return fail("renderer lacks HARTNoiseErrors");
         } else if (arg != op.nargs())
@@ -851,6 +878,7 @@ ShaderInstance::validate_hart() const
         ustring("psnoise"),
         ustring("cellnoise"),
         ustring("hashnoise"),
+        ustring("hash"),
         ustring("texture"),
         ustring("matrix"),
         ustring("mxcompref"),
@@ -917,6 +945,8 @@ ShaderInstance::validate_hart() const
         if (op.opname() == ustring("texture") && !validate_texture(op))
             return false;
         if (op.opname() == ustring("closure") && !validate_closure(op))
+            return false;
+        if (op.opname() == ustring("hash") && !validate_hash(op))
             return false;
         if ((op.opname() == ustring("noise") || op.opname() == ustring("pnoise"))
             && !validate_noise(op))
@@ -1033,7 +1063,7 @@ ShaderInstance::validate_hart() const
                 && !op.argwrite(a))
                 continue;
             // Selectors and option names were validated before optimization.
-            if (sym.is_constant() && sym.typespec().is_string()
+            if (sym.typespec().is_string()
                 && (op.opname() == ustring("noise")
                     || op.opname() == ustring("pnoise"))) {
                 continue;
