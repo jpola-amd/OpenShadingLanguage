@@ -5,8 +5,8 @@
 // GPU-independent compiler regression tests for the HART backend. Compile small
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, split/fused callable ABI, address spaces, group-data
-// alignment, string hash storage, linked shadeops, control flow, HART provenance,
-// and rejection of unsupported operations.
+// alignment, string hash storage, packed diagnostics, linked shadeops, control
+// flow, HART provenance, and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -18,6 +18,7 @@
 // rejection cases with positive tests when their features become supported.
 
 #include <OSL/genclosure.h>
+#include <OSL/hart_diagnostics.h>
 #include <OSL/oslcomp.h>
 #include <OSL/oslexec.h>
 #include <OSL/rendererservices.h>
@@ -30,6 +31,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <utility>
 
 #include <llvm/ADT/APInt.h>
 #include <llvm/Analysis/LoopInfo.h>
@@ -60,7 +62,7 @@ public:
     explicit HartServices(bool textures = false, bool transforms = false,
                           bool closures = false, bool arrays = false,
                           bool splines = false, bool colors = false,
-                          bool noise = false)
+                          bool noise = false, bool diagnostics = false)
         : m_textures(textures)
         , m_transforms(transforms)
         , m_closures(closures)
@@ -68,6 +70,7 @@ public:
         , m_splines(splines)
         , m_colors(colors)
         , m_noise(noise)
+        , m_diagnostics(diagnostics)
     {
     }
     int supports(string_view feature) const override
@@ -78,7 +81,8 @@ public:
                || (m_arrays && feature == "HARTArrayBounds")
                || (m_splines && feature == "HARTSplineErrors")
                || (m_colors && feature == "HARTColorSystem")
-               || (m_noise && feature == "HARTNoiseErrors");
+               || (m_noise && feature == "HARTNoiseErrors")
+               || (m_diagnostics && feature == "HARTDiagnostics");
     }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -106,6 +110,7 @@ private:
     bool m_splines;
     bool m_colors;
     bool m_noise;
+    bool m_diagnostics;
 };
 
 
@@ -904,6 +909,78 @@ check_color_layout(string_view arch, string_view filename)
         layout.getTypeAllocSize(type->getElementType(last)).getFixedValue(),
         sizeof(ustringhash));
 
+    const auto* diagnostic_address = module.getFunction(
+        "osl_hart_diagnostic_abi_address");
+    const auto* diagnostic_object = module.getNamedGlobal(
+        "osl_hart_diagnostic_abi_probe");
+    OIIO_CHECK_ASSERT(diagnostic_address
+                      && !diagnostic_address->isDeclaration());
+    OIIO_CHECK_ASSERT(diagnostic_object && diagnostic_object->isDeclaration()
+                      && !diagnostic_object->use_empty());
+    if (!diagnostic_address || !diagnostic_object)
+        return false;
+    OIIO_CHECK_EQUAL(diagnostic_address->getFnAttribute("target-cpu")
+                         .getValueAsString()
+                         .str(),
+                     std::string(arch));
+    OIIO_CHECK_EQUAL(diagnostic_object->getAddressSpace(), 1);
+    auto* buffer = llvm::dyn_cast<llvm::StructType>(
+        diagnostic_object->getValueType());
+    OIIO_CHECK_ASSERT(buffer && !buffer->isOpaque()
+                      && buffer->getNumElements() == 3);
+    if (!buffer || buffer->isOpaque() || buffer->getNumElements() != 3)
+        return false;
+    auto* records = llvm::dyn_cast<llvm::ArrayType>(buffer->getElementType(2));
+    auto* record  = records ? llvm::dyn_cast<llvm::StructType>(
+                                 records->getElementType())
+                            : nullptr;
+    OIIO_CHECK_ASSERT(record && !record->isOpaque()
+                      && record->getNumElements() == 10);
+    if (!record || record->isOpaque() || record->getNumElements() != 10)
+        return false;
+    OIIO_CHECK_EQUAL(HartDiagnosticCapacity, 256);
+    OIIO_CHECK_EQUAL(HartDiagnosticMaxArgs, 256);
+    OIIO_CHECK_EQUAL(HartDiagnosticMaxValues, 2048);
+    OIIO_CHECK_EQUAL(HartDiagnosticMaxFormat, 4096);
+    OIIO_CHECK_EQUAL(HartDiagnosticMaxMessage, 4096);
+    OIIO_CHECK_EQUAL(HartDiagnosticMaxField, 1024);
+    OIIO_CHECK_EQUAL(int(HartDiagnosticSeverity::Print), 0);
+    OIIO_CHECK_EQUAL(int(HartDiagnosticSeverity::Warning), 1);
+    OIIO_CHECK_EQUAL(int(HartDiagnosticSeverity::Error), 2);
+    OIIO_CHECK_ASSERT(pointer_free(pointer_free, buffer));
+    OIIO_CHECK_ASSERT(buffer->getElementType(0)->isIntegerTy(32)
+                      && buffer->getElementType(1)->isIntegerTy(32));
+    const uint64_t buffer_offsets[] = { 0, 4, 8 };
+    for (unsigned i = 0; i < std::size(buffer_offsets); ++i)
+        OIIO_CHECK_EQUAL(layout.getStructLayout(buffer)->getElementOffset(i),
+                         buffer_offsets[i]);
+    OIIO_CHECK_EQUAL(records->getNumElements(), 256);
+    OIIO_CHECK_EQUAL(layout.getTypeAllocSize(buffer).getFixedValue(), 602120);
+    OIIO_CHECK_EQUAL(layout.getABITypeAlign(buffer).value(), 8);
+    OIIO_CHECK_EQUAL(layout.getTypeAllocSize(buffer).getFixedValue(),
+                     sizeof(HartDiagnosticBuffer));
+    const uint64_t record_offsets[] = { 0, 8, 16, 24, 28, 32, 40, 44, 48, 304 };
+    for (unsigned i = 0; i < std::size(record_offsets); ++i)
+        OIIO_CHECK_EQUAL(layout.getStructLayout(record)->getElementOffset(i),
+                         record_offsets[i]);
+    const unsigned widths[] = { 64, 64, 64, 32, 32, 64, 32, 32 };
+    for (unsigned i = 0; i < std::size(widths); ++i)
+        OIIO_CHECK_ASSERT(record->getElementType(i)->isIntegerTy(widths[i]));
+    for (unsigned i : { 8, 9 }) {
+        auto* array = llvm::dyn_cast<llvm::ArrayType>(
+            record->getElementType(i));
+        OIIO_CHECK_ASSERT(array && array->getElementType()->isIntegerTy(8));
+        if (array)
+            OIIO_CHECK_EQUAL(array->getNumElements(), i == 8 ? 256 : 2048);
+    }
+    OIIO_CHECK_EQUAL(layout.getTypeAllocSize(record).getFixedValue(), 2352);
+    OIIO_CHECK_EQUAL(layout.getABITypeAlign(record).value(), 8);
+    OIIO_CHECK_EQUAL(layout.getTypeAllocSize(record).getFixedValue(),
+                     sizeof(HartDiagnosticRecord));
+    OIIO_CHECK_ASSERT(diagnostic_object->getAlign());
+    if (diagnostic_object->getAlign())
+        OIIO_CHECK_EQUAL(diagnostic_object->getAlign()->value(), 8);
+
     // Cross-check the probe against the actual embedded shadeops, whose record
     // type may already have disappeared during HIP frontend optimization.
     const auto bytes = pvt::hart_shadeops_bitcode(arch, errors);
@@ -928,6 +1005,8 @@ check_color_layout(string_view arch, string_view filename)
     OIIO_CHECK_EQUAL(module.getDataLayoutStr(), shadeops.getDataLayoutStr());
     OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_color_abi_probe"));
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_color_abi_address"));
+    OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_diagnostic_abi_probe"));
+    OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_diagnostic_abi_address"));
     int setters = 0;
     for (const auto& setter : shadeops) {
         if (setter.getName().find("11ColorSystem14set_colorspace")
@@ -980,13 +1059,250 @@ check_color_layout(string_view arch, string_view filename)
 
 
 
+struct DiagnosticExpectation {
+    std::string format;
+    std::vector<EncodedType> types;
+    ustring shader, source;
+    int line;
+    HartDiagnosticSeverity severity;
+    std::vector<std::pair<unsigned, uint64_t>> literals;
+};
+
+
+
+void
+check_diagnostic_abi(llvm::Module& module, int optimize,
+                     cspan<DiagnosticExpectation> expected)
+{
+    auto* bridge                = module.getFunction("osl_hart_diagnostic");
+    auto* callback              = module.getFunction("rs_hart_diagnostic");
+    const string_view signature = "plipipillii";
+    for (auto* function : { bridge, callback }) {
+        if (!function || function->use_empty()
+            || (function == bridge && optimize != 10))
+            continue;
+        OIIO_CHECK_EQUAL(function->isDeclaration(), function == callback);
+        OIIO_CHECK_ASSERT(function->getReturnType()->isVoidTy()
+                          && !function->isVarArg());
+        OIIO_CHECK_EQUAL(function->arg_size(), signature.size());
+        for (const auto& arg : function->args()) {
+            if (arg.getArgNo() >= signature.size())
+                continue;
+            const char kind = signature[arg.getArgNo()];
+            OIIO_CHECK_ASSERT(
+                kind == 'p'
+                    ? arg.getType()->isPointerTy()
+                          && arg.getType()->getPointerAddressSpace() == 0
+                    : arg.getType()->isIntegerTy(kind == 'l' ? 64 : 32));
+        }
+    }
+    if (!expected.empty())
+        OIIO_CHECK_ASSERT(callback && !callback->use_empty());
+    if (optimize != 10 || expected.empty())
+        return;
+    OIIO_CHECK_ASSERT(bridge && !bridge->isDeclaration()
+                      && bridge->arg_size() == signature.size() && callback
+                      && callback->isDeclaration());
+    if (!bridge || bridge->isDeclaration()
+        || bridge->arg_size() != signature.size() || !callback)
+        return;
+    int forwards = 0;
+    for (const auto& block : *bridge)
+        for (const auto& inst : block)
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                if (call->getCalledFunction() == callback) {
+                    ++forwards;
+                    OIIO_CHECK_EQUAL(call->arg_size(), signature.size());
+                    OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                     callback->getCallingConv());
+                    for (unsigned i = 0;
+                         i < call->arg_size() && i < bridge->arg_size(); ++i)
+                        OIIO_CHECK_EQUAL(call->getArgOperand(i),
+                                         bridge->getArg(i));
+                }
+    OIIO_CHECK_EQUAL(forwards, 1);
+    const auto& layout = module.getDataLayout();
+    std::vector<int> seen(expected.size(), 0);
+    for (auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0
+            && function.getName().find("osl_init_group_") != 0)
+            continue;
+        llvm::DominatorTree dominators(function);
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+                if (!call || call->getCalledFunction() != bridge)
+                    continue;
+                OIIO_CHECK_EQUAL(call->arg_size(), signature.size());
+                OIIO_CHECK_EQUAL(function.arg_size(), 6);
+                if (call->arg_size() != signature.size()
+                    || function.arg_size() != 6)
+                    continue;
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 bridge->getCallingConv());
+                OIIO_CHECK_EQUAL(call->getArgOperand(0)->stripPointerCasts(),
+                                 function.getArg(0));
+                OIIO_CHECK_EQUAL(call->getArgOperand(10), function.getArg(4));
+                const auto* shader = llvm::dyn_cast<llvm::ConstantInt>(
+                    call->getArgOperand(7));
+                const auto* line = llvm::dyn_cast<llvm::ConstantInt>(
+                    call->getArgOperand(9));
+                OIIO_CHECK_ASSERT(shader && line);
+                if (!shader || !line)
+                    continue;
+                const auto found = std::find_if(
+                    expected.begin(), expected.end(), [&](const auto& test) {
+                        return shader->getZExtValue()
+                                   == ustringhash(test.shader).hash()
+                               && line->getSExtValue() == test.line;
+                    });
+                if (found == expected.end()) {
+                    print(stderr,
+                          "Unexpected diagnostic at shader hash {}:{}\n",
+                          shader->getZExtValue(), line->getSExtValue());
+                    OIIO_CHECK_ASSERT(false);
+                    continue;
+                }
+                ++seen[found - expected.begin()];
+                const auto& test = *found;
+                std::vector<uint64_t> offsets;
+                uint64_t bytes = 0;
+                for (auto type : test.types) {
+                    offsets.push_back(bytes);
+                    bytes += type == EncodedType::kUstringHash ? 8 : 4;
+                }
+                const std::pair<unsigned, uint64_t> constants[] = {
+                    { 1, ustringhash(test.format).hash() },
+                    { 2, test.types.size() },
+                    { 4, bytes },
+                    { 6, uint64_t(test.severity) },
+                    { 7, ustringhash(test.shader).hash() },
+                    { 8, ustringhash(test.source).hash() },
+                    { 9, uint64_t(test.line) },
+                };
+                for (const auto& constant : constants) {
+                    const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(constant.first));
+                    OIIO_CHECK_ASSERT(value);
+                    if (value)
+                        OIIO_CHECK_EQUAL(value->getZExtValue(),
+                                         constant.second);
+                }
+                const llvm::AllocaInst* buffers[2] = {};
+                for (unsigned i = 0; i < 2; ++i) {
+                    const auto* pointer = call->getArgOperand(i ? 5 : 3);
+                    OIIO_CHECK_ASSERT(
+                        pointer->getType()->isPointerTy()
+                        && pointer->getType()->getPointerAddressSpace() == 0);
+                    buffers[i] = llvm::dyn_cast<llvm::AllocaInst>(
+                        pointer->stripPointerCasts());
+                    OIIO_CHECK_ASSERT(buffers[i]);
+                    if (!buffers[i])
+                        continue;
+                    OIIO_CHECK_EQUAL(buffers[i]->getAddressSpace(), 5);
+                    OIIO_CHECK_ASSERT(
+                        buffers[i]->getAllocatedType()->isIntegerTy(8));
+                    const auto* count = llvm::dyn_cast<llvm::ConstantInt>(
+                        buffers[i]->getArraySize());
+                    OIIO_CHECK_ASSERT(count);
+                    if (count)
+                        OIIO_CHECK_EQUAL(count->getZExtValue(),
+                                         i ? bytes : test.types.size());
+                }
+                if (!buffers[0] || !buffers[1])
+                    continue;
+                std::vector<int> type_stores(test.types.size(), 0);
+                std::vector<const llvm::StoreInst*> value_stores(
+                    test.types.size(), nullptr);
+                for (const auto& store_block : function)
+                    for (const auto& candidate : store_block) {
+                        const auto* store = llvm::dyn_cast<llvm::StoreInst>(
+                            &candidate);
+                        if (!store || !dominators.dominates(store, call))
+                            continue;
+                        int64_t offset = 0;
+                        const auto* base
+                            = llvm::GetPointerBaseWithConstantOffset(
+                                store->getPointerOperand(), offset, layout);
+                        if (base == buffers[0]) {
+                            OIIO_CHECK_ASSERT(offset >= 0
+                                              && uint64_t(offset)
+                                                     < test.types.size());
+                            if (offset < 0
+                                || uint64_t(offset) >= test.types.size())
+                                continue;
+                            ++type_stores[offset];
+                            const auto* type = llvm::dyn_cast<llvm::ConstantInt>(
+                                store->getValueOperand());
+                            OIIO_CHECK_ASSERT(type && type->getBitWidth() == 8);
+                            if (type)
+                                OIIO_CHECK_EQUAL(type->getZExtValue(),
+                                                 uint64_t(test.types[offset]));
+                        } else if (base == buffers[1]) {
+                            const auto slot = std::find(offsets.begin(),
+                                                        offsets.end(),
+                                                        uint64_t(offset));
+                            OIIO_CHECK_ASSERT(slot != offsets.end());
+                            if (slot == offsets.end())
+                                continue;
+                            const size_t index = slot - offsets.begin();
+                            OIIO_CHECK_ASSERT(!value_stores[index]);
+                            value_stores[index] = store;
+                            OIIO_CHECK_EQUAL(store->getAlign().value(), 1);
+                            auto* type = store->getValueOperand()->getType();
+                            const auto encoded = test.types[index];
+                            OIIO_CHECK_ASSERT(
+                                encoded == EncodedType::kFloat
+                                    ? type->isFloatTy()
+                                    : type->isIntegerTy(
+                                          encoded == EncodedType::kUstringHash
+                                              ? 64
+                                              : 32));
+                            OIIO_CHECK_EQUAL(
+                                layout.getTypeAllocSize(type).getFixedValue(),
+                                encoded == EncodedType::kUstringHash ? 8 : 4);
+                        }
+                    }
+                for (size_t i = 0; i < test.types.size(); ++i) {
+                    OIIO_CHECK_EQUAL(type_stores[i], 1);
+                    OIIO_CHECK_ASSERT(value_stores[i]);
+                }
+                for (const auto& literal : test.literals) {
+                    OIIO_CHECK_ASSERT(literal.first < value_stores.size());
+                    if (literal.first >= value_stores.size()
+                        || !value_stores[literal.first])
+                        continue;
+                    const auto* value
+                        = value_stores[literal.first]->getValueOperand();
+                    if (const auto* integer = llvm::dyn_cast<llvm::ConstantInt>(
+                            value)) {
+                        OIIO_CHECK_EQUAL(integer->getZExtValue(),
+                                         literal.second);
+                    } else if (const auto* fp
+                               = llvm::dyn_cast<llvm::ConstantFP>(value)) {
+                        OIIO_CHECK_EQUAL(
+                            fp->getValueAPF().bitcastToAPInt().getZExtValue(),
+                            literal.second);
+                    } else {
+                        OIIO_CHECK_ASSERT(false);
+                    }
+                }
+            }
+    }
+    for (int calls : seen)
+        OIIO_CHECK_EQUAL(calls, 1);
+}
+
+
+
 void
 check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              std::initializer_list<string_view> shadeops, int optimize,
              bool connected = false, bool branching = false,
              bool looping = false, int used_layers = 0, bool closures = false,
              bool aggregates = false, int spline_arraylen = 0,
-             int color_transforms = -1, int noise_guard_flags = -1)
+             int color_transforms = -1, int noise_guard_flags = -1,
+             cspan<DiagnosticExpectation> diagnostics = {})
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -1019,6 +1335,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     OIIO_CHECK_EQUAL(module.getDataLayout().getAllocaAddrSpace(), 5);
     check_color_abi(module, optimize, color_transforms);
     check_noise_abi(module, optimize, noise_guard_flags);
+    check_diagnostic_abi(module, optimize, diagnostics);
     if (closures) {
         const auto& layout = module.getDataLayout();
         OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
@@ -1965,7 +2282,7 @@ check_topology_modules(string_view arch, string_view stdosl)
                     ss.add_symlocs(group.get(), { &output, 1 });
                     if (reject) {
                         check_rejected_group(ss, *group, errors,
-                                             "unsupported operation 'printf'");
+                                             "renderer lacks HARTDiagnostics");
                         continue;
                     }
                     ss.optimize_group(group.get(), nullptr);
@@ -2132,7 +2449,7 @@ check_math_modules(string_view arch, string_view stdosl)
     } rejected[] = {
         { "float hidden(float x) { printf(\"no\"); return x; } "
           "shader bad(output color Cout=0) { Cout=color(hidden(u)); }",
-          "unsupported operation 'printf'" },
+          "renderer lacks HARTDiagnostics" },
     };
     for (const auto& test : rejected) {
         OSLCompiler compiler;
@@ -2543,6 +2860,347 @@ check_noise_modules(string_view arch, string_view stdosl)
             }
         }
     }
+    return true;
+}
+
+
+
+bool
+check_diagnostic_modules(string_view arch, string_view stdosl)
+{
+    const string_view filename = "hart_diagnostic_fixture.osl";
+    auto expectation =
+        [&](string_view format, string_view types, int line,
+            HartDiagnosticSeverity severity = HartDiagnosticSeverity::Print,
+            string_view shader              = "hart_test") {
+            DiagnosticExpectation result { std::string(format),
+                                           { },
+                                           ustring(shader),
+                                           ustring(filename),
+                                           line,
+                                           severity,
+                                           { } };
+            for (char type : types) {
+                OIIO_CHECK_ASSERT(type == 's' || type == 'i' || type == 'u'
+                                  || type == 'f');
+                result.types.push_back(type == 's'   ? EncodedType::kUstringHash
+                                       : type == 'i' ? EncodedType::kInt32
+                                       : type == 'u' ? EncodedType::kUInt32
+                                                     : EncodedType::kFloat);
+            }
+            return result;
+        };
+    auto repeat = [](string_view field, size_t count) {
+        return OIIO::Strutil::join(std::vector<std::string>(count,
+                                                            std::string(field)),
+                                   " ");
+    };
+    auto check = [&](string_view label, string_view producer_source,
+                     string_view consumer_source,
+                     cspan<DiagnosticExpectation> expected) {
+        std::string bytecode[2];
+        const bool connected = !consumer_source.empty();
+        OSLCompiler producer_compiler;
+        // The lexer adjusts main-file line numbers; use a distinct #line file.
+        const string_view input_file = "hart_diagnostic_input.osl";
+        if (!producer_compiler.compile_buffer(producer_source, bytecode[0], { },
+                                              stdosl, input_file))
+            return false;
+        if (connected) {
+            OSLCompiler consumer_compiler;
+            if (!consumer_compiler.compile_buffer(consumer_source, bytecode[1],
+                                                  { }, stdosl, input_file))
+                return false;
+        }
+        for (int optimize : { 10, 3 }) {
+            HartServices renderer(false, false, false, true, false, false,
+                                  false, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", optimize == 10 ? 0 : 2);
+            ss.attribute("llvm_optimize", optimize);
+            ss.attribute("max_hart_groupdata_alloc", optimize == 3 ? 4096 : 0);
+            auto group = connected ? make_connected_group(ss, bytecode[0],
+                                                          bytecode[1])
+                                   : make_group(ss, bytecode[0]);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "Diagnostic {} (LLVM {}):\n{}", label, optimize,
+                      errors.messages);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            int size = 0, allocated = -1;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "llvm_groupdata_size", size));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+            OIIO_CHECK_EQUAL(allocated, optimize == 3 ? size : 0);
+            const int previous_failures = unit_test_failures;
+            check_module(ss, *group, arch,
+                         { "osl_hart_diagnostic", "rs_hart_diagnostic" },
+                         optimize, connected, false, false, connected ? 2 : 0,
+                         false, true, 0, -1, -1, expected);
+            if (unit_test_failures != previous_failures)
+                print(stderr, "Diagnostic module checks failed: {} (LLVM {})\n",
+                      label, optimize);
+        }
+        return true;
+    };
+    const string_view scalar_source = R"osl(
+shader hart_test(string label="default", output color Cout=0) {
+    int n=int(7*u)-1;
+#line 100 "hart_diagnostic_fixture.osl"
+    printf("diagnostic {literal} 100%%\n");
+    printf("");
+    printf("%d %s %f %o %x %X %i\n",7,"literal",1.25,n,n,n,3);
+    warning("label=%s",label);
+    error("error=%d",n);
+    printf("flags=%-+08.2f|%#010x|% 8.2f",1.25,n,2.5);
+    Cout=color(u,v,1);
+}
+)osl";
+    DiagnosticExpectation scalars[] = {
+        expectation("diagnostic {{literal}} 100%\n", "", 100),
+        expectation("", "", 101),
+        expectation("{:d} {:s} {:f} {:o} {:x} {:X} {:d}\n", "isfuuui", 102),
+        expectation("label={:s}", "s", 103, HartDiagnosticSeverity::Warning),
+        expectation("error={:d}", "i", 104, HartDiagnosticSeverity::Error),
+        expectation("flags={:<+08.2f}|{:#010x}|{: 8.2f}", "fuf", 105),
+    };
+    scalars[2].literals = { { 0, 7 },
+                            { 1, ustringhash("literal").hash() },
+                            { 2, 0x3fa00000 },
+                            { 6, 3 } };
+    if (!check("empty, scalar, octal/hex and all severities", scalar_source, "",
+               scalars))
+        return false;
+    const string_view array_source       = R"osl(
+shader hart_test(output color Cout=0) {
+    int integers[2]={-1,5};
+    float floats[2]={1.25,2.5};
+    string words[2]={"alpha",""};
+    color colors[2]={color(1,2,3),color(4,5,6)};
+    matrix m=matrix(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16);
+#line 100 "hart_diagnostic_fixture.osl"
+    printf("arrays=%d|%g|%s|%v|%m",integers,floats,words,colors,m);
+    warning("geometry=%c|%n|%p|%v|%e",color(1,2,3),normal(0,0,1),point(u,v,1),vector(I),1.25);
+    Cout=color(u,v,1);
+}
+)osl";
+    const DiagnosticExpectation arrays[] = {
+        expectation("arrays=" + repeat("{:d}", 2) + "|" + repeat("{:g}", 2)
+                        + "|" + repeat("{:s}", 2) + "|" + repeat("{:f}", 6)
+                        + "|" + repeat("{:f}", 16),
+                    "iiffss" + std::string(22, 'f'), 100),
+        expectation("geometry=" + repeat("{:f}", 3) + "|" + repeat("{:f}", 3)
+                        + "|" + repeat("{:f}", 3) + "|" + repeat("{:f}", 3)
+                        + "|{:e}",
+                    std::string(13, 'f'), 101, HartDiagnosticSeverity::Warning),
+    };
+    if (!check("arrays, triples and matrix flattening", array_source, "",
+               arrays))
+        return false;
+    const string_view producer_source       = R"osl(
+shader hart_producer(string label="default", output string value="") {
+    value=u>v ? label : "connected";
+#line 200 "hart_diagnostic_fixture.osl"
+    printf("producer=%s",value);
+}
+)osl";
+    const string_view consumer_source       = R"osl(
+shader hart_consumer(string value="", output color Cout=0) {
+#line 300 "hart_diagnostic_fixture.osl"
+    warning("consumer=%s",value);
+    Cout=color(value=="default",u,v);
+}
+)osl";
+    const DiagnosticExpectation connected[] = {
+        expectation("producer={:s}", "s", 200, HartDiagnosticSeverity::Print,
+                    "hart_producer"),
+        expectation("consumer={:s}", "s", 300, HartDiagnosticSeverity::Warning,
+                    "hart_consumer"),
+    };
+    if (!check("default and connected strings", producer_source,
+               consumer_source, connected))
+        return false;
+    const std::string literal_limit(4096, 'x');
+    const std::string expanded_prefix(3777, 'y');
+    const std::string spec_limit = "%" + std::string(118, '-') + "d";
+    const auto boundary_source
+        = fmtformat("shader hart_test(string words[256]={{}},"
+                    "float numbers[64]={{}},output color Cout=0) {{\n"
+                    "#line 100 \"hart_diagnostic_fixture.osl\"\n"
+                    "printf(\"%s\",words);\n"
+                    "printf(\"{}%f\",numbers);\n"
+                    "printf(\"{}\");\n"
+                    "printf(\"%1024.128f\",1.25);\n"
+                    "printf(\"{}\",7);\n"
+                    "Cout=color(u,v,1); }}",
+                    expanded_prefix, literal_limit, spec_limit);
+    const DiagnosticExpectation boundaries[] = {
+        expectation(repeat("{:s}", 256), std::string(256, 's'), 100),
+        expectation(expanded_prefix + repeat("{:f}", 64), std::string(64, 'f'),
+                    101),
+        expectation(literal_limit, "", 102),
+        expectation("{:1024.128f}", "f", 103),
+        expectation("{:<d}", "i", 104),
+    };
+    OIIO_CHECK_EQUAL(boundaries[1].format.size(), 4096);
+    OIIO_CHECK_EQUAL(spec_limit.size(), 120);
+    if (!check("inclusive argument, payload and format limits", boundary_source,
+               "", boundaries))
+        return false;
+    auto reject = [&](string_view bytecode, string_view diagnostic,
+                      bool capability = true) {
+        HartServices renderer(false, false, true, true, false, false, false,
+                              capability);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        register_hart_closures(ss);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        ss.attribute("llvm_optimize", 3);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, diagnostic);
+    };
+    for (string_view operation : { "printf", "warning", "error" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                fmtformat("shader bad(output color Cout=0) {{ "
+                          "if(u<0) {}(\"unreachable on the grid\"); "
+                          "Cout=color(u,v,1); }}",
+                          operation),
+                bytecode, { }, stdosl))
+            return false;
+        reject(bytecode, "renderer lacks HARTDiagnostics", false);
+    }
+    {
+        // HART must not broaden the common frontend's integer conversions.
+        Diagnostics errors;
+        OSLCompiler compiler(&errors);
+        std::string bytecode;
+        OIIO_CHECK_ASSERT(
+            !compiler.compile_buffer("shader bad(output color Cout=0) { "
+                                     "printf(\"%u\",int(u)); Cout=color(u); }",
+                                     bytecode, { }, stdosl));
+        OIIO_CHECK_ASSERT(errors.errors > 0);
+        OIIO_CHECK_ASSERT(
+            OIIO::Strutil::contains(errors.messages,
+                                    "needs %d, %i, %o, %x, or %X"));
+    }
+    // Mutate a valid literal to exercise the original-master validator, not
+    // the frontend's separate printf checker (including malformed specifiers).
+    OSLCompiler format_compiler;
+    std::string format_bytecode;
+    if (!format_compiler.compile_buffer(
+            "shader bad(output color Cout=0) { "
+            "printf(\"HART_DIAGNOSTIC_FORMAT %d\",int(u)); Cout=color(u,v,1); }",
+            format_bytecode, { }, stdosl))
+        return false;
+    const std::string marker = "\"HART_DIAGNOSTIC_FORMAT %d\"";
+    const auto format_offset = format_bytecode.find(marker);
+    OIIO_CHECK_ASSERT(format_offset != std::string::npos);
+    if (format_offset == std::string::npos)
+        return false;
+    const std::pair<std::string, string_view> bad_formats[] = {
+        { "%", "unsupported diagnostic format specification" },
+        { "%q", "unsupported diagnostic format specification" },
+        { "%u", "unsupported diagnostic format specification" },
+        { "%*d", "unsupported diagnostic format specification" },
+        { "%.*f", "unsupported diagnostic format specification" },
+        { "%ld", "unsupported diagnostic format specification" },
+        { "%lld", "unsupported diagnostic format specification" },
+        { "%hd", "unsupported diagnostic format specification" },
+        { "%Lf", "unsupported diagnostic format specification" },
+        { "%1$d", "unsupported diagnostic format specification" },
+        { "%1025d", "diagnostic width exceeds 1024" },
+        { "%999999999999999999999d", "diagnostic width exceeds 1024" },
+        { "%.129f", "diagnostic precision exceeds 128" },
+        { "%" + std::string(119, '-') + "d",
+          "unsupported diagnostic format specification" },
+        { std::string(4095, 'x') + "%d",
+          "diagnostic format exceeds 4096 bytes" },
+        { "no fields", "diagnostic format/argument count mismatch" },
+        { "%d%d", "diagnostic format/argument count mismatch" },
+    };
+    for (const auto& test : bad_formats) {
+        std::string bytecode = format_bytecode;
+        bytecode.replace(format_offset, marker.size(),
+                         fmtformat("\"{}\"", test.first));
+        const int previous_failures = unit_test_failures;
+        reject(bytecode, test.second);
+        if (unit_test_failures != previous_failures)
+            print(stderr, "Diagnostic format rejection failed ({} chars): {}\n",
+                  test.first.size(), test.first.substr(0, 128));
+    }
+    const std::pair<std::string, string_view> bad_arguments[] = {
+        { "shader bad(string fmt=\"%d\",output color Cout=0) { "
+          "printf(fmt,int(u)); Cout=color(u); }",
+          "diagnostic formats must be literal strings" },
+        { "shader bad(output color Cout=0) { "
+          "printf(u>v ? \"%d\" : \"%i\",int(u)); Cout=color(u); }",
+          "diagnostic formats must be literal strings" },
+        { "shader bad(closure color c=0,output color Cout=0) { "
+          "printf(\"%s\",c); Cout=color(u); }",
+          "unsupported diagnostic argument type" },
+        { "shader bad(float a[257]={},output color Cout=0) { "
+          "printf(\"%f\",a); Cout=color(u); }",
+          "diagnostic exceeds 256 scalar arguments" },
+        { "shader bad(string a[257]={},output color Cout=0) { "
+          "printf(\"%s\",a); Cout=color(u); }",
+          "diagnostic exceeds 256 scalar arguments" },
+        { "shader bad(vector a[86]={},output color Cout=0) { "
+          "printf(\"%v\",a); Cout=color(u); }",
+          "diagnostic exceeds 256 scalar arguments" },
+        { fmtformat("shader bad(float a[64]={{}},output color Cout=0) {{ "
+                    "printf(\"{}%f\",a); Cout=color(u); }}",
+                    std::string(3778, 'y')),
+          "expanded diagnostic format or payload exceeds its limit" },
+        { "shader bad(output color Cout=0) { "
+          "fprintf(\"unsupported.txt\",\"%f\",u); Cout=color(u); }",
+          "unsupported operation 'fprintf'" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=color(format(\"%f\",u)==\"unsupported\",u,v); }",
+          "unsupported operation 'format'" },
+    };
+    for (const auto& test : bad_arguments) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.first, bytecode, { }, stdosl))
+            return false;
+        reject(bytecode, test.second);
+    }
+    OSLCompiler struct_compiler;
+    std::string struct_bytecode;
+    if (!struct_compiler.compile_buffer(
+            "struct HartDiagnosticRejectedStruct { float x; }; "
+            "shader bad(HartDiagnosticRejectedStruct value={1},float n=1,"
+            "output color Cout=0) { printf(\"%f\",n); "
+            "Cout=color(value.x,u,v); }",
+            struct_bytecode, { }, stdosl))
+        return false;
+    const auto op    = struct_bytecode.find("\tprintf\t");
+    const auto end   = struct_bytecode.find('\n', op);
+    const auto hints = struct_bytecode.find('%', op);
+    OIIO_CHECK_ASSERT(op != std::string::npos && end != std::string::npos
+                      && hints < end);
+    if (op == std::string::npos || end == std::string::npos || hints >= end)
+        return false;
+    std::vector<std::string> words;
+    OIIO::Strutil::split(string_view(struct_bytecode).substr(op, hints - op),
+                         words, "", -1);
+    OIIO_CHECK_EQUAL(words.size(), 3);
+    if (words.size() != 3)
+        return false;
+    OIIO_CHECK_EQUAL(words[2], "n");
+    words[2] = "value";
+    struct_bytecode.replace(op, hints - op,
+                            fmtformat("\t{}\t",
+                                      OIIO::Strutil::join(words, "\t")));
+    reject(struct_bytecode, "unsupported diagnostic argument type");
     return true;
 }
 
@@ -5996,13 +6654,13 @@ main(int argc, char* argv[])
     check_groupdata_alloc_settings();
     check_groupdata_alloc_modules(arch, oso[24], oso[25]);
     check_rejection("gfx9999", oso[0], "No embedded HART shadeops");
-    check_rejection(arch, oso[2], "unsupported operation 'printf'", 3);
+    check_rejection(arch, oso[2], "renderer lacks HARTDiagnostics", 3);
     check_rejection(arch, oso[0], "instrumentation", 1, true);
-    check_rejection(arch, oso[2], "unsupported operation 'printf'");
+    check_rejection(arch, oso[2], "renderer lacks HARTDiagnostics");
     check_rejection(arch, oso[3], "unsupported operation 'texture'");
-    check_rejection(arch, oso[14], "unsupported operation 'printf'");
+    check_rejection(arch, oso[14], "renderer lacks HARTDiagnostics");
     check_rejection(arch, oso[15], "unsupported operation 'texture'");
-    check_rejection(arch, oso[21], "unsupported operation 'printf'");
+    check_rejection(arch, oso[21], "renderer lacks HARTDiagnostics");
     check_rejection(arch, oso[22], "unsupported operation 'texture'");
     check_rejection(arch, oso[28], "unsupported operation 'Dz'");
     check_rejection(arch, oso[44], "unsupported shader global 'Ps'");
@@ -6045,7 +6703,7 @@ main(int argc, char* argv[])
                 oso[unsupported_layer == 1 ? (userdata ? 10 : 8) : 6]);
             check_rejected_group(ss, *group, errors,
                                  userdata ? "interpolated or interactive"
-                                          : "unsupported operation 'printf'");
+                                          : "renderer lacks HARTDiagnostics");
         }
     }
     {
@@ -6061,6 +6719,7 @@ main(int argc, char* argv[])
     }
     if (!check_aggregate_modules(arch, argv[2], oso[11])
         || !check_string_modules(arch, argv[2])
+        || !check_diagnostic_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])
         || !check_topology_modules(arch, argv[2])

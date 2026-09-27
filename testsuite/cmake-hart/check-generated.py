@@ -31,6 +31,8 @@ suites.add_argument("--strings", action="store_true",
                     help="Run hashed string parameters, copies, comparisons and connections")
 suites.add_argument("--selectors", action="store_true",
                     help="Run integer/string hashes and checked dynamic noise selection")
+suites.add_argument("--diagnostics", action="store_true",
+                    help="Run bounded print/warning/error payloads and launch resets")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
@@ -81,7 +83,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                     help="Benchmark host-synchronized launch latency for split, "
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
-if (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.derivatives or args.surface or args.filterwidth
+if (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
@@ -2496,6 +2498,143 @@ def check_string_suite():
         run(["--hart", "-v", "string_operation"], f"unsupported operation '{operation}'")
 
 
+def check_diagnostic_suite():
+    def shader(name, parameters, body):
+        source = root / (name + ".osl")
+        source.write_text(f"shader {name}({parameters}output color Cout=0) {{\n"
+                          + body + "\nCout=color(u,v,.5);\n}\n", encoding="ascii")
+        compile_fixture(source)
+
+    shader("hart_diag_values", "", r'''
+        string words[3]={"red","Red",""};
+        int a[2]={-1,2};
+        matrix m=matrix(1);
+        printf("DIAG value=%d text=[%s] scalar=%.2f array=%d matrix=%.0f %% {ok}\n",
+               int(2*u)-1,words[int(2*u)],.25+v,a,m);
+        if (u==0 && v==0) {
+            printf("");
+            printf("DIAG plain\n");
+            warning("DIAG warning %s %d\n","MiXeD",7);
+        }
+    ''')
+    shader("hart_diag_source", 'output string text="",', '''
+        text = u>.5 ? "Case" : "";
+    ''')
+    shader("hart_diag_connected", 'string text="missing",', r'''
+        printf("DIAG connected [%s] %o %x %X %i\n",
+               text,-1,-1,-1,-7);
+    ''')
+    shader("hart_diag_capacity", 'int reports=0,', r'''
+        for(int i=0;i<reports;++i)
+            printf("DIAG record %d\n",i);
+    ''')
+    shader("hart_diag_error", "", r'''
+        if(u==0)
+            error("DIAG failure [%s] %d\n","MiXeD",7);
+    ''')
+    shader("hart_diag_string", 'string text="",', 'printf("%s",text);')
+    shader("hart_diag_message", "", 'printf("%1024s%1024s%1024s%1024s","a","b","c","d");')
+    shader("hart_diag_long_message", "", 'printf("%1024s%1024s%1024s%1024s!","a","b","c","d");')
+    names = ",".join('"x"' for _ in range(256))
+    shader("hart_diag_payload", "", f'string a[256]={{{names}}}; printf("%s",a);')
+    image = root / "diagnostic.pfm"
+    expected_pixels = reference(3, 2, lambda u, v: (u, v, .5))
+    configurations = [
+        ("-O0", "10", []), ("-O2", "3", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"])]
+
+    def records(output, name):
+        return re.findall(r"HART shader '" + name
+                          + r"' \(([^\r\n]*):(\d+), point (\d+)\): ([^\r\n]*)",
+                          output)
+
+    def render(shaders, flags, mode, width=1, height=1, repeat=False, error=None,
+               launched=True):
+        if image.exists():
+            image.unlink()
+        arguments = ["--hart", "--hart-no-cache", "-v", "-g", str(width),
+                     str(height), "-o", "Cout", str(image)] + flags + mode
+        if repeat:
+            arguments += ["--warmup", "--iters", "3"]
+        output = run(arguments + shaders, error,
+                     error_after_launch=launched if error else False)
+        assert image.exists() == (error is None), output
+        return output
+
+    for osl_opt, llvm_opt, mode in configurations:
+        flags = [osl_opt, "--llvm_opt", llvm_opt]
+        print("Checking HART diagnostics", flags, mode, flush=True)
+        cpu = run(flags + ["-g", "3", "2", "hart_diag_values"])
+        cpu_values = re.findall(r"DIAG value=[^\r\n]*", cpu)
+        assert len(cpu_values) == 6, cpu
+        output = render(["hart_diag_values"], flags, mode, 3, 2, repeat=True)
+        reports = records(output, "hart_diag_values")
+        assert len(reports) == 36, output
+        assert all(Path(source).name == "hart_diag_values.osl" and int(line) > 0
+                   for source, line, point, text in reports), reports
+        for point in range(6):
+            values = [text for _, _, index, text in reports
+                      if int(index) == point and text.startswith("DIAG value=")]
+            assert len(values) == 4 and values == [cpu_values[point]] * 4, values
+        for message in ("", "DIAG plain", "DIAG warning MiXeD 7"):
+            assert sum(text == message and point == "0"
+                       for _, _, point, text in reports) == 4, reports
+        compare(image_pixels(image, 3, 2), expected_pixels, 0, 0)
+        connected = ["--shader", "hart_diag_source", "producer",
+                     "--shader", "hart_diag_connected", "consumer",
+                     "--connect", "producer", "text", "consumer", "text"]
+        output = render(connected, flags, mode, 2, 1)
+        messages = {int(point): text for _, _, point, text
+                    in records(output, "hart_diag_connected")}
+        for point, word in enumerate(("", "Case")):
+            assert messages[point] == (f"DIAG connected [{word}] "
+                                       "37777777777 ffffffff FFFFFFFF -7"), messages
+        # Exact saturation boundary and resets across warmup + three launches.
+        output = render(["--param", "reports", "256", "hart_diag_capacity"],
+                        flags, mode, repeat=True)
+        reports = records(output, "hart_diag_capacity")
+        assert len(reports) == 1024, len(reports)
+        for i in range(256):
+            assert sum(text == f"DIAG record {i}" for _, _, _, text in reports) == 4
+        output = render(["--param", "reports", "0", "hart_diag_capacity"], flags, mode)
+        assert not records(output, "hart_diag_capacity"), output
+        output = render(["--param", "reports", "257", "hart_diag_capacity"],
+                        flags, mode, error="diagnostic buffer overflow")
+        assert len(records(output, "hart_diag_capacity")) == 256, output
+        output = render(["hart_diag_error"], flags, mode, 2, 1,
+                        error="shader error")
+        assert [text for _, _, _, text in records(output, "hart_diag_error")] == [
+            "DIAG failure [MiXeD] 7"], output
+        for text in ("", "x" * 1024):
+            output = render(["--param:type=string", "text", text, "hart_diag_string"],
+                            flags, mode)
+            assert [s for _, _, _, s in records(output, "hart_diag_string")] == [text]
+        render(["--param:type=string", "text", "x" * 1025, "hart_diag_string"],
+               flags, mode, error="field exceeds 1024")
+        output = render(["hart_diag_message"], flags, mode)
+        assert [len(text) for _, _, _, text in records(output, "hart_diag_message")] == [4096]
+        render(["hart_diag_long_message"], flags, mode, error="message exceeds 4096")
+        output = render(["hart_diag_payload"], flags, mode)
+        assert [text for _, _, _, text in records(output, "hart_diag_payload")] == [
+            " ".join(["x"] * 256)], output
+
+    output = render(["--param", "reports", "3", "hart_diag_capacity"],
+                    ["-O2", "--llvm_opt", "3"], [], 86, 1,
+                    error="diagnostic buffer overflow")
+    assert len(records(output, "hart_diag_capacity")) == 256, output
+
+    # Runtime argument errors and unsupported formats must not become printf success.
+    for name, parameters, body, message in (
+        ("dynamic", 'string format="%s",', 'printf(format,"x");', "must be literal"),
+        ("width", "", 'printf("%1025d",7);', "width exceeds"),
+        ("precision", "", 'printf("%.129f",u);', "precision exceeds"),
+    ):
+        name = "hart_diag_" + name
+        shader(name, parameters, body)
+        render([name], ["-O2", "--llvm_opt", "3"], [], error=message, launched=False)
+
+
 def check_selector_suite():
     configurations = [
         ("-O0", "10", []), ("-O2", "3", []),
@@ -3741,6 +3880,9 @@ try:
     if args.selectors:
         check_selector_suite()
 
+    if args.diagnostics:
+        check_diagnostic_suite()
+
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
                                     producer="hart_deriv_producer")
@@ -3979,7 +4121,7 @@ try:
     if args.fused_benchmark:
         check_fused_benchmark()
 
-    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.derivatives or args.surface or args.filterwidth
+    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
@@ -3993,7 +4135,6 @@ try:
             ("hart_extra_output", "RGB color"),
             ("hart_closure", "does not support parameter"),
             ("hart_string", "unsupported operation 'strlen'"),
-            ("hart_printf", "HART"),
             ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),
             ("hart_userdata", "HART"),
         ):
@@ -4003,7 +4144,7 @@ try:
              "--shader", "hart_sine", "surface", "-v"],
             "HART: unsupported shader global 'Ps'")
         # Even an unused producer must be validated before optimization.
-        for shader in ("hart_closure", "hart_string", "hart_printf",
+        for shader in ("hart_closure", "hart_string",
                        "hart_texture", "hart_userdata"):
             run(["--hart", "--shader", shader, "producer",
                  "--shader", "hart_sine", "consumer", "-v"],
@@ -4088,6 +4229,8 @@ elif args.numeric_math:
     suite = "numeric math"
 elif args.selectors:
     suite = "hashes and dynamic noise selectors"
+elif args.diagnostics:
+    suite = "bounded diagnostics"
 elif args.strings:
     suite = "string values"
 elif args.aggregates:

@@ -920,6 +920,7 @@ public:
 
     /// Store to a dereferenced pointer with no masking:   *ptr = val
     void op_unmasked_store(llvm::Value* val, llvm::Value* ptr);
+    void op_unmasked_store(llvm::Value* val, llvm::Value* ptr, unsigned alignment);
 
     /// Dereference a pointer of a native mask
     /// converting it to a llvm mask (vector of bits):  return native_to_llvm_mask(*ptr)

@@ -5871,6 +5871,15 @@ LLVM_Util::op_unmasked_store(llvm::Value* val, llvm::Value* ptr)
 
 
 
+void
+LLVM_Util::op_unmasked_store(llvm::Value* val, llvm::Value* ptr,
+                            unsigned alignment)
+{
+    builder().CreateAlignedStore(val, ptr, llvm::Align(alignment));
+}
+
+
+
 llvm::Value*
 LLVM_Util::op_load_mask(llvm::Value* native_mask_ptr)
 {

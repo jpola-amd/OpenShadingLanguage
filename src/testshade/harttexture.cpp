@@ -146,14 +146,115 @@ struct HartTextureStore::Impl {
         , state(handler)
         , errors(handler)
         , colorsystem(handler)
+        , diagnostics(handler)
+        , diagnostic_host(std::make_unique<HartDiagnosticBuffer>())
     {
     }
 
     OIIO::ErrorHandler& err;
     std::vector<std::unique_ptr<Texture>> textures;
-    DeviceBuffer descriptors, state, errors, colorsystem;
+    bool report_diagnostics()
+    {
+        if (!diagnostics.data)
+            return true;
+        uint32_t count = 0;
+        if (!hip_check(err,
+                       hipMemcpy(&count, diagnostics.data, sizeof(count),
+                                 hipMemcpyDeviceToHost),
+                       "hipMemcpy diagnostic count"))
+            return false;
+        if (count > HartDiagnosticCapacity) {
+            err.errorfmt("HART invalid diagnostic record count {}", count);
+            return false;
+        }
+        if (!count)
+            return true;
+        const size_t bytes = offsetof(HartDiagnosticBuffer, records)
+                             + count * sizeof(HartDiagnosticRecord);
+        if (!hip_check(err,
+                       hipMemcpy(diagnostic_host.get(), diagnostics.data, bytes,
+                                 hipMemcpyDeviceToHost),
+                       "hipMemcpy diagnostics"))
+            return false;
+        bool success = true;
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& record = diagnostic_host->records[i];
+            auto fail          = [&](string_view reason) {
+                err.errorfmt("HART diagnostic record {}: {}", i, reason);
+                return false;
+            };
+            if (record.arg_count > HartDiagnosticMaxArgs
+                || record.arg_bytes > HartDiagnosticMaxValues
+                || record.severity < 0 || record.severity > 2)
+                return fail("invalid header");
+            const ustring format = ustring::from_hash(record.format);
+            const ustring shader = ustring::from_hash(record.shader);
+            const ustring source = ustring::from_hash(record.source);
+            if (format.hash() != record.format || shader.hash() != record.shader
+                || source.hash() != record.source
+                || format.length() > HartDiagnosticMaxFormat
+                || shader.length() > HartDiagnosticMaxFormat
+                || source.length() > HartDiagnosticMaxFormat)
+                return fail("unknown string hash or oversized format/context");
+            uint32_t offset = 0;
+            for (uint32_t arg = 0; arg < record.arg_count; ++arg) {
+                const auto type     = EncodedType(record.arg_types[arg]);
+                const uint32_t size = type == EncodedType::kUstringHash ? 8 : 4;
+                if ((type != EncodedType::kUstringHash
+                     && type != EncodedType::kInt32
+                     && type != EncodedType::kUInt32
+                     && type != EncodedType::kFloat)
+                    || offset > record.arg_bytes
+                    || size > record.arg_bytes - offset)
+                    return fail("invalid argument types or byte count");
+                if (type == EncodedType::kUstringHash) {
+                    uint64_t hash;
+                    memcpy(&hash, record.arg_values + offset, sizeof(hash));
+                    const ustring text = ustring::from_hash(hash);
+                    if (text.hash() != hash
+                        || text.length() > HartDiagnosticMaxField)
+                        return fail(
+                            "unknown string argument or field exceeds 1024 bytes");
+                }
+                offset += size;
+            }
+            if (offset != record.arg_bytes)
+                return fail("argument byte count mismatch");
+            std::string message;
+            bool valid = record.arg_count == 0;
+            const int consumed
+                = format.empty()
+                      ? 0
+                      : decode_message(record.format, int(record.arg_count),
+                                       reinterpret_cast<const EncodedType*>(
+                                           record.arg_types),
+                                       record.arg_values, message, valid);
+            if (!valid || consumed != int(record.arg_bytes))
+                return fail("invalid formatting or truncated field");
+            if (message.size() > HartDiagnosticMaxMessage)
+                return fail("message exceeds 4096 bytes");
+            auto context = fmtformat("HART shader '{}' ({}:{}, point {}): {}",
+                                     shader,
+                                     source.empty() ? string_view("<unknown>")
+                                                    : string_view(source),
+                                     record.line, record.shade_index, message);
+            if (context.back() != '\n')
+                context += '\n';
+            if (record.severity == int(HartDiagnosticSeverity::Error)) {
+                err.errorfmt("{}", context);
+                success = false;
+            } else if (record.severity == int(HartDiagnosticSeverity::Warning))
+                err.warningfmt("{}", context);
+            else
+                err.message(context);
+        }
+        return success;
+    }
+
+    DeviceBuffer descriptors, state, errors, colorsystem, diagnostics;
+    std::unique_ptr<HartDiagnosticBuffer> diagnostic_host;
     size_t colorsystem_bytes = 0;
-    bool dirty = true;
+    bool dirty               = true;
 };
 
 
@@ -331,7 +432,8 @@ HartTextureStore::prepare()
     for (const auto& texture : impl.textures)
         host.push_back(texture->desc);
 
-    DeviceBuffer descriptors(impl.err), state(impl.err), errors(impl.err);
+    DeviceBuffer descriptors(impl.err), state(impl.err), errors(impl.err),
+        diagnostics(impl.err);
     const size_t bytes = host.size() * sizeof(testshade::HartTextureDesc);
     if ((!host.empty()
          && (!descriptors.allocate(bytes)
@@ -342,12 +444,17 @@ HartTextureStore::prepare()
         || !errors.allocate(sizeof(unsigned int))
         || !hip_check(impl.err, hipMemset(errors.data, 0, sizeof(unsigned int)),
                       "hipMemset errors")
+        || !diagnostics.allocate(sizeof(HartDiagnosticBuffer))
+        || !hip_check(impl.err,
+                      hipMemset(diagnostics.data, 0, sizeof(uint32_t)),
+                      "hipMemset diagnostic count")
         || !state.allocate(sizeof(testshade::HartTextureState)))
         return false;
     const testshade::HartTextureState host_state {
         static_cast<const testshade::HartTextureDesc*>(descriptors.data),
         uint64_t(host.size()), static_cast<unsigned int*>(errors.data),
-        impl.colorsystem.data
+        impl.colorsystem.data,
+        static_cast<HartDiagnosticBuffer*>(diagnostics.data)
     };
     if (!hip_check(impl.err,
                    hipMemcpy(state.data, &host_state, sizeof(host_state),
@@ -357,9 +464,11 @@ HartTextureStore::prepare()
     std::swap(descriptors.data, impl.descriptors.data);
     std::swap(state.data, impl.state.data);
     std::swap(errors.data, impl.errors.data);
+    std::swap(diagnostics.data, impl.diagnostics.data);
     impl.dirty = false;
     bool ok    = state.clear();
     ok         = descriptors.clear() && ok;
+    ok         = diagnostics.clear() && ok;
     return errors.clear() && ok;
 }
 
@@ -419,10 +528,17 @@ bool
 HartTextureStore::reset_errors()
 {
     auto& impl = *m_impl;
-    return !impl.errors.data
-           || hip_check(impl.err,
-                        hipMemset(impl.errors.data, 0, sizeof(unsigned int)),
-                        "hipMemset errors");
+    const bool errors_ok
+        = !impl.errors.data
+          || hip_check(impl.err,
+                       hipMemset(impl.errors.data, 0, sizeof(unsigned int)),
+                       "hipMemset errors");
+    const bool diagnostics_ok
+        = !impl.diagnostics.data
+          || hip_check(impl.err,
+                       hipMemset(impl.diagnostics.data, 0, sizeof(uint32_t)),
+                       "hipMemset diagnostic count");
+    return errors_ok && diagnostics_ok;
 }
 
 
@@ -438,10 +554,11 @@ HartTextureStore::check_errors()
                                 hipMemcpyDeviceToHost),
                       "hipMemcpy errors"))
         return false;
+    const bool diagnostics_ok = impl.report_diagnostics();
     if (!errors)
-        return true;
+        return diagnostics_ok;
     impl.err.errorfmt(
-        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}{}",
+        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
@@ -471,7 +588,14 @@ HartTextureStore::check_errors()
         errors & testshade::HartInvalidNoiseArguments
             ? "invalid noise arguments; "
             : "",
-        errors & ~2047u ? "unknown error; " : "");
+        errors & testshade::HartDiagnosticOverflow
+            ? "diagnostic buffer overflow (256 records per launch); "
+            : "",
+        errors & testshade::HartInvalidDiagnostic
+            ? "invalid diagnostic payload; "
+            : "",
+        errors & testshade::HartShaderError ? "shader error; " : "",
+        errors & ~16383u ? "unknown error; " : "");
     return false;
 }
 
@@ -480,10 +604,11 @@ HartTextureStore::check_errors()
 bool
 HartTextureStore::clear()
 {
-    auto& impl = *m_impl;
-    bool ok    = impl.state.clear();
-    ok         = impl.descriptors.clear() && ok;
-    ok         = impl.errors.clear() && ok;
+    auto& impl             = *m_impl;
+    bool ok                = impl.state.clear();
+    ok                     = impl.descriptors.clear() && ok;
+    ok                     = impl.errors.clear() && ok;
+    ok                     = impl.diagnostics.clear() && ok;
     ok                     = impl.colorsystem.clear() && ok;
     impl.colorsystem_bytes = 0;
     for (auto& texture : impl.textures)

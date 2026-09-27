@@ -8,6 +8,7 @@
 
 #include "oslexec_pvt.h"
 #include <OSL/genclosure.h>
+#include <OSL/hart_diagnostics.h>
 #include "backendllvm.h"
 
 using namespace OSL;
@@ -605,6 +606,15 @@ LLVMGEN(llvm_gen_print_fmt)
             TypeDesc simpletype(sym.typespec().simpletype());
             int num_elements   = simpletype.numelements();
             int num_components = simpletype.aggregate;
+            if (rop.use_hart()
+                && (num_elements < 0
+                    || size_t(num_elements) * num_components
+                           > HartDiagnosticMaxArgs - encodedtypes.size())) {
+                rop.shadingcontext()->errorfmt(
+                    "HART: diagnostic exceeds 256 scalar arguments ({}:{})",
+                    op.sourcefile(), op.sourceline());
+                return false;
+            }
             if ((sym.typespec().is_closure_based()
                  || simpletype.basetype == TypeDesc::STRING)
                 && formatchar != 's') {
@@ -637,7 +647,8 @@ LLVMGEN(llvm_gen_print_fmt)
             EncodedType et = EncodedType::kUstringHash;
             if (simpletype.basetype == TypeDesc::INT) {
                 //to mimic printf behavior when a hex specifier is used we are promoting the int to uint32_t
-                if (formatchar == 'x' || formatchar == 'X') {
+                if (formatchar == 'x' || formatchar == 'X'
+                    || (rop.use_hart() && formatchar == 'o')) {
                     et = EncodedType::kUInt32;
                 } else {
                     et = EncodedType::kInt32;
@@ -712,12 +723,20 @@ LLVMGEN(llvm_gen_print_fmt)
             }
         }
     }
-    if (!rop.use_optix_cache()) {
+    if (!rop.use_optix_cache() && !rop.use_hart()) {
         // Some ops prepend things
         if (op.opname() == op_error || op.opname() == op_warning) {
             s = fmtformat("Shader {} [{}]: {}", op.opname(),
                           rop.inst()->shadername(), s);
         }
+    }
+    if (rop.use_hart()
+        && (s.size() > HartDiagnosticMaxFormat
+            || arg_values_size > int(HartDiagnosticMaxValues))) {
+        rop.shadingcontext()->errorfmt(
+            "HART: expanded diagnostic format or payload exceeds its limit ({}:{})",
+            op.sourcefile(), op.sourceline());
+        return false;
     }
     ustring s_ustring(s.c_str());
     call_args.push_back(rop.llvm_const_hash(s_ustring));
@@ -765,11 +784,12 @@ LLVMGEN(llvm_gen_print_fmt)
             break;
         }
 
-        rop.ll.op_store(loadedArgValue,
-                        rop.ll.ptr_cast(rop.ll.GEP(rop.ll.type_int8(),
-                                                   loaded_arg_values_on_stack,
-                                                   bytesToArg),
-                                        type_ptr));
+        rop.ll.op_unmasked_store(
+            loadedArgValue,
+            rop.ll.ptr_cast(rop.ll.GEP(rop.ll.type_int8(),
+                                       loaded_arg_values_on_stack, bytesToArg),
+                            type_ptr),
+            1);
         bytesToArg += pvt::size_of_encoded_type(et);
     }
 
@@ -792,6 +812,20 @@ LLVMGEN(llvm_gen_print_fmt)
     // NOTE: format creates a new ustring, so only works on host
     if (op.opname() == op_format)
         rs_func_name = "osl_formatfmt";
+
+    if (rop.use_hart()) {
+        rs_func_name        = "osl_hart_diagnostic";
+        const auto severity = op.opname() == op_error
+                                  ? HartDiagnosticSeverity::Error
+                              : op.opname() == op_warning
+                                  ? HartDiagnosticSeverity::Warning
+                                  : HartDiagnosticSeverity::Print;
+        call_args.push_back(rop.ll.constant(int(severity)));
+        call_args.push_back(rop.llvm_const_hash(rop.inst()->shadername()));
+        call_args.push_back(rop.llvm_const_hash(op.sourcefile()));
+        call_args.push_back(rop.ll.constant(op.sourceline()));
+        call_args.push_back(rop.shadeindex());
+    }
 
     llvm::Value* ret = rop.ll.call_function(rs_func_name, call_args);
 

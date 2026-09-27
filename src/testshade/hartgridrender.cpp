@@ -207,7 +207,7 @@ public:
         return feature == "HART" || feature == "HARTTextures"
                || feature == "HARTTransforms" || feature == "HARTArrayBounds"
                || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
-               || feature == "HARTNoiseErrors"
+               || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
                || (m_closures && feature == "HARTClosures");
     }
 

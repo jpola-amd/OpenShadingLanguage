@@ -5,6 +5,7 @@
 #include "../../testshade/hart/array.h"
 #include "../../testshade/hart/closure.h"
 #include "../../testshade/hart/color.h"
+#include "../../testshade/hart/diagnostic.h"
 #include "../../testshade/hart/noise.h"
 #include "../../testshade/hart/texture.h"
 #include "../hartpathparams.h"

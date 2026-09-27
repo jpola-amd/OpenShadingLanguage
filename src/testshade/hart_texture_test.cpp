@@ -346,8 +346,8 @@ test_resources()
         return;
     OIIO_CHECK_EQUAL(state.count, uint64_t(6));
 
-    for (unsigned int bit :
-         { 1u, 2u, 4u, 7u, 8u, 15u, 16u, 128u, 256u, 512u, 1024u }) {
+    for (unsigned int bit : { 1u, 2u, 4u, 7u, 8u, 15u, 16u, 128u, 256u, 512u,
+                              1024u, 2048u, 4096u, 8192u }) {
         const int before_errors = errors.errors;
         if (!hip_ok(hipMemcpy(state.errors, &bit, sizeof(bit),
                               hipMemcpyHostToDevice)))
@@ -387,6 +387,85 @@ test_resources()
         OIIO_CHECK_ASSERT(lifetime.prepare());
     }
     OIIO_CHECK_EQUAL(errors.errors, before_cleanup);
+}
+
+
+
+void
+test_diagnostics()
+{
+    TestErrorHandler errors;
+    HartTextureStore store(errors);
+    OIIO_CHECK_ASSERT(store.prepare());
+    testshade::HartTextureState state { };
+    if (!read_state(store, state))
+        return;
+    OIIO_CHECK_ASSERT(state.diagnostics);
+    if (!state.diagnostics)
+        return;
+    auto buffer  = std::make_unique<HartDiagnosticBuffer>();
+    auto& record = buffer->records[0];
+    HartDiagnosticRecord valid { };
+    valid.format        = ustring("payload {:d}").hash();
+    valid.shader        = ustring("unit").hash();
+    valid.severity      = int(HartDiagnosticSeverity::Error);
+    valid.arg_count     = 1;
+    valid.arg_bytes     = 4;
+    valid.arg_types[0]  = uint8_t(EncodedType::kInt32);
+    const int32_t value = 7;
+    memcpy(valid.arg_values, &value, sizeof(value));
+    buffer->count      = 1;
+    auto reject_record = [&](string_view expected) {
+        const int before = errors.errors;
+        if (!hip_ok(hipMemcpy(state.diagnostics, buffer.get(), sizeof(*buffer),
+                              hipMemcpyHostToDevice)))
+            return;
+        OIIO_CHECK_ASSERT(!store.check_errors());
+        OIIO_CHECK_EQUAL(errors.errors, before + 1);
+        OIIO_CHECK_ASSERT(
+            OIIO::Strutil::contains(errors.last_message, expected));
+        OIIO_CHECK_ASSERT(store.reset_errors());
+        OIIO_CHECK_ASSERT(store.check_errors());
+    };
+    record           = valid;
+    record.arg_count = HartDiagnosticMaxArgs + 1;
+    reject_record("invalid header");
+    record           = valid;
+    record.arg_bytes = HartDiagnosticMaxValues + 1;
+    reject_record("invalid header");
+    record          = valid;
+    record.severity = 3;
+    reject_record("invalid header");
+    record              = valid;
+    record.arg_types[0] = uint8_t(EncodedType::kCount);
+    reject_record("invalid argument types");
+    record           = valid;
+    record.arg_bytes = 3;
+    reject_record("byte count");
+    record           = valid;
+    record.arg_count = 0;
+    reject_record("byte count mismatch");
+    record        = valid;
+    record.format = ustring("{:q}").hash();
+    reject_record("invalid formatting");
+    record        = valid;
+    record.format = ustring("{:1025d}").hash();
+    reject_record("truncated field");
+    record        = valid;
+    record.format = ustring(std::string(4097, 'x')).hash();
+    reject_record("oversized format");
+    record        = valid;
+    record.source = ustring(std::string(4097, 'x')).hash();
+    reject_record("oversized format/context");
+    record        = valid;
+    buffer->count = HartDiagnosticCapacity + 1;
+    reject_record("invalid diagnostic record count");
+    buffer->count = 1;
+    record        = valid;
+    reject_record("HART shader 'unit' (<unknown>:0, point 0): payload 7");
+    OIIO_CHECK_ASSERT(store.clear());
+    OIIO_CHECK_ASSERT(store.prepare());
+    OIIO_CHECK_ASSERT(store.check_errors());
 }
 
 
@@ -468,6 +547,7 @@ main()
     if (!hip_ok(hipSetDevice(0)) || !hip_ok(hipFree(nullptr)))
         return unit_test_failures;
     test_resources();
+    test_diagnostics();
     test_colorsystem();
     return unit_test_failures;
 }

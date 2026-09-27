@@ -879,6 +879,35 @@ shadeops retain their existing fast-math settings.
 Character operations, allocation and other dynamic service selectors remain
 explicit rejections; no placeholder `strlen`/`getchar` results are used.
 
+`printf`, `warning` and `error` use bounded, caller-owned device records when the
+renderer advertises `HARTDiagnostics`. Both testshade's generated grid and
+testrender's HART path tracer support this service. Records carry shader/source
+names, source line and the explicit callable shade index; host decoding resolves
+real hashes, including empty and connected strings. Reports are drained after
+each synchronized launch, including warmup. Each contextual report is newline
+terminated, even when its format has no final newline. Ordering between shading
+points is unspecified.
+
+Formats must be literal strings. Numeric width (at most 1024), precision (at most
+128), ordinary flags and OSL's `cdefgimnopsvxX` conversions are accepted, with at
+most 120 characters per specification. Argument types use OSL's usual format
+coercion and array/triple/matrix expansion. Dynamic
+width/precision, length modifiers, positional arguments, closures and structs
+are rejected. OSL's existing frontend exclusion of `%u` is unchanged. File
+printing, regex, general string allocation and character operations remain
+unsupported.
+
+Each launch holds at most 256 records. Each record has at most 256 flattened
+scalar arguments and 2048 packed value bytes. Original and expanded formats and
+decoded messages are limited to 4096 bytes, as are shader/source names; each
+string argument and formatted field is limited to 1024 bytes. Overflow, invalid
+payload/formatting, oversized fields/messages and shader `error` explicitly fail
+the render before image
+publication, rather than silently dropping or successfully truncating output.
+`warning` and `printf` alone do not fail a valid render. The six-argument shader
+callable ABI is unchanged. `hart-diagnostics-runtime`, the path-tracer tests and
+`unit_journal` cover payloads, bounds, context and repeated-launch draining.
+
 `hart-generated-cli` checks the supported CLI boundary without GPU execution.
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
 which compares arithmetic, `sin(u+v)`, and straight-line and conditional

@@ -10,6 +10,7 @@
 #include <OpenImageIO/strutil.h>
 
 #include "oslexec_pvt.h"
+#include <OSL/hart_diagnostics.h>
 
 
 OSL_NAMESPACE_BEGIN
@@ -468,6 +469,69 @@ ShaderInstance::validate_hart() const
                 shadername(), op.sourcefile(), op.sourceline());
         return valid;
     };
+    auto validate_diagnostic = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTDiagnostics"))
+            return fail("renderer lacks HARTDiagnostics");
+        if (op.nargs() < 1 || !symbol(0).typespec().is_string()
+            || !symbol(0).is_constant())
+            return fail("diagnostic formats must be literal strings");
+        const string_view format(symbol(0).get_string());
+        if (format.size() > HartDiagnosticMaxFormat)
+            return fail("diagnostic format exceeds 4096 bytes");
+        int fields = 0;
+        for (size_t i = 0; i < format.size(); ++i) {
+            if (format[i] != '%')
+                continue;
+            const size_t start = i++;
+            if (i < format.size() && format[i] == '%')
+                continue;
+            while (i < format.size()
+                   && string_view("-+ #0").find(format[i]) != string_view::npos)
+                ++i;
+            auto number = [&](unsigned limit) {
+                unsigned value = 0;
+                while (i < format.size() && format[i] >= '0'
+                       && format[i] <= '9') {
+                    const unsigned digit = unsigned(format[i++] - '0');
+                    if (value > limit / 10 || value * 10 + digit > limit)
+                        return false;
+                    value = value * 10 + digit;
+                }
+                return true;
+            };
+            if (!number(HartDiagnosticMaxField))
+                return fail("diagnostic width exceeds 1024");
+            if (i < format.size() && format[i] == '.') {
+                ++i;
+                if (!number(128))
+                    return fail("diagnostic precision exceeds 128");
+            }
+            if (i >= format.size() || i - start >= 120
+                || string_view("cdefgimnopsvxX").find(format[i])
+                       == string_view::npos)
+                return fail("unsupported diagnostic format specification");
+            ++fields;
+        }
+        if (fields != op.nargs() - 1)
+            return fail("diagnostic format/argument count mismatch");
+        for (int a = 1; a < op.nargs(); ++a) {
+            const auto& type = symbol(a).typespec();
+            if (type.is_closure_based() || type.is_structure_based()
+                || (!type.is_float_based() && !type.is_int_based()
+                    && !type.is_string_based()))
+                return fail("unsupported diagnostic argument type");
+        }
+        return true;
+    };
     auto validate_closure = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
             return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
@@ -879,6 +943,9 @@ ShaderInstance::validate_hart() const
         ustring("cellnoise"),
         ustring("hashnoise"),
         ustring("hash"),
+        ustring("printf"),
+        ustring("warning"),
+        ustring("error"),
         ustring("texture"),
         ustring("matrix"),
         ustring("mxcompref"),
@@ -947,6 +1014,11 @@ ShaderInstance::validate_hart() const
         if (op.opname() == ustring("closure") && !validate_closure(op))
             return false;
         if (op.opname() == ustring("hash") && !validate_hash(op))
+            return false;
+        const bool diagnostic = op.opname() == ustring("printf")
+                                || op.opname() == ustring("warning")
+                                || op.opname() == ustring("error");
+        if (diagnostic && !validate_diagnostic(op))
             return false;
         if ((op.opname() == ustring("noise") || op.opname() == ustring("pnoise"))
             && !validate_noise(op))
@@ -1025,6 +1097,8 @@ ShaderInstance::validate_hart() const
             if ((op.opname() == ustring("color") && op.nargs() == 5 && a == 1)
                 || (op.opname() == ustring("transformc") && (a == 1 || a == 2)))
                 continue;  // Validated literal color spaces, not device strings.
+            if (diagnostic && sym.typespec().is_string_based())
+                continue;  // Literal format and typed argument payload.
             if (sym.typespec().is_string()
                 && (op.opname() == ustring("matrix")
                     || op.opname() == ustring("getmatrix")

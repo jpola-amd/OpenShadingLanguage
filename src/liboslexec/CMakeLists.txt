@@ -698,6 +698,12 @@ if (OSL_BUILD_TESTS AND BUILD_TESTING)
     set_target_properties (accum_test PROPERTIES FOLDER "Unit Tests")
     add_test (unit_accum ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/accum_test)
 
+    add_executable (journal_test journal_test.cpp)
+    target_link_libraries (journal_test PRIVATE oslexec)
+    target_include_directories (journal_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+    set_target_properties (journal_test PROPERTIES FOLDER "Unit Tests")
+    add_test (NAME unit_journal COMMAND journal_test)
+
     add_executable (dual_test dual_test.cpp)
     target_link_libraries (dual_test PRIVATE OpenImageIO::OpenImageIO Imath::Imath ${CMAKE_DL_LIBS})
     target_include_directories (dual_test  BEFORE PRIVATE ${OpenImageIO_INCLUDES})

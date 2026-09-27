@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <OSL/hart_diagnostics.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -21,7 +23,10 @@ enum HartDeviceError : unsigned int {
     HartArrayIndexOutOfBounds       = 128,
     HartInvalidSpline               = 256,
     HartUnsupportedColorTransform   = 512,
-    HartInvalidNoiseArguments       = 1024
+    HartInvalidNoiseArguments       = 1024,
+    HartDiagnosticOverflow          = 2048,
+    HartInvalidDiagnostic           = 4096,
+    HartShaderError                 = 8192
 };
 
 // Texture IDs are one-based indices into the launch-time descriptor table.
@@ -35,11 +40,12 @@ struct HartTextureState {
     uint64_t count;
     unsigned int* errors;
     const void* colorsystem;
+    OSL::HartDiagnosticBuffer* diagnostics;
 };
 
 static_assert(
     sizeof(void*) == 8 && sizeof(HartTextureDesc) == 24
-        && sizeof(HartTextureState) == 32,
+        && sizeof(HartTextureState) == 40,
     "The HART texture ABI requires 64-bit pointers and fixed record sizes");
 static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureDesc, width) == 8
@@ -49,7 +55,8 @@ static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureState, textures) == 0
                   && offsetof(HartTextureState, count) == 8
                   && offsetof(HartTextureState, errors) == 16
-                  && offsetof(HartTextureState, colorsystem) == 24,
+                  && offsetof(HartTextureState, colorsystem) == 24
+                  && offsetof(HartTextureState, diagnostics) == 32,
               "Unexpected HART texture ABI offsets");
 static_assert(std::is_trivial<HartTextureDesc>::value
                   && std::is_standard_layout<HartTextureDesc>::value

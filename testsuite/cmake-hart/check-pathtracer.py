@@ -98,6 +98,19 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
         "path_gabor_bad": """shader path_gabor_bad() {
             Ci = noise("gabor",point(1e20,u,v))*emission();
         }""",
+        "path_diagnostic": """shader path_diagnostic() {
+            printf("PATH diagnostic %s %d\\n","MiXeD",7);
+            Ci=color(.25,.5,.75)*emission();
+        }""",
+        "path_diagnostic_error": """shader path_diagnostic_error() {
+            error("PATH failure %s %d\\n","MiXeD",7);
+            Ci=emission();
+        }""",
+        "path_diagnostic_overflow": """shader path_diagnostic_overflow() {
+            for(int i=0;i<257;++i)
+                printf("PATH record %d\\n",i);
+            Ci=emission();
+        }""",
         "path_overflow": """shader path_overflow() {
             Ci = 0;
             for (int i = 0; i < 48; ++i)
@@ -147,6 +160,8 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
         'corner="-2,-2,0" edge_x="4,0,0" edge_y="0,4,0"',
         'corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"')
     scenes["gabor-error"] = scenes["spline-error"].replace("path_spline_bad", "path_gabor_bad")
+    for name in ("diagnostic", "diagnostic_error", "diagnostic_overflow"):
+        scenes[name] = scenes["spline-error"].replace("path_spline_bad", "path_" + name)
     for name, scale in (("tiny", 0.001), ("large", 1000.0)):
         world = ET.fromstring(scenes["seams"])
         for node in world:
@@ -199,7 +214,27 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     assert sum(high) > sum(low) + 0.1, (sum(low), sum(high))
     compare(high, render("multiple", False, bounces=3, aa=4), 2e-4)
 
+    diagnostic_image = root / "diagnostic.pfm"
+    output = run([renderer, "--hart", "-v", "--warmup", "--iters", "3"]
+                 + common + flags + ["diagnostic.xml", str(diagnostic_image)], root)
+    records = re.findall(r"HART shader 'path_diagnostic' "
+                         r"\(([^\r\n]*):(\d+), point (\d+)\): PATH diagnostic MiXeD 7",
+                         output)
+    assert len(records) == width * height * 4, len(records)
+    for point in range(width * height):
+        assert sum(int(index) == point for _, _, index in records) == 4
+    assert all(Path(source).name == "path_diagnostic.osl" and int(line) > 0
+               for source, line, _ in records), records
+    compare(pixels(diagnostic_image), [.25, .5, .75] * (width * height), 0)
+
     image = root / "rejected.pfm"
+    for scene, message, bits in (
+            ("diagnostic_error", "PATH failure MiXeD 7", 8192),
+            ("diagnostic_overflow", "diagnostic buffer overflow", 2048)):
+        out = run([renderer, "--hart", "-v"] + flags
+                  + ["--res", "2", "2", scene + ".xml", str(image)], root, 1)
+        assert message in out and f"error bits {bits}" in out, out
+        assert "HART path tracer rendered" not in out and not image.exists(), out
     out = run([renderer, "--max-bounces", "-1", "emission.xml",
                str(image)], root, 1)
     assert "--max-bounces must be nonnegative" in out and not image.exists()
