@@ -299,6 +299,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     --oiiotool "${hart_output_oiiotool}")
             set_tests_properties (hart-outputs-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-entries-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-entries.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-entries-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-derivatives-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"

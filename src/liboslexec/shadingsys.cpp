@@ -2186,6 +2186,36 @@ ShadingSystemImpl::attribute(ShaderGroup* group, string_view name,
             group->m_renderer_outputs.emplace_back(((const char**)val)[i]);
         return true;
     }
+    if (use_hart() && type.basetype == TypeDesc::STRING
+        && (name == "entry_layers" || name == "hart_entry_layers")) {
+        if (!group->m_hart_bitcode.empty()
+            || (name == "entry_layers" && group->optimized())) {
+            errorfmt("Cannot change HART entry selection after {}",
+                     name == "entry_layers" ? "optimization" : "compilation");
+            return false;
+        }
+        std::vector<int> entries;
+        for (size_t i = 0; i < type.numelements(); ++i) {
+            const ustring layer_name(((const char**)val)[i]);
+            const int layer = group->find_layer(layer_name);
+            if (layer < 0
+                || (name == "hart_entry_layers"
+                    && !group->is_entry_layer(layer))) {
+                errorfmt("HART entry '{}' is not a {}layer", layer_name,
+                         name == "hart_entry_layers" ? "declared entry "
+                                                     : "shader ");
+                return false;
+            }
+            entries.push_back(layer);
+        }
+        if (name == "entry_layers") {
+            group->clear_entry_layers();
+            for (int layer : entries)
+                group->mark_entry_layer(layer);
+        }
+        group->m_hart_entry_layers = std::move(entries);
+        return true;
+    }
     if (name == "entry_layers" && type.basetype == TypeDesc::STRING) {
         group->clear_entry_layers();
         for (int i = 0; i < (int)type.numelements(); ++i)
@@ -2245,6 +2275,30 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
     }
     if (name == "raytype_queries" && type.basetype == TypeDesc::INT) {
         *(int*)val = group->raytype_queries();
+        return true;
+    }
+    if (name == "num_hart_entry_layers" && type == TypeInt) {
+        *(int*)val = use_hart() ? (group->m_hart_entry_layers.empty()
+                                       ? int(group->nlayers() > 0)
+                                       : int(group->m_hart_entry_layers.size()))
+                                : 0;
+        return use_hart();
+    }
+    if (name == "hart_entry_layers" && type.basetype == TypeDesc::STRING) {
+        if (!use_hart())
+            return false;
+        const size_t count = group->m_hart_entry_layers.empty()
+                                 ? size_t(group->nlayers() > 0)
+                                 : group->m_hart_entry_layers.size();
+        const size_t n     = std::min(type.numelements(), count);
+        for (size_t i = 0; i < n; ++i) {
+            const int layer    = group->m_hart_entry_layers.empty()
+                                     ? group->nlayers() - 1
+                                     : group->m_hart_entry_layers[i];
+            ((ustring*)val)[i] = group->layer(layer)->layername();
+        }
+        for (size_t i = n; i < type.numelements(); ++i)
+            ((ustring*)val)[i] = ustring();
         return true;
     }
     if (name == "num_entry_layers" && type.basetype == TypeDesc::INT) {
@@ -3975,9 +4029,18 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
                  "selected before shader compilation");
         return false;
     }
-    if (group.nlayers() < 1 || group.num_entry_layers() != 0) {
-        errorfmt("HART requires at least one shader layer with the "
-                 "last layer as the default entry point");
+    if (group.nlayers() < 1) {
+        errorfmt("HART requires at least one shader layer");
+        return false;
+    }
+    for (int layer : group.m_hart_entry_layers)
+        if (layer < 0 || layer >= group.nlayers()
+            || !group.is_entry_layer(layer)) {
+            errorfmt("HART entry selection contains a non-entry layer");
+            return false;
+        }
+    if (group.num_entry_layers() && group.m_hart_entry_layers.empty()) {
+        errorfmt("HART explicit entries must be configured with entry_layers");
         return false;
     }
     if (debug_nan() || debug_uninit() || llvm_debug_layers() || llvm_debug_ops()

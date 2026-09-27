@@ -2167,6 +2167,8 @@ test_shade(int argc, const char* argv[])
 #if OSL_TESTSHADE_HART
     if (use_hart) {
         setup_transformations(*rend, Mshad, Mobj);
+        hart.shader_entries = entrylayers;
+        hart.entry_outputs  = entryoutputs;
         std::vector<HartOutputRequest> hart_outputs;
         for (size_t i = 0; i < outputvars.size(); ++i)
             hart_outputs.push_back({ outputvars[i], outputfiles[i] });

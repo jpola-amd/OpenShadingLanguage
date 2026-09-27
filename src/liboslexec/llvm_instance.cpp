@@ -1466,9 +1466,7 @@ BackendLLVM::build_llvm_gpu_callables()
             ll.current_function_arg(4), ll.current_function_arg(5),
         };
 
-        // Call layer
-        std::string layer_name = layer_function_name(group(), *inst);
-        ll.call_function(layer_name.c_str(), args);
+        llvm_call_group_entries(args);
 
         ll.op_return();
         ll.end_builder();
@@ -1580,18 +1578,32 @@ BackendLLVM::build_llvm_fused_callable(void)
     std::string init_name = init_function_name(shadingsys(), group());
     ll.call_function(init_name.c_str(), args);
 
-    int nlayers          = group().nlayers();
-    ShaderInstance* inst = group()[nlayers - 1];
-
-    // Call entry
-    std::string layer_name = layer_function_name(group(), *inst);
-    ll.call_function(layer_name.c_str(), args);
+    llvm_call_group_entries(args);
 
     ll.op_return();
     ll.end_builder();
 
     return ll.current_function();
 }
+
+
+
+void
+BackendLLVM::llvm_call_group_entries(cspan<llvm::Value*> args)
+{
+    if (use_hart() && !group().m_hart_entry_layers.empty()) {
+        for (int layer : group().m_hart_entry_layers)
+            ll.call_function(
+                layer_function_name(group(), *group()[layer]).c_str(), args);
+    } else {
+        ll.call_function(layer_function_name(group(),
+                                             *group()[group().nlayers() - 1])
+                             .c_str(),
+                         args);
+    }
+}
+
+
 
 llvm::Function*
 BackendLLVM::build_llvm_instance(bool groupentry)

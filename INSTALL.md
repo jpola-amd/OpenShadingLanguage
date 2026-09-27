@@ -319,6 +319,23 @@ selection. The arena belongs to the renderer and remains alive through
 synchronized readback and image writing. The six-argument callable ABI and
 the separate external-module RGB contract are unchanged.
 
+Generated HART mode also accepts ordered `--entry LAYER` options. Initialization
+runs once, followed by the selected entry layers with shared per-point Groupdata.
+Existing execution flags and lazy connections prevent repeated earlier layers
+and shared producers from running again. As with CPU execution, the last layer
+does not have an already-run guard. `--entryoutput layer.parameter` options
+override the execution order by selecting parameters in the declared entry
+layers; they require `--entry`. An unselected layer's output arena stays zero.
+Split, fused-scratch and fused-local modes share these semantics.
+
+At the API level, set the group's `entry_layers` before optimization. This
+declares entry points and supplies their default call order. The HART-specific
+`hart_entry_layers` attribute can select or reorder these entries before code
+generation; `num_hart_entry_layers` and `hart_entry_layers` report the effective
+sequence without optimizing. A compiled sequence is immutable. The init, entry,
+and fused exports keep their six-argument ABI; entry/fused wrappers execute the
+whole selected sequence, rather than initializing separately for each layer.
+
 A connected two-layer example is:
 
 ```osl

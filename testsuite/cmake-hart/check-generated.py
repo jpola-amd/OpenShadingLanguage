@@ -3787,8 +3787,7 @@ try:
 
     base = ["--hart", "hart_first"]
     for option in (
-        ["--batched"], ["--center"], ["--entry", "layer"],
-        ["--entryoutput", "Cout"],
+        ["--batched"], ["--center"],
         ["--userdata", "value", "1"], ["--use_rs_bitcode"],
         ["--no-output-placement"], ["--shadeimage"], ["--raytype", "shadow"],
         ["--scaleuv", "2", "2"], ["--offsetuv", "1", "1"],

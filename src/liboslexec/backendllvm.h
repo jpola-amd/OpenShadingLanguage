@@ -72,6 +72,7 @@ public:
     // Create llvm functions for OptiX callables
     std::vector<llvm::Function*> build_llvm_gpu_callables();
     llvm::Function* build_llvm_fused_callable();
+    void llvm_call_group_entries(cspan<llvm::Value*> args);
 
     /// Build up LLVM IR code for the given range [begin,end) or
     /// opcodes, putting them (initially) into basic block bb (or the

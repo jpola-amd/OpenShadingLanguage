@@ -2156,6 +2156,7 @@ private:
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
     std::string m_hart_bitcode;
+    std::vector<int> m_hart_entry_layers;
     int m_hart_groupdata_alloc = 0;
 
     ParamValueList m_pending_params;          // Pending Parameter() values

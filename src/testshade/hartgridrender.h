@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "hartclosureparams.h"
 
@@ -28,6 +29,8 @@ struct HartOptions {
     bool has_local_groupdata    = false;
     bool runstats               = false;
     bool has_module = false, has_callables = false, has_entry = false;
+    std::vector<std::string> shader_entries;
+    std::vector<std::string> entry_outputs;
 };
 
 struct HartOutputRequest {

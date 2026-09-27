@@ -16,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <OpenImageIO/argparse.h>
@@ -405,7 +406,7 @@ public:
                 size_t group_alignment = 0, int raytype = 0,
                 HartTextureStore* textures = nullptr,
                 cspan<Matrix44> transforms = { }, size_t local_groupdata = 0,
-                size_t closure_capacity = 0)
+                size_t closure_capacity = 0, bool zero_outputs = false)
     {
         const size_t bytes       = pixels.size();
         const size_t params_size = group_alignment
@@ -498,8 +499,10 @@ public:
         auto launch = [&](bool measure) {
             if (textures && !textures->reset_errors())
                 return false;
-            // Reset every launch so warmup cannot conceal unwritten output.
-            if (!hip_check(hipMemsetAsync(m_output, 0xff, bytes, m_stream),
+            // Explicit entries may leave outputs untouched, as in CPU
+            // testshade's black images. Other modes retain the unwritten marker.
+            if (!hip_check(hipMemsetAsync(m_output, zero_outputs ? 0 : 0xff,
+                                          bytes, m_stream),
                            "hipMemsetAsync output"))
                 return false;
             if (m_verbose)
@@ -731,6 +734,8 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("-d %s:FORMAT", &format);
     ap.arg("--groupname %s:NAME");
     ap.arg("--layer %s:NAME");
+    ap.arg("--entry %s:LAYERNAME");
+    ap.arg("--entryoutput %s:NAME");
     ap.arg("--shader %s:SHADER %s:LAYER")
       .action([&](cspan<const char*>) { has_shader = true; });
     ap.arg("--connect %s:FROMLAYER %s:FROMOUTPUT %s:TOLAYER %s:TOINPUT");
@@ -946,6 +951,22 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         err.errorfmt("Cannot retrieve HART shader layer names");
         return false;
     }
+    auto find_parameter = [&](string_view name, bool outputs_only) {
+        for (int qualified = 1; qualified >= 0; --qualified)
+            for (int layer = layers - 1; layer >= 0; --layer)
+                for (const auto& parameter : queries[layer]) {
+                    if (outputs_only && !parameter.isoutput)
+                        continue;
+                    const std::string candidate
+                        = qualified ? fmtformat("{}.{}", layer_names[layer],
+                                                parameter.name)
+                                    : parameter.name.string();
+                    if (name == candidate)
+                        return std::make_pair(layer, &parameter);
+                }
+        return std::make_pair(-1,
+                              static_cast<const OSLQuery::Parameter*>(nullptr));
+    };
     const bool default_output = requests.empty();
     const HartOutputRequest default_request { "Cout",
                                               std::string(output_file) };
@@ -959,25 +980,9 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     std::vector<OutputBinding> bindings;
     std::vector<size_t> request_bindings;
     for (const auto& request : requests) {
-        const OSLQuery::Parameter* selected = nullptr;
-        int selected_layer                  = -1;
-        // Prefer explicit layer-qualified names, then the last matching layer.
-        for (int qualified = 1; qualified >= 0 && !selected; --qualified)
-            for (int layer = layers - 1; layer >= 0 && !selected; --layer)
-                for (const auto& parameter : queries[layer]) {
-                    if (!parameter.isoutput)
-                        continue;
-                    const std::string name = qualified
-                                                 ? fmtformat("{}.{}",
-                                                             layer_names[layer],
-                                                             parameter.name)
-                                                 : parameter.name.string();
-                    if (request.name == name) {
-                        selected       = &parameter;
-                        selected_layer = layer;
-                        break;
-                    }
-                }
+        const auto selection     = find_parameter(request.name, true);
+        const int selected_layer = selection.first;
+        const auto* selected     = selection.second;
         if (default_output
             && (!selected || selected_layer != layers - 1
                 || selected->type != TypeColor || selected->isclosure)) {
@@ -1013,6 +1018,92 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!shadingsys.getattribute(&group, "is_optimized", was_optimized)) {
         err.errorfmt("Cannot retrieve HART group optimization state");
         return false;
+    }
+    if (!options.entry_outputs.empty() && options.shader_entries.empty()) {
+        err.errorfmt("HART --entryoutput requires declared --entry layers");
+        return false;
+    }
+    if (!options.shader_entries.empty()) {
+        std::vector<ustring> declared;
+        for (const auto& name : options.shader_entries) {
+            const ustring layer(name);
+            if (std::find(layer_names.begin(), layer_names.end(), layer)
+                == layer_names.end()) {
+                err.errorfmt("Unknown HART entry layer '{}'", name);
+                return false;
+            }
+            declared.push_back(layer);
+        }
+        std::vector<ustring> sequence = declared;
+        if (!options.entry_outputs.empty()) {
+            sequence.clear();
+            for (const auto& name : options.entry_outputs) {
+                const auto selection = find_parameter(name, false);
+                if (!selection.second) {
+                    err.errorfmt("Unknown HART entry output '{}'", name);
+                    return false;
+                }
+                const ustring layer = layer_names[selection.first];
+                if (std::find(declared.begin(), declared.end(), layer)
+                    == declared.end()) {
+                    err.errorfmt("HART entry output '{}' is not in a declared "
+                                 "entry layer",
+                                 name);
+                    return false;
+                }
+                sequence.push_back(layer);
+            }
+        }
+        if (!was_optimized) {
+            if (!shadingsys.attribute(&group, "entry_layers",
+                                      TypeDesc(TypeDesc::STRING,
+                                               int(declared.size())),
+                                      declared.data()))
+                return false;
+        } else {
+            std::sort(declared.begin(), declared.end());
+            declared.erase(std::unique(declared.begin(), declared.end()),
+                           declared.end());
+            int count = 0;
+            if (!shadingsys.getattribute(&group, "num_entry_layers", count)
+                || count != int(declared.size())) {
+                err.errorfmt(
+                    "HART entry declarations do not match the optimized group");
+                return false;
+            }
+            std::vector<ustring> existing(count);
+            if (!shadingsys.getattribute(&group, "entry_layers",
+                                         TypeDesc(TypeDesc::STRING, count),
+                                         existing.data())) {
+                err.errorfmt("Cannot retrieve HART entry declarations");
+                return false;
+            }
+            std::sort(existing.begin(), existing.end());
+            if (existing != declared) {
+                err.errorfmt(
+                    "HART entry declarations do not match the optimized group");
+                return false;
+            }
+        }
+        int count = 0;
+        if (!shadingsys.getattribute(&group, "num_hart_entry_layers", count)
+            || count < 1) {
+            err.errorfmt("Cannot retrieve HART entry execution sequence");
+            return false;
+        }
+        std::vector<ustring> existing(count);
+        if (!shadingsys.getattribute(&group, "hart_entry_layers",
+                                     TypeDesc(TypeDesc::STRING, count),
+                                     existing.data())) {
+            err.errorfmt("Cannot retrieve HART entry execution sequence");
+            return false;
+        }
+        if (sequence != existing
+            && !shadingsys.attribute(&group, "hart_entry_layers",
+                                     TypeDesc(TypeDesc::STRING,
+                                              int(sequence.size())),
+                                     sequence.data()))
+            return false;
     }
     size_t stride      = 0;
     const size_t count = size_t(width) * size_t(height);
@@ -1107,6 +1198,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     auto& textures = generated->textures();
     if (!textures.prepare(shadingsys))
         return false;
+    int entry_count = 0;
+    if (!shadingsys.getattribute(&group, "num_entry_layers", entry_count)) {
+        err.errorfmt("Cannot retrieve compiled HART entry declarations");
+        return false;
+    }
     HartGridRenderer runtime(err);
     const char* entry = options.fused ? "__raygen__testshade_generated_fused"
                                       : "__raygen__testshade_generated";
@@ -1119,11 +1215,10 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     std::vector<std::byte> pixels(count * stride);
     const Matrix44 transforms[] = { object2common, object2common.inverse(),
                                     shader2common, shader2common.inverse() };
-    const bool rendered
-        = runtime.render(width, height, iterations, warmup, pixels,
-                         size_t(group_size), size_t(group_alignment), raytype,
-                         &textures, transforms,
-                         options.fused ? size_t(local_groupdata) : 0);
+    const bool rendered         = runtime.render(
+        width, height, iterations, warmup, pixels, size_t(group_size),
+        size_t(group_alignment), raytype, &textures, transforms,
+        options.fused ? size_t(local_groupdata) : 0, 0, entry_count > 0);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

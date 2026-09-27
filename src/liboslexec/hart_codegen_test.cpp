@@ -4,10 +4,10 @@
 
 // GPU-independent compiler regression tests for the HART backend. Compile small
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
-// checking target metadata, split/fused callable ABI, address spaces, group-data
-// alignment, output placement, string hash storage, packed diagnostics, linked
-// shadeops, control flow, HART provenance, and rejection of unsupported
-// operations.
+// checking target metadata, ordered entries, split/fused callable ABI, address
+// spaces, group-data alignment, output placement, string hash storage, packed
+// diagnostics, linked shadeops, control flow, HART provenance, and rejection of
+// unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -258,7 +258,7 @@ check_function_abi(const llvm::Function& function, string_view arch)
 
 void
 check_wrapper(const llvm::Function* wrapper,
-              std::initializer_list<const llvm::Function*> targets,
+              cspan<const llvm::Function*> targets,
               const llvm::StructType* storage = nullptr, int alignment = 0)
 {
     OIIO_CHECK_ASSERT(wrapper);
@@ -323,6 +323,18 @@ check_wrapper(const llvm::Function* wrapper,
     OIIO_CHECK_EQUAL(calls, targets.size());
     OIIO_CHECK_EQUAL(allocation != nullptr, storage != nullptr);
     OIIO_CHECK_EQUAL(cast != nullptr, storage != nullptr);
+}
+
+
+
+void
+check_wrapper(const llvm::Function* wrapper,
+              std::initializer_list<const llvm::Function*> targets,
+              const llvm::StructType* storage = nullptr, int alignment = 0)
+{
+    check_wrapper(wrapper,
+                  cspan<const llvm::Function*>(targets.begin(), targets.size()),
+                  storage, alignment);
 }
 
 
@@ -3378,6 +3390,542 @@ shader hart_output_values(output int integer=0, output float scalar=0,
         if (unit_test_failures != previous_failures)
             print(stderr, "Output rejection failed for '{}' (stride={})\n",
                   test.location.name, test.location.stride);
+    }
+    return true;
+}
+
+
+
+bool
+check_hart_entry_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
+                        int optimize, cspan<ustring> sequence, bool local,
+                        bool unused_tail)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_entry_sequence"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    auto& module = **parsed;
+    std::string diagnostic;
+    llvm::raw_string_ostream stream(diagnostic);
+    OIIO_CHECK_ASSERT(!llvm::verifyModule(module, &stream));
+    if (!diagnostic.empty())
+        print(stderr, "{}\n", diagnostic);
+    const llvm::Triple triple(module.getTargetTriple());
+    OIIO_CHECK_EQUAL(triple.getArch(), llvm::Triple::amdgcn);
+    OIIO_CHECK_EQUAL(triple.getOS(), llvm::Triple::AMDHSA);
+    const auto& layout = module.getDataLayout();
+    OIIO_CHECK_EQUAL(layout.getAllocaAddrSpace(), 5);
+    OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
+    bool provenance = false;
+    for (const auto& global : module.globals()) {
+        provenance |= global.getName().contains("__hart_device_storage_abi");
+        OIIO_CHECK_ASSERT(global.isDeclaration()
+                          || !global.hasExternalLinkage());
+    }
+    OIIO_CHECK_ASSERT(provenance);
+    OIIO_CHECK_ASSERT(module.getNamedGlobal("llvm.compiler.used"));
+    int exports = 0;
+    for (const auto& function : module) {
+        exports += function.getName().find("__direct_callable__") == 0;
+        if (function.getName().find("osl_") == 0 && !function.use_empty()) {
+            if (function.isDeclaration())
+                print(stderr, "Undefined entry-group shadeop '{}' (arch {})\n",
+                      function.getName().str(), arch);
+            OIIO_CHECK_ASSERT(!function.isDeclaration());
+        }
+        OIIO_CHECK_ASSERT(!function.hasFnAttribute("nvptx-f32ftz"));
+        const auto cpu = function.getFnAttribute("target-cpu");
+        if (cpu.isStringAttribute())
+            OIIO_CHECK_EQUAL(cpu.getValueAsString().str(), std::string(arch));
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                if (const auto* allocation = llvm::dyn_cast<llvm::AllocaInst>(
+                        &inst))
+                    OIIO_CHECK_EQUAL(allocation->getAddressSpace(), 5);
+                if (const auto* cast = llvm::dyn_cast<llvm::IntToPtrInst>(&inst))
+                    if (const auto* address = llvm::dyn_cast<llvm::ConstantInt>(
+                            cast->getOperand(0)))
+                        OIIO_CHECK_ASSERT(address->isZero());
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                    if (const auto* callee = call->getCalledFunction())
+                        OIIO_CHECK_ASSERT(
+                            callee->getName().find("__direct_callable__") != 0);
+                if (function.getName().find("osl_layer_group_") == 0
+                    || function.getName().find("osl_init_group_") == 0
+                    || function.getName().find("__direct_callable__") == 0)
+                    for (const auto& operand : inst.operands())
+                        if (const auto* cast
+                            = llvm::dyn_cast<llvm::ConstantExpr>(operand.get()))
+                            if (cast->getOpcode()
+                                == llvm::Instruction::IntToPtr) {
+                                const auto* address
+                                    = llvm::dyn_cast<llvm::ConstantInt>(
+                                        cast->getOperand(0));
+                                OIIO_CHECK_ASSERT(address && address->isZero());
+                            }
+            }
+    }
+    OIIO_CHECK_EQUAL(exports, 3);
+    const char* queries[]       = { "group_init_name", "group_entry_name",
+                                    "group_fused_name" };
+    llvm::Function* wrappers[3] = { };
+    for (size_t i = 0; i < std::size(queries); ++i) {
+        ustring name;
+        OIIO_CHECK_ASSERT(ss.getattribute(&group, queries[i], name));
+        wrappers[i] = module.getFunction(name.c_str());
+        OIIO_CHECK_ASSERT(wrappers[i] && wrappers[i]->hasExternalLinkage()
+                          && wrappers[i]->getName().find("__direct_callable__")
+                                 == 0);
+        if (!wrappers[i])
+            return false;
+        check_function_abi(*wrappers[i], arch);
+    }
+    OIIO_CHECK_ASSERT(wrappers[0] != wrappers[1] && wrappers[0] != wrappers[2]
+                      && wrappers[1] != wrappers[2]);
+    int group_size = 0, alignment = 0, allocated = -1;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "llvm_groupdata_size", group_size));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "llvm_groupdata_alignment", alignment));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_groupdata_alloc", allocated));
+    OIIO_CHECK_ASSERT(group_size > 0 && alignment > 0);
+    if (alignment > 0)
+        OIIO_CHECK_EQUAL(group_size % alignment, 0);
+    OIIO_CHECK_EQUAL(allocated, local ? group_size : 0);
+    if (local)
+        OIIO_CHECK_ASSERT(group_size <= 4096);
+    if (unused_tail) {
+        const auto* tail = module.getFunction(
+            "osl_layer_group_hart_test_group_name_tail");
+        OIIO_CHECK_ASSERT(!tail || tail->use_empty());
+    }
+    if (optimize != 10)
+        return true;
+
+    auto* storage  = llvm::StructType::getTypeByName(context, "Groupdata");
+    auto* init     = module.getFunction("osl_init_group_hart_test_group");
+    auto* producer = module.getFunction(
+        "osl_layer_group_hart_test_group_name_producer");
+    OIIO_CHECK_ASSERT(storage && init && producer);
+    if (!storage || !init || !producer)
+        return false;
+    OIIO_CHECK_EQUAL(layout.getTypeAllocSize(storage).getFixedValue(),
+                     uint64_t(group_size));
+    OIIO_CHECK_EQUAL(layout.getABITypeAlign(storage).value(),
+                     uint64_t(alignment));
+    for (const auto* body : { init, producer }) {
+        OIIO_CHECK_ASSERT(body->hasLocalLinkage());
+        check_function_abi(*body, arch);
+    }
+    std::vector<const llvm::Function*> targets;
+    std::vector<llvm::Function*> unique_targets;
+    for (ustring name : sequence) {
+        auto* body = module.getFunction(
+            fmtformat("osl_layer_group_hart_test_group_name_{}", name));
+        OIIO_CHECK_ASSERT(body && body->hasLocalLinkage());
+        if (!body)
+            return false;
+        check_function_abi(*body, arch);
+        targets.push_back(body);
+        if (std::find(unique_targets.begin(), unique_targets.end(), body)
+            == unique_targets.end())
+            unique_targets.push_back(body);
+    }
+    check_wrapper(wrappers[0], { init });
+    check_wrapper(wrappers[1], targets);
+    targets.insert(targets.begin(), init);
+    check_wrapper(wrappers[2], targets, local ? storage : nullptr, alignment);
+
+    // All fixtures put the shared producer first, so its run flag is the
+    // first byte of the target-derived flag array, not an entry's own flag.
+    OIIO_CHECK_ASSERT(storage->getNumElements() > 0);
+    if (!storage->getNumElements())
+        return false;
+    auto* flags = llvm::dyn_cast<llvm::ArrayType>(storage->getElementType(0));
+    OIIO_CHECK_ASSERT(flags && flags->getElementType()->isIntegerTy(1));
+    if (!flags)
+        return false;
+    OIIO_CHECK_EQUAL(layout.getStructLayout(storage)->getElementOffset(0), 0);
+    OIIO_CHECK_EQUAL(flags->getNumElements(), 4);
+    const auto producer_flag = [&](const llvm::Value* pointer,
+                                   const llvm::Function& function) {
+        int64_t offset = 0;
+        const auto* base
+            = llvm::GetPointerBaseWithConstantOffset(pointer, offset, layout);
+        return base == function.getArg(1) && offset == 0;
+    };
+    int resets = 0, marks = 0;
+    for (const auto& function : module) {
+        const bool layer = function.getName().find("osl_layer_group_") == 0;
+        if (&function != init && !layer)
+            continue;
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                if (const auto* clear = llvm::dyn_cast<llvm::MemSetInst>(&inst))
+                    if (producer_flag(clear->getRawDest(), function)) {
+                        ++resets;
+                        OIIO_CHECK_EQUAL(&function, init);
+                        const auto* zero = llvm::dyn_cast<llvm::ConstantInt>(
+                            clear->getValue());
+                        const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                            clear->getLength());
+                        OIIO_CHECK_ASSERT(zero && zero->isZero() && length);
+                        if (length)
+                            OIIO_CHECK_EQUAL(
+                                length->getZExtValue(),
+                                layout.getTypeAllocSize(flags).getFixedValue());
+                    }
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+                    if (producer_flag(store->getPointerOperand(), function)) {
+                        ++marks;
+                        OIIO_CHECK_EQUAL(&function, producer);
+                        const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                            store->getValueOperand());
+                        OIIO_CHECK_ASSERT(value && value->isOne());
+                        OIIO_CHECK_EQUAL(store->getParent(),
+                                         &producer->getEntryBlock());
+                    }
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                    OIIO_CHECK_ASSERT(call->getCalledFunction() != init);
+            }
+    }
+    OIIO_CHECK_EQUAL(resets, 1);
+    OIIO_CHECK_EQUAL(marks, 1);
+    for (auto* entry : unique_targets) {
+        llvm::DominatorTree dominators(*entry);
+        int calls = 0;
+        for (const auto* user : producer->users()) {
+            const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+            if (!call || call->getCalledFunction() != producer
+                || call->getFunction() != entry)
+                continue;
+            ++calls;
+            OIIO_CHECK_EQUAL(call->arg_size(), 6);
+            OIIO_CHECK_EQUAL(call->getCallingConv(),
+                             producer->getCallingConv());
+            for (unsigned i = 0; i < call->arg_size() && i < 6; ++i)
+                OIIO_CHECK_EQUAL(call->getArgOperand(i), entry->getArg(i));
+            bool guarded = false;
+            for (const auto& block : *entry) {
+                const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                    block.getTerminator());
+                const auto* cmp = branch && branch->isConditional()
+                                      ? llvm::dyn_cast<llvm::ICmpInst>(
+                                            branch->getCondition())
+                                      : nullptr;
+                if (!cmp || !cmp->isEquality())
+                    continue;
+                for (unsigned i = 0; i < 2; ++i) {
+                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(
+                        cmp->getOperand(i));
+                    const auto* ran = llvm::dyn_cast<llvm::ConstantInt>(
+                        cmp->getOperand(1 - i));
+                    if (!load || !load->getType()->isIntegerTy(1) || !ran
+                        || !ran->isOne()
+                        || !producer_flag(load->getPointerOperand(), *entry))
+                        continue;
+                    const unsigned unran
+                        = cmp->getPredicate() == llvm::CmpInst::ICMP_NE ? 0 : 1;
+                    guarded |= dominators.dominates(branch->getSuccessor(unran),
+                                                    call->getParent())
+                               && !dominators.dominates(branch->getSuccessor(
+                                                            1 - unran),
+                                                        call->getParent());
+                }
+            }
+            OIIO_CHECK_ASSERT(guarded);
+        }
+        OIIO_CHECK_ASSERT(calls > 0);
+    }
+    return true;
+}
+
+
+
+void
+check_hart_entry_selection(ShadingSystem& ss, ShaderGroup& group,
+                           cspan<ustring> declared, cspan<ustring> sequence)
+{
+    int layers = 0, count = -1;
+    OIIO_CHECK_ASSERT(ss.getattribute(&group, "num_layers", layers));
+    OIIO_CHECK_ASSERT(ss.getattribute(&group, "num_entry_layers", count));
+    OIIO_CHECK_EQUAL(count, int(declared.size()));
+    std::vector<ustring> declarations(layers + 1, ustring("unwritten"));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "entry_layers",
+                        TypeDesc(TypeDesc::STRING, int(declarations.size())),
+                        declarations.data()));
+    for (size_t i = 0; i < declarations.size(); ++i)
+        if (i < declared.size())
+            OIIO_CHECK_EQUAL(declarations[i], declared[i]);
+        else
+            OIIO_CHECK_ASSERT(declarations[i].empty());
+    OIIO_CHECK_ASSERT(ss.getattribute(&group, "num_hart_entry_layers", count));
+    OIIO_CHECK_EQUAL(count, int(sequence.size()));
+    std::vector<ustring> selected(sequence.size() + 2, ustring("unwritten"));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_entry_layers",
+                        TypeDesc(TypeDesc::STRING, int(selected.size())),
+                        selected.data()));
+    for (size_t i = 0; i < selected.size(); ++i)
+        if (i < sequence.size())
+            OIIO_CHECK_EQUAL(selected[i], sequence[i]);
+        else
+            OIIO_CHECK_ASSERT(selected[i].empty());
+}
+
+
+
+bool
+check_explicit_entry_modules(string_view arch, string_view stdosl,
+                             string_view basic, string_view producer)
+{
+    OSLCompiler compiler;
+    std::string entry;
+    if (!compiler.compile_buffer(
+            "shader hart_numeric_entry(float value=0,float scale=1,"
+            "output color Cout=0) { Cout=color(scale*value,u,v); }",
+            entry, { }, stdosl))
+        return false;
+    const ustring left("left"), right("right");
+    auto set_entries = [&](ShadingSystem& ss, ShaderGroup& group,
+                           string_view attribute, cspan<ustring> names) {
+        OIIO_CHECK_ASSERT(!names.empty());
+        return ss.attribute(&group, attribute,
+                            TypeDesc(TypeDesc::STRING, int(names.size())),
+                            names.data());
+    };
+    auto make = [&](ShadingSystem& ss, cspan<ustring> declared, bool tail) {
+        OIIO_CHECK_ASSERT(
+            ss.LoadMemoryCompiledShader("hart_producer", producer));
+        OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_entry", entry));
+        if (tail)
+            OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_tail", basic));
+        auto group = ss.ShaderGroupBegin("hart_test_group");
+        OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_producer", "producer"));
+        for (int i : { 1, 2 }) {
+            const float scale = float(i);
+            OIIO_CHECK_ASSERT(ss.Parameter("scale", TypeFloat, &scale));
+            OIIO_CHECK_ASSERT(
+                ss.Shader("surface", "hart_entry", i == 1 ? "left" : "right"));
+        }
+        if (tail)
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_tail", "tail"));
+        OIIO_CHECK_ASSERT(
+            ss.ConnectShaders("producer", "value", "left", "value"));
+        OIIO_CHECK_ASSERT(
+            ss.ConnectShaders("producer", "value", "right", "value"));
+        OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+        if (!declared.empty())
+            OIIO_CHECK_ASSERT(
+                set_entries(ss, *group, "entry_layers", declared));
+        for (ustring name : { left, right })
+            if ((declared.empty() && name == right)
+                || std::find(declared.begin(), declared.end(), name)
+                       != declared.end()) {
+                const SymLocationDesc output(fmtformat("{}.Cout", name),
+                                             TypeColor, false,
+                                             SymArena::Outputs,
+                                             name == left ? 0 : 16, 32);
+                ss.add_symlocs(group.get(), { &output, 1 });
+            }
+        return group;
+    };
+    const struct {
+        std::vector<ustring> declared, selected;
+        bool after_optimization, tail;
+        int osl, llvm;
+        bool local;
+    } variants[] = {
+        { { left, right }, { }, false, true, 0, 10, false },
+        { { right, left, right }, { }, false, true, 2, 10, true },
+        { { left, right }, { right, left, right }, true, true, 2, 10, false },
+        { { left, right }, { right }, false, true, 2, 10, true },
+        { { left }, { }, false, true, 2, 10, false },
+        { { left, right }, { right, left, right }, false, true, 2, 3, true },
+        { { }, { }, false, false, 0, 10, false },
+        { { }, { right, right }, false, false, 2, 10, true },
+    };
+    for (const auto& variant : variants) {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", variant.osl);
+        ss.attribute("llvm_optimize", variant.llvm);
+        ss.attribute("lazyunconnected", 1);
+        ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+        auto group = make(ss, variant.declared, variant.tail);
+        std::vector<ustring> declarations;
+        for (ustring name : { left, right })
+            if (std::find(variant.declared.begin(), variant.declared.end(), name)
+                != variant.declared.end())
+                declarations.push_back(name);
+        std::vector<ustring> sequence = variant.declared.empty()
+                                            ? std::vector<ustring> { right }
+                                            : variant.declared;
+        check_hart_entry_selection(ss, *group, declarations, sequence);
+        int optimized = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "is_optimized", optimized));
+        OIIO_CHECK_EQUAL(optimized, 0);
+        if (variant.after_optimization) {
+            ss.optimize_group(group.get(), nullptr, false);
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "is_optimized", optimized));
+            OIIO_CHECK_EQUAL(optimized, 1);
+        }
+        if (!variant.selected.empty()) {
+            OIIO_CHECK_ASSERT(
+                set_entries(ss, *group, "hart_entry_layers", variant.selected));
+            sequence = variant.selected;
+        }
+        check_hart_entry_selection(ss, *group, declarations, sequence);
+        std::vector<std::string> entry_names;
+        for (ustring name : sequence)
+            entry_names.push_back(name.string());
+        const auto label = OIIO::Strutil::join(entry_names, ",");
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "HART entries {} (OSL {}, LLVM {}, local={}):\n{}",
+                  label, variant.osl, variant.llvm, variant.local,
+                  errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        const int previous_failures = unit_test_failures;
+        OIIO_CHECK_ASSERT(check_hart_entry_module(ss, *group, arch,
+                                                  variant.llvm, sequence,
+                                                  variant.local, variant.tail));
+        check_hart_entry_selection(ss, *group, declarations, sequence);
+        if (unit_test_failures != previous_failures)
+            print(stderr,
+                  "Entry module checks failed: {} (LLVM {}, local={})\n", label,
+                  variant.llvm, variant.local);
+    }
+
+    // Failed setters are transactional, not failed shader groups: preserve the
+    // valid declaration/sequence and prove that it can still be compiled.
+    for (bool explicit_entries : { false, true }) {
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("error_repeats", 1));
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        ss.attribute("llvm_optimize", 10);
+        ss.attribute("max_hart_groupdata_alloc", 4096);
+        const std::vector<ustring> declarations
+            = explicit_entries ? std::vector<ustring> { left, right }
+                               : std::vector<ustring> { };
+        std::vector<ustring> sequence = explicit_entries
+                                            ? declarations
+                                            : std::vector<ustring> { right };
+        auto group                   = make(ss, declarations, explicit_entries);
+        const void* artifact_pointer = nullptr;
+        std::string artifact;
+        int optimized         = 0;
+        const char* queries[] = { "group_init_name", "group_entry_name",
+                                  "group_fused_name" };
+        ustring names[3];
+        for (unsigned i = 0; i < 3; ++i)
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), queries[i], names[i]));
+        auto unchanged = [&]() {
+            check_hart_entry_selection(ss, *group, declarations, sequence);
+            int state = -1;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "is_optimized", state));
+            OIIO_CHECK_EQUAL(state, optimized);
+            for (unsigned i = 0; i < 3; ++i) {
+                ustring name;
+                OIIO_CHECK_ASSERT(
+                    ss.getattribute(group.get(), queries[i], name));
+                OIIO_CHECK_EQUAL(name, names[i]);
+            }
+            const void* current = nullptr;
+            uint64_t length     = 0;
+            OIIO_CHECK_EQUAL(ss.getattribute(group.get(), "hart_bitcode",
+                                             TypeDesc::PTR, &current),
+                             !artifact.empty());
+            OIIO_CHECK_EQUAL(ss.getattribute(group.get(), "hart_bitcode_size",
+                                             TypeUInt64, &length),
+                             !artifact.empty());
+            OIIO_CHECK_EQUAL(current, artifact_pointer);
+            OIIO_CHECK_EQUAL(length, artifact.size());
+            if (current && length == artifact.size())
+                OIIO_CHECK_ASSERT(
+                    string_view(static_cast<const char*>(current), length)
+                    == string_view(artifact));
+        };
+        auto reject = [&](string_view attribute,
+                          std::initializer_list<ustring> attempted,
+                          string_view message) {
+            const int before = errors.errors;
+            OIIO_CHECK_ASSERT(!set_entries(ss, *group, attribute,
+                                           cspan<ustring>(attempted.begin(),
+                                                          attempted.size())));
+            OIIO_CHECK_EQUAL(errors.errors, before + 1);
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error, message));
+            unchanged();
+        };
+        unchanged();
+        reject("entry_layers", { right, ustring("missing") },
+               "not a shader layer");
+        reject("hart_entry_layers", { right, ustring("missing") },
+               "not a declared entry layer");
+        reject("hart_entry_layers",
+               { right, explicit_entries ? ustring("producer") : left },
+               "not a declared entry layer");
+        if (explicit_entries)
+            reject("hart_entry_layers", { left, ustring("tail") },
+                   "not a declared entry layer");
+        const int before_optimization = errors.errors;
+        ss.optimize_group(group.get(), nullptr, false);
+        OIIO_CHECK_EQUAL(errors.errors, before_optimization);
+        optimized = 1;
+        unchanged();
+        reject("entry_layers", { left }, "after optimization");
+        sequence = explicit_entries
+                       ? std::vector<ustring> { right, left, right }
+                       : std::vector<ustring> { right, right };
+        const int before_selection = errors.errors;
+        OIIO_CHECK_ASSERT(
+            set_entries(ss, *group, "hart_entry_layers", sequence));
+        OIIO_CHECK_EQUAL(errors.errors, before_selection);
+        unchanged();
+        ss.optimize_group(group.get(), nullptr);
+        OIIO_CHECK_EQUAL(errors.errors, before_selection);
+        uint64_t size = 0;
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                          TypeDesc::PTR, &artifact_pointer));
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                          TypeUInt64, &size));
+        if (!artifact_pointer || !size)
+            return false;
+        artifact.assign(static_cast<const char*>(artifact_pointer), size);
+        OIIO_CHECK_ASSERT(check_hart_entry_module(ss, *group, arch, 10,
+                                                  sequence, true,
+                                                  explicit_entries));
+        unchanged();
+        reject("entry_layers", { right }, "after optimization");
+        reject("hart_entry_layers", { right }, "after compilation");
     }
     return true;
 }
@@ -7225,20 +7773,10 @@ main(int argc, char* argv[])
                                           : "renderer lacks HARTDiagnostics");
         }
     }
-    {
-        HartServices renderer;
-        Diagnostics errors;
-        ShadingSystem ss(&renderer, nullptr, &errors);
-        ss.attribute("hart_arch", arch);
-        auto group = make_connected_group(ss, oso[5], oso[6]);
-        const ustring entry("producer");
-        OIIO_CHECK_ASSERT(ss.attribute(group.get(), "entry_layers",
-                                       TypeDesc(TypeDesc::STRING, 1), &entry));
-        check_rejected_group(ss, *group, errors, "default entry point");
-    }
     if (!check_aggregate_modules(arch, argv[2], oso[11])
         || !check_string_modules(arch, argv[2])
         || !check_output_placement_modules(arch, argv[2], oso[0], oso[5], oso[6])
+        || !check_explicit_entry_modules(arch, argv[2], oso[0], oso[5])
         || !check_diagnostic_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])

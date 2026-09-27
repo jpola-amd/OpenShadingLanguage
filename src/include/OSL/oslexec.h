@@ -561,6 +561,15 @@ public:
     ///   int raytype_queries        Bit field of all possible rayquery
     ///   int num_entry_layers       Number of named entry point layers.
     ///   string entry_layers[]      List of entry point layers.
+    ///                              HART declarations must precede optimization
+    ///                              and also set the default execution order.
+    ///   int num_hart_entry_layers  Length of the HART execution sequence.
+    ///   string hart_entry_layers[] Ordered HART entry calls, including repeats.
+    ///                              Defaults to the declared entry_layers order,
+    ///                              or the implicit last layer. May be set before
+    ///                              compilation to select declared entries.
+    ///                              Init runs once before this whole sequence;
+    ///                              the compiled sequence is immutable.
     ///   string pickle              Retrieves a serialized representation
     ///                                 of the shader group declaration.
     ///   int llvm_groupdata_size    Size of the GroupData struct.

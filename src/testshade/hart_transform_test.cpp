@@ -641,6 +641,7 @@ run_outputs(string_view stdosl, string_view mode, Diagnostics& diagnostics)
         return false;
     HartOptions options;
     options.fused = mode == "fused" || mode == "fused-local";
+    options.shader_entries = { "out" };
     const Matrix44 identity(1);
     std::string original_bitcode;
     const void* original_address = nullptr;
