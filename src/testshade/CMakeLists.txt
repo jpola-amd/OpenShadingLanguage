@@ -481,9 +481,24 @@ if (BUILD_TESTING AND OSL_USE_HART)
                 ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
             osl_hart_target (hart_transform_test)
             add_dependencies (hart_transform_test testshade)
+            if (TARGET hart_renderer_test_bitcode)
+                add_dependencies (hart_transform_test hart_renderer_test_bitcode)
+            endif ()
             set_target_properties (hart_transform_test PROPERTIES FOLDER "Unit Tests")
             if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
                 foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    if (TARGET hart_renderer_test_bitcode)
+                        add_test (NAME hart-renderer-library-${mode}
+                            COMMAND "${Python3_EXECUTABLE}"
+                                "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                                "$<TARGET_FILE:hart_transform_test>"
+                                "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                                --mode ${mode} --kind library
+                                --library-dir "${PROJECT_BINARY_DIR}/src/liboslexec/hart")
+                        set_tests_properties (hart-renderer-library-${mode} PROPERTIES
+                            LABELS "hart;gpu" RUN_SERIAL TRUE
+                            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    endif ()
                     add_test (NAME hart-output-rebind-${mode}
                         COMMAND "${Python3_EXECUTABLE}"
                             "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"

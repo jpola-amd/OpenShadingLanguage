@@ -950,6 +950,44 @@ userdata are not yet enabled. The `hart-userdata-runtime` and four
 `hart-userdata-rebind-*` opt-in GPU tests cover typed/default values, gradients,
 per-point presence, A-B-A artifact/cache reuse and invalid host bindings.
 
+HART also accepts a device renderer library through the existing
+`ShadingSystem::attribute("lib_bitcode", TypeDesc(TypeDesc::UINT8, byte_count),
+bytes)` API. Supply raw HIP/AMDGPU bitcode for the selected `hart_arch`, before
+compiling the group; a zero byte count clears the setting. Nonempty buffers
+must be non-null, with scalar byte elements and a representable array length.
+Read bitcode files in binary mode, including on Windows. The shading system
+copies the bytes.
+
+Libraries must match the embedded shadeops' target triple and data layout.
+Build against matching OSL and HART headers, including
+`amd/hart/hart_device.h` to record the device-storage ABI provenance;
+missing or conflicting provenance is rejected before linking.
+Defined functions must target the selected architecture, and shared symbols
+must have compatible types, calling conventions and ABI attributes. Compatible
+weak HIP definitions can be merged normally, but libraries cannot replace
+existing strong shadeop definitions. Imports must resolve within the library
+or existing shadeops (LLVM intrinsics are also allowed). Kernels, callable
+exports, indirect calls, inline assembly, aliases and global initialization
+are not supported by this library interface. Rejected libraries report an
+error and do not publish a group artifact. Host `rs_bitcode` and NVPTX
+libraries are not substitutes for HART device code.
+
+A library can provide genuine renderer services such as
+`rs_hart_get_userdata`; the renderer must still advertise the required
+capabilities and supply valid runtime state. Linked functions become private
+to the compiled group and use the unchanged callable ABI. Existing optimized
+groups retain their library when the setting changes; compile a new group
+to use a new library. A SHA-256 identity of the complete input is retained in
+the group's `osl.hart.renderer_library` metadata, including when unused
+library code is pruned, so the bitcode-based pipeline cache includes that
+identity.
+
+With `OSL_BUILD_TESTS` enabled, the four opt-in `hart-renderer-library-*`
+GPU tests compile two real HIP service libraries, verify shader-global and
+shade-index-dependent values and gradients, switch between their immutable
+groups A-B-A, and require cache hits when returning to A. Compiler tests use
+the actual per-architecture libraries for linkage and malformed-input checks.
+
 Numeric and string arrays and flattened structs support initialization, copying,
 length queries, runtime indexing, nested members and whole-aggregate connections.
 Unsized input arrays use the existing group-resolved parameter length; an empty

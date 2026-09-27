@@ -6,8 +6,9 @@
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
-// diagnostics, interactive uploads, userdata caching, geometry state, linked
-// shadeops, control flow, HART provenance, and rejection of unsupported operations.
+// diagnostics, interactive uploads, userdata caching, geometry state, renderer
+// libraries, linked shadeops, control flow, HART provenance, and rejection of
+// unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -40,19 +41,25 @@
 #include <utility>
 
 #include <llvm/ADT/APInt.h>
+#include <llvm/ADT/StringExtras.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
+#include <llvm/IR/GlobalAlias.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/SHA256.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 #if LLVM_VERSION_MAJOR >= 17
 #    include <llvm/TargetParser/Triple.h>
 #else
@@ -295,9 +302,11 @@ private:
 
 
 ShaderGroupRef
-make_group(ShadingSystem& ss, string_view oso, int layers = 1)
+make_group(ShadingSystem& ss, string_view oso, int layers = 1,
+           bool load_shader = true)
 {
-    OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_test", oso));
+    if (load_shader)
+        OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_test", oso));
     auto group = ss.ShaderGroupBegin("hart_test_group");
     for (int i = 0; i < layers; ++i)
         OIIO_CHECK_ASSERT(
@@ -4757,7 +4766,7 @@ check_userdata_host_layout()
 bool
 check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
                   cspan<HartUserdataServices::Request> requests, bool connected,
-                  bool lazy, bool missing_spec)
+                  bool lazy, bool missing_spec, bool linked_renderer = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -4876,7 +4885,10 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
         OIIO_CHECK_ASSERT(function && !function->use_empty());
         if (!function)
             return false;
-        OIIO_CHECK_EQUAL(function->isDeclaration(), function == callback);
+        OIIO_CHECK_EQUAL(function->isDeclaration(),
+                         function == callback && !linked_renderer);
+        if (function == callback && linked_renderer)
+            OIIO_CHECK_ASSERT(function->hasLocalLinkage());
         OIIO_CHECK_ASSERT(function->getReturnType()->isIntegerTy(1));
         OIIO_CHECK_ASSERT(!function->isVarArg());
         OIIO_CHECK_EQUAL(function->arg_size(), 6);
@@ -5565,6 +5577,635 @@ check_userdata_modules(string_view arch, string_view stdosl)
                 OIIO::Strutil::contains(errors.last_error, "closure"));
         OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
         OIIO_CHECK_ASSERT(renderer.requests.empty());
+    }
+    return true;
+}
+
+
+
+bool
+check_renderer_library_ir(ShadingSystem& ss, ShaderGroup& group,
+                          string_view library, int optimize, bool used,
+                          float bias)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_renderer_library_group"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    const auto& module   = **parsed;
+    const auto* identity = module.getNamedMetadata("osl.hart.renderer_library");
+    if (library.empty()) {
+        OIIO_CHECK_ASSERT(!identity);
+    } else {
+        const auto digest = llvm::SHA256::hash(
+            { reinterpret_cast<const uint8_t*>(library.data()),
+              library.size() });
+        OIIO_CHECK_ASSERT(identity && identity->getNumOperands() == 1);
+        if (!identity || identity->getNumOperands() != 1)
+            return false;
+        const auto* node = identity->getOperand(0);
+        OIIO_CHECK_EQUAL(node->getNumOperands(), 1);
+        if (node->getNumOperands() != 1)
+            return false;
+        const auto* hash = llvm::dyn_cast<llvm::MDString>(node->getOperand(0));
+        OIIO_CHECK_ASSERT(hash);
+        if (hash) {
+            OIIO_CHECK_EQUAL(hash->getString().size(), 64);
+            OIIO_CHECK_EQUAL(hash->getString().str(), llvm::toHex(digest));
+        }
+    }
+    const auto* callback = module.getFunction("rs_hart_get_userdata");
+    if (!used) {
+        OIIO_CHECK_ASSERT(!callback);
+        return true;
+    }
+    for (const auto& function : module)
+        if (function.getName().find("rs_hart_get_userdata") == 0
+            && !function.use_empty()) {
+            OIIO_CHECK_EQUAL(function.isDeclaration(), library.empty());
+            if (!library.empty())
+                OIIO_CHECK_ASSERT(function.hasLocalLinkage());
+        }
+    if (optimize != 10)
+        return true;  // Optimized callbacks can be inlined or specialized.
+    OIIO_CHECK_ASSERT(callback && !callback->use_empty());
+    if (!callback)
+        return false;
+    OIIO_CHECK_ASSERT(callback->getReturnType()->isIntegerTy(1));
+    OIIO_CHECK_EQUAL(callback->arg_size(), 6);
+    for (const auto& arg : callback->args()) {
+        const unsigned i = arg.getArgNo();
+        OIIO_CHECK_ASSERT(
+            i == 0 || i == 5
+                ? arg.getType()->isPointerTy()
+                      && arg.getType()->getPointerAddressSpace() == 0
+                : arg.getType()->isIntegerTy(i == 1 ? 32 : (i == 4 ? 1 : 64)));
+    }
+    if (!library.empty()) {
+        bool found_bias = false;
+        for (const auto& block : *callback)
+            for (const auto& inst : block)
+                for (const auto& operand : inst.operands())
+                    if (const auto* value = llvm::dyn_cast<llvm::ConstantFP>(
+                            operand.get()))
+                        found_bias |= value->getValueAPF().convertToFloat()
+                                      == bias;
+        OIIO_CHECK_ASSERT(found_bias);
+    }
+    return true;
+}
+
+
+
+bool
+check_renderer_library_modules(string_view arch, string_view stdosl,
+                               string_view filename_a, string_view filename_b,
+                               string_view basic)
+{
+    std::string libraries[2];
+    const string_view filenames[] = { filename_a, filename_b };
+    const float biases[]          = { 1.25f, -2.5f };
+    for (unsigned i = 0; i < 2; ++i) {
+        auto file = llvm::MemoryBuffer::getFile(std::string(filenames[i]));
+        if (!file) {
+            print(stderr, "Cannot read renderer library '{}': {}\n",
+                  filenames[i], file.getError().message());
+            return false;
+        }
+        libraries[i] = (*file)->getBuffer().str();
+        OIIO_CHECK_ASSERT(!libraries[i].empty()
+                          && libraries[i].size()
+                                 <= size_t(std::numeric_limits<int>::max()));
+        if (libraries[i].empty()
+            || libraries[i].size() > size_t(std::numeric_limits<int>::max()))
+            return false;
+    }
+    OIIO_CHECK_ASSERT(libraries[0] != libraries[1]);
+    auto digest = [](string_view bytes) {
+        return llvm::toHex(llvm::SHA256::hash(
+            { reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size() }));
+    };
+    OIIO_CHECK_ASSERT(digest(libraries[0]) != digest(libraries[1]));
+    auto parse = [](string_view bytes, llvm::LLVMContext& context) {
+        auto parsed = llvm::parseBitcodeFile(
+            llvm::MemoryBufferRef(llvm::StringRef(bytes.data(), bytes.size()),
+                                  "hart_renderer_fixture"),
+            context);
+        if (!parsed) {
+            print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+            OIIO_CHECK_ASSERT(false);
+            return std::unique_ptr<llvm::Module>();
+        }
+        return std::move(*parsed);
+    };
+    auto serialize = [](const llvm::Module& module) {
+        std::string bytes;
+        llvm::raw_string_ostream stream(bytes);
+        llvm::WriteBitcodeToFile(module, stream);
+        stream.flush();
+        return bytes;
+    };
+    auto set_library = [](ShadingSystem& ss, string_view bytes) {
+        OIIO_CHECK_ASSERT(bytes.size()
+                          <= size_t(std::numeric_limits<int>::max()));
+        return ss.attribute("lib_bitcode",
+                            TypeDesc(TypeDesc::UINT8, int(bytes.size())),
+                            bytes.empty() ? nullptr : bytes.data());
+    };
+    OSLCompiler compiler;
+    std::string userdata;
+    if (!compiler.compile_buffer(
+            "shader hart_renderer_library("
+            "float renderer_value=7 [[int interpolated=1]],output color Cout=0) { "
+            "Cout=color(renderer_value,Dx(renderer_value),Dy(renderer_value)); }",
+            userdata, { }, stdosl))
+        return false;
+    const struct {
+        int osl, llvm;
+        bool local, used;
+    } variants[] = {
+        { 0, 10, false, true },
+        { 2, 10, true, true },
+        { 2, 3, true, true },
+        { 2, 3, false, false },
+    };
+    for (const auto& variant : variants) {
+        HartUserdataServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", variant.osl));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", variant.llvm));
+        OIIO_CHECK_ASSERT(ss.attribute("lazy_userdata", 1));
+        OIIO_CHECK_ASSERT(ss.attribute("error_repeats", 1));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0));
+        struct Snapshot {
+            ShaderGroupRef group;
+            const void* pointer;
+            std::string bytes;
+        };
+        std::vector<Snapshot> snapshots;
+        auto unchanged = [&]() {
+            const int before = errors.errors;
+            for (const auto& saved : snapshots) {
+                ss.optimize_group(saved.group.get(), nullptr);
+                const void* pointer = nullptr;
+                uint64_t size       = 0;
+                OIIO_CHECK_ASSERT(ss.getattribute(saved.group.get(),
+                                                  "hart_bitcode", TypeDesc::PTR,
+                                                  &pointer));
+                OIIO_CHECK_ASSERT(ss.getattribute(saved.group.get(),
+                                                  "hart_bitcode_size",
+                                                  TypeUInt64, &size));
+                OIIO_CHECK_EQUAL(pointer, saved.pointer);
+                OIIO_CHECK_EQUAL(size, saved.bytes.size());
+                if (pointer && size == saved.bytes.size())
+                    OIIO_CHECK_EQUAL(std::memcmp(pointer, saved.bytes.data(),
+                                                 size),
+                                     0);
+            }
+            OIIO_CHECK_EQUAL(errors.errors, before);
+        };
+        bool load_shader = true;
+        auto compile     = [&](string_view library, float bias) {
+            const int previous_failures = unit_test_failures;
+            renderer.requests.clear();
+            const int before = errors.errors;
+            auto group
+                = make_group(ss, variant.used ? string_view(userdata) : basic,
+                             1, load_shader);
+            load_shader = false;
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors != before)
+                print(stderr, "Renderer library (LLVM {}, used {}): {}\n",
+                      variant.llvm, variant.used, errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, before);
+            OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+            if (variant.used) {
+                OIIO_CHECK_ASSERT(!renderer.requests.empty());
+                for (const auto& request : renderer.requests) {
+                    OIIO_CHECK_EQUAL(request.name, ustring("renderer_value"));
+                    OIIO_CHECK_ASSERT(request.type == TypeFloat
+                                      && request.derivatives);
+                }
+            } else {
+                OIIO_CHECK_ASSERT(renderer.requests.empty());
+            }
+            check_module(ss, *group, arch,
+                         variant.used
+                             ? std::initializer_list<
+                                   string_view> { "osl_hart_get_userdata" }
+                             : std::initializer_list<string_view> { },
+                         variant.llvm);
+            OIIO_CHECK_ASSERT(check_renderer_library_ir(ss, *group, library,
+                                                        variant.llvm,
+                                                        variant.used, bias));
+            if (variant.used && variant.llvm == 10)
+                OIIO_CHECK_ASSERT(
+                    check_userdata_ir(ss, *group, renderer.requests, false,
+                                      true, false, !library.empty()));
+            int allocated = -1, group_size = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "llvm_groupdata_size",
+                                              group_size));
+            OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+            OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+            const void* pointer = nullptr;
+            uint64_t size       = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                              TypeDesc::PTR, &pointer));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                              TypeUInt64, &size));
+            if (!pointer || !size)
+                return false;
+            snapshots.push_back(
+                { group, pointer,
+                  std::string(static_cast<const char*>(pointer), size) });
+            unchanged();
+            if (unit_test_failures != previous_failures)
+                print(stderr,
+                      "Renderer library checks failed (OSL {}, LLVM {}, "
+                      "local {}, used {}, bias {}, bytes {})\n",
+                      variant.osl, variant.llvm, variant.local, variant.used,
+                      bias, library.size());
+            return true;
+        };
+        OIIO_CHECK_ASSERT(set_library(ss, libraries[0]));
+        if (!compile(libraries[0], biases[0]))
+            return false;
+        if (variant.osl == 0) {
+            const struct {
+                TypeDesc type;
+                const void* data;
+            } invalid[] = {
+                { TypeDesc(TypeDesc::UINT8, -1), libraries[1].data() },
+                { TypeDesc(TypeDesc::UINT8, int(libraries[1].size())), nullptr },
+                { TypeDesc(TypeDesc::UINT8, TypeDesc::VEC3, 1),
+                  libraries[1].data() },
+            };
+            for (const auto& bad : invalid) {
+                const int before = errors.errors;
+                OIIO_CHECK_ASSERT(
+                    !ss.attribute("lib_bitcode", bad.type, bad.data));
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_ASSERT(
+                    OIIO::Strutil::contains(errors.last_error,
+                                            "Invalid bitcode size:"));
+                unchanged();
+                // A fresh group must still link A, not just retain an old artifact.
+                if (!compile(libraries[0], biases[0]))
+                    return false;
+            }
+        }
+        OIIO_CHECK_ASSERT(set_library(ss, libraries[1]));
+        unchanged();
+        if (!compile(libraries[1], biases[1]))
+            return false;
+        if (variant.osl == 0) {
+            OIIO_CHECK_ASSERT(ss.attribute("lib_bitcode",
+                                           TypeDesc(TypeDesc::UINT8, 0),
+                                           nullptr));
+            unchanged();
+            if (!compile({ }, 0))
+                return false;
+        }
+    }
+
+    Diagnostics shadeops_errors;
+    const auto shadeops_bytes = pvt::hart_shadeops_bitcode(arch,
+                                                           shadeops_errors);
+    OIIO_CHECK_ASSERT(shadeops_errors.errors == 0 && !shadeops_bytes.empty());
+    if (shadeops_bytes.empty())
+        return false;
+    enum class Mutation {
+        Triple,
+        Layout,
+        MissingProvenance,
+        ProvenanceValue,
+        ConflictingProvenance,
+        Cpu,
+        MissingCpu,
+        Type,
+        Convention,
+        ABIAttribute,
+        StrongDefinition,
+        Import,
+        LinkFlags,
+        Constructor,
+        Kernel,
+        Callable,
+        Alias,
+        Assembly,
+        IndirectCall
+    };
+    const struct {
+        Mutation kind;
+        const char* diagnostic;
+    } mutations[] = {
+        { Mutation::Triple, "target triple or data layout does not match" },
+        { Mutation::Layout, "target triple or data layout does not match" },
+        { Mutation::MissingProvenance, "missing device-storage ABI provenance" },
+        { Mutation::ProvenanceValue,
+          "incompatible device-storage ABI provenance" },
+        { Mutation::ConflictingProvenance,
+          "incompatible device-storage ABI provenance" },
+        { Mutation::Cpu, "function 'rs_hart_get_userdata' does not target" },
+        { Mutation::MissingCpu,
+          "function 'rs_hart_get_userdata' does not target" },
+        { Mutation::Type, "incompatible type for 'rs_hart_get_userdata'" },
+        { Mutation::Convention,
+          "incompatible calling convention for 'rs_hart_get_userdata'" },
+        { Mutation::ABIAttribute,
+          "incompatible ABI attributes for 'rs_hart_get_userdata'" },
+        { Mutation::StrongDefinition, "duplicate definition of 'osl_sin_ff'" },
+        { Mutation::Import, "unresolved import 'hart_renderer_missing'" },
+        { Mutation::LinkFlags, "cannot link device bitcode" },
+        { Mutation::Constructor,
+          "assembly, aliases and global initialization are unsupported" },
+        { Mutation::Kernel,
+          "libraries must not define kernels or callable exports" },
+        { Mutation::Callable,
+          "libraries must not define kernels or callable exports" },
+        { Mutation::Alias,
+          "assembly, aliases and global initialization are unsupported" },
+        { Mutation::Assembly,
+          "assembly, aliases and global initialization are unsupported" },
+        { Mutation::IndirectCall,
+          "indirect calls and inline assembly are unsupported" },
+    };
+    auto reject = [&](string_view bytes, string_view diagnostic,
+                      bool host_bitcode = false) {
+        HartUserdataServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", 10));
+        if (host_bitcode)
+            OIIO_CHECK_ASSERT(
+                ss.attribute("rs_bitcode",
+                             TypeDesc(TypeDesc::UINT8, int(bytes.size())),
+                             bytes.data()));
+        else
+            OIIO_CHECK_ASSERT(set_library(ss, bytes));
+        auto group = make_group(ss, userdata);
+        check_rejected_group(ss, *group, errors, diagnostic);
+        if (!host_bitcode)
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error,
+                                        "HART renderer library:"));
+        OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+    };
+    reject("not LLVM bitcode", "cannot read bitcode:");
+    reject(libraries[0], "host renderer bitcode", true);
+    for (const auto& test : mutations) {
+        llvm::LLVMContext context;
+        auto library  = parse(libraries[0], context);
+        auto shadeops = parse(string_view(reinterpret_cast<const char*>(
+                                              shadeops_bytes.data()),
+                                          shadeops_bytes.size()),
+                              context);
+        if (!library || !shadeops)
+            return false;
+        auto* callback = library->getFunction("rs_hart_get_userdata");
+        auto* sine     = shadeops->getFunction("osl_sin_ff");
+        OIIO_CHECK_ASSERT(callback && !callback->isDeclaration() && sine);
+        if (!callback || callback->isDeclaration() || !sine)
+            return false;
+        auto* void_type
+            = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
+        auto define_void = [&](const char* name) {
+            auto* function
+                = llvm::Function::Create(void_type,
+                                         llvm::GlobalValue::ExternalLinkage,
+                                         name, library.get());
+            function->addFnAttr("target-cpu", std::string(arch));
+            llvm::IRBuilder<> builder(
+                llvm::BasicBlock::Create(context, "entry", function));
+            builder.CreateRetVoid();
+            return function;
+        };
+        switch (test.kind) {
+        case Mutation::Triple:
+#if LLVM_VERSION_MAJOR >= 21
+            library->setTargetTriple(llvm::Triple("nvptx64-nvidia-cuda"));
+#else
+            library->setTargetTriple("nvptx64-nvidia-cuda");
+#endif
+            break;
+        case Mutation::Layout: {
+            auto layout = library->getDataLayout().getStringRepresentation();
+            OIIO_CHECK_ASSERT(!layout.empty());
+            if (layout.empty())
+                return false;
+            layout[0] = layout[0] == 'e' ? 'E' : 'e';
+            library->setDataLayout(layout);
+            break;
+        }
+        case Mutation::MissingProvenance:
+        case Mutation::ProvenanceValue:
+        case Mutation::ConflictingProvenance: {
+            const llvm::StringRef prefix("__hart_device_storage_abi_");
+            std::vector<llvm::GlobalVariable*> claims;
+            for (auto& global : library->globals())
+                if (global.getName().find(prefix) == 0)
+                    claims.push_back(&global);
+            OIIO_CHECK_ASSERT(!claims.empty());
+            if (claims.empty())
+                return false;
+            if (test.kind == Mutation::MissingProvenance) {
+                llvm::removeFromUsedLists(*library, [&](llvm::Constant* value) {
+                    const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(
+                        value->stripPointerCasts());
+                    return global && global->getName().find(prefix) == 0;
+                });
+                for (auto* claim : claims) {
+                    claim->removeDeadConstantUsers();
+                    OIIO_CHECK_ASSERT(claim->use_empty());
+                    if (!claim->use_empty())
+                        return false;
+                    claim->eraseFromParent();
+                }
+            } else {
+                auto* claim = claims.front();
+                OIIO_CHECK_ASSERT(claim->isConstant()
+                                  && claim->hasInitializer());
+                if (!claim->isConstant() || !claim->hasInitializer())
+                    return false;
+                const auto* value = llvm::dyn_cast<llvm::ConstantInt>(
+                    claim->getInitializer());
+                OIIO_CHECK_ASSERT(value);
+                if (!value)
+                    return false;
+                auto* wrong = llvm::ConstantInt::get(
+                    context,
+                    value->getValue() ^ llvm::APInt(value->getBitWidth(), 1));
+                OIIO_CHECK_ASSERT(wrong != value);
+                if (test.kind == Mutation::ProvenanceValue) {
+                    claim->setInitializer(wrong);
+                } else {
+                    const auto name = claim->getName().split('.').first.str()
+                                      + ".999";
+                    OIIO_CHECK_ASSERT(!library->getNamedGlobal(name));
+                    new llvm::GlobalVariable(
+                        *library, claim->getValueType(), true,
+                        llvm::GlobalValue::InternalLinkage, wrong, name,
+                        nullptr, llvm::GlobalVariable::NotThreadLocal,
+                        claim->getAddressSpace());
+                    OIIO_CHECK_EQUAL(claim->getInitializer(), value);
+                }
+            }
+            break;
+        }
+        case Mutation::Cpu: callback->addFnAttr("target-cpu", "gfx0000"); break;
+        case Mutation::MissingCpu: callback->removeFnAttr("target-cpu"); break;
+        case Mutation::Type: {
+            std::vector<llvm::Type*> args;
+            for (const auto& arg : callback->args())
+                args.push_back(arg.getType());
+            callback->setName("hart_original_userdata");
+            callback->setLinkage(llvm::GlobalValue::InternalLinkage);
+            auto* wrong = llvm::Function::Create(
+                llvm::FunctionType::get(llvm::Type::getInt32Ty(context), args,
+                                        false),
+                llvm::GlobalValue::ExternalLinkage, "rs_hart_get_userdata",
+                library.get());
+            wrong->addFnAttr("target-cpu", std::string(arch));
+            llvm::IRBuilder<> builder(
+                llvm::BasicBlock::Create(context, "entry", wrong));
+            builder.CreateRet(builder.getInt32(0));
+            break;
+        }
+        case Mutation::Convention:
+            callback->setCallingConv(callback->getCallingConv()
+                                             == llvm::CallingConv::Fast
+                                         ? llvm::CallingConv::C
+                                         : llvm::CallingConv::Fast);
+            break;
+        case Mutation::ABIAttribute:
+            if (callback->hasRetAttribute(llvm::Attribute::ZExt))
+                callback->removeRetAttr(llvm::Attribute::ZExt);
+            else if (callback->hasRetAttribute(llvm::Attribute::SExt))
+                callback->removeRetAttr(llvm::Attribute::SExt);
+            else
+                callback->addRetAttr(llvm::Attribute::ZExt);
+            break;
+        case Mutation::StrongDefinition: {
+            OIIO_CHECK_ASSERT(!library->getNamedValue("osl_sin_ff"));
+            auto* duplicate
+                = llvm::Function::Create(sine->getFunctionType(),
+                                         llvm::GlobalValue::ExternalLinkage,
+                                         "osl_sin_ff", library.get());
+            duplicate->setAttributes(sine->getAttributes());
+            duplicate->setCallingConv(sine->getCallingConv());
+            llvm::IRBuilder<> builder(
+                llvm::BasicBlock::Create(context, "entry", duplicate));
+            builder.CreateRet(duplicate->getArg(0));
+            break;
+        }
+        case Mutation::Import: {
+            auto* missing = llvm::Function::Create(
+                void_type, llvm::GlobalValue::ExternalLinkage,
+                "hart_renderer_missing", library.get());
+            llvm::IRBuilder<> builder(
+                &*callback->getEntryBlock().getFirstInsertionPt());
+            builder.CreateCall(missing);
+            break;
+        }
+        case Mutation::LinkFlags: {
+            const auto* flag = llvm::dyn_cast_or_null<llvm::ConstantAsMetadata>(
+                shadeops->getModuleFlag("wchar_size"));
+            const auto* size = flag ? llvm::dyn_cast<llvm::ConstantInt>(
+                                          flag->getValue())
+                                    : nullptr;
+            OIIO_CHECK_ASSERT(size);
+            if (!size)
+                return false;
+            library->setModuleFlag(llvm::Module::Error, "wchar_size",
+                                   size->getZExtValue() == 2 ? uint32_t(4)
+                                                             : uint32_t(2));
+            break;
+        }
+        case Mutation::Constructor: {
+            auto* startup = define_void("hart_renderer_startup");
+            auto* pointer = llvm::cast<llvm::PointerType>(
+                callback->getArg(0)->getType());
+            auto* record
+                = llvm::StructType::get(context,
+                                        { llvm::Type::getInt32Ty(context),
+                                          startup->getType(), pointer });
+            llvm::Constant* fields[] = {
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 65535),
+                startup, llvm::ConstantPointerNull::get(pointer)
+            };
+            auto* element = llvm::ConstantStruct::get(record, fields);
+            auto* array   = llvm::ArrayType::get(record, 1);
+            new llvm::GlobalVariable(*library, array, false,
+                                     llvm::GlobalValue::AppendingLinkage,
+                                     llvm::ConstantArray::get(array,
+                                                              { element }),
+                                     "llvm.global_ctors");
+            break;
+        }
+        case Mutation::Kernel:
+            define_void("hart_renderer_kernel")
+                ->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+            break;
+        case Mutation::Callable:
+            define_void("__direct_callable__hart_renderer");
+            break;
+        case Mutation::Alias:
+            llvm::GlobalAlias::create(callback->getValueType(),
+                                      callback->getAddressSpace(),
+                                      llvm::GlobalValue::ExternalLinkage,
+                                      "hart_renderer_alias", callback,
+                                      library.get());
+            break;
+        case Mutation::Assembly:
+            library->setModuleInlineAsm("// unsupported renderer assembly");
+            break;
+        case Mutation::IndirectCall: {
+            llvm::IRBuilder<> builder(
+                &*callback->getEntryBlock().getFirstInsertionPt());
+#if LLVM_VERSION_MAJOR >= 15
+            auto* pointer_type = llvm::PointerType::getUnqual(context);
+#else
+            auto* pointer_type = llvm::PointerType::getUnqual(void_type);
+#endif
+            auto* pointer = builder.CreateBitCast(callback->getArg(0),
+                                                  pointer_type);
+            builder.CreateCall(void_type, pointer);
+            break;
+        }
+        }
+        std::string diagnostic;
+        llvm::raw_string_ostream stream(diagnostic);
+        const bool invalid = llvm::verifyModule(*library, &stream);
+        if (invalid)
+            print(stderr, "Invalid mutation for '{}': {}\n", test.diagnostic,
+                  diagnostic);
+        OIIO_CHECK_ASSERT(!invalid);
+        if (invalid)
+            return false;
+        reject(serialize(*library), test.diagnostic);
     }
     return true;
 }
@@ -10002,9 +10643,10 @@ check_procedural_modules(string_view arch, string_view stdosl)
 int
 main(int argc, char* argv[])
 {
-    if (argc != 4) {
+    if (argc != 6) {
         print(stderr, "Usage: hart_codegen_test architecture stdosl.h "
-                      "color-abi-probe.bc\n");
+                      "color-abi-probe.bc renderer-library-a.bc "
+                      "renderer-library-b.bc\n");
         return 1;
     }
     const string_view arch(argv[1]);
@@ -10264,6 +10906,8 @@ main(int argc, char* argv[])
         || !check_explicit_entry_modules(arch, argv[2], oso[0], oso[5])
         || !check_interactive_modules(arch, argv[2])
         || !check_userdata_modules(arch, argv[2])
+        || !check_renderer_library_modules(arch, argv[2], argv[4], argv[5],
+                                           oso[0])
         || !check_diagnostic_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])

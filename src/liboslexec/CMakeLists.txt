@@ -723,19 +723,29 @@ if (OSL_BUILD_TESTS AND BUILD_TESTING)
         target_include_directories (hart_codegen_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
         set_target_properties (hart_codegen_test PROPERTIES FOLDER "Unit Tests")
         set (hart_color_abi_probes)
+        set (hart_renderer_test_libraries)
         foreach (arch IN LISTS HART_TARGET_ARCHITECTURES)
             MAKE_HART_BITCODE ("hart_color_abi_probe.hip" "_${arch}" "${arch}"
                 color_abi_bc "" "${hart_include_dirs}")
             list (APPEND hart_color_abi_probes "${color_abi_bc}")
+            MAKE_HART_BITCODE ("hart_renderer_services_test.hip" "_a_${arch}" "${arch}"
+                renderer_a_bc "-DHART_USERDATA_BIAS=1.25f" "${hart_include_dirs}")
+            MAKE_HART_BITCODE ("hart_renderer_services_test.hip" "_b_${arch}" "${arch}"
+                renderer_b_bc "-DHART_USERDATA_BIAS=-2.5f" "${hart_include_dirs}")
+            list (APPEND hart_renderer_test_libraries "${renderer_a_bc}" "${renderer_b_bc}")
             add_test (NAME hart-codegen-${arch}
                 COMMAND hart_codegen_test "${arch}"
                     "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
-                    "${color_abi_bc}")
+                    "${color_abi_bc}" "${renderer_a_bc}" "${renderer_b_bc}")
         endforeach ()
         add_custom_target (hart_color_abi_test_bitcode
             DEPENDS ${hart_color_abi_probes})
         set_target_properties (hart_color_abi_test_bitcode PROPERTIES FOLDER "Unit Tests")
         add_dependencies (hart_codegen_test hart_color_abi_test_bitcode)
+        add_custom_target (hart_renderer_test_bitcode
+            DEPENDS ${hart_renderer_test_libraries})
+        set_target_properties (hart_renderer_test_bitcode PROPERTIES FOLDER "Unit Tests")
+        add_dependencies (hart_codegen_test hart_renderer_test_bitcode)
         add_executable (hart_bitcode_test hart_bitcode_test.cpp)
         target_link_libraries (hart_bitcode_test PRIVATE oslexec)
         set_target_properties (hart_bitcode_test PROPERTIES FOLDER "Unit Tests")

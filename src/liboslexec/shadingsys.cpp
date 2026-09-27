@@ -1790,7 +1790,8 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
         return true;
     }
     if (name == "lib_bitcode" && type.basetype == TypeDesc::UINT8) {
-        if (type.arraylen < 0) {
+        if (type.arraylen < 0 || type.aggregate != TypeDesc::SCALAR
+            || (type.arraylen && !val)) {
             errorfmt("Invalid bitcode size: {}", type.arraylen);
             return false;
         }
@@ -4094,10 +4095,9 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
     if (debug_nan() || debug_uninit() || llvm_debug_layers() || llvm_debug_ops()
         || countlayerexecs() || m_profile || llvm_debugging_symbols()
         || llvm_profiling_events() || debug_output_cpp()
-        || !m_rs_bitcode.empty() || !m_lib_bitcode.empty()
-        || !m_only_groupname.empty()) {
+        || !m_rs_bitcode.empty() || !m_only_groupname.empty()) {
         errorfmt("HART does not support CPU instrumentation, C++ execution, "
-                 "renderer bitcode, or selective group compilation");
+                 "host renderer bitcode, or selective group compilation");
         return false;
     }
     if (!group.m_device_interactive_arena_valid) {

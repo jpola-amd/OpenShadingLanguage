@@ -23,9 +23,11 @@
 
 #if OSL_USE_HART
 #    include "hart_bitcode.h"
+#    include <llvm/ADT/StringExtras.h>
 #    include <llvm/Bitcode/BitcodeWriter.h>
 #    include <llvm/IR/Verifier.h>
 #    include <llvm/Support/Error.h>
+#    include <llvm/Support/SHA256.h>
 #endif
 
 #if OSL_USE_OPTIX
@@ -2168,6 +2170,145 @@ empty_group_func(void*, void*)
 
 
 
+#if OSL_USE_HART
+static bool
+link_hart_renderer_library(LLVM_Util& ll, cspan<char> bytes, string_view arch,
+                           ShadingContext& context)
+{
+    if (bytes.empty())
+        return true;
+    auto fail = [&](string_view message) {
+        context.errorfmt("HART renderer library: {}", message);
+        return false;
+    };
+    std::string error;
+    std::unique_ptr<llvm::Module> library(
+        ll.module_from_bitcode(bytes.data(), bytes.size(),
+                               "hart_renderer_library", &error));
+    if (!library)
+        return fail(fmtformat("cannot read bitcode: {}", error));
+    if (auto err = library->materializeAll())
+        return fail(fmtformat("cannot materialize bitcode: {}",
+                              llvm::toString(std::move(err))));
+    llvm::raw_string_ostream diagnostics(error);
+    if (llvm::verifyModule(*library, &diagnostics)) {
+        diagnostics.flush();
+        return fail(fmtformat("invalid bitcode: {}", error));
+    }
+    const auto& shadeops = *ll.module();
+    if (library->getTargetTriple() != shadeops.getTargetTriple()
+        || library->getDataLayout() != shadeops.getDataLayout())
+        return fail(
+            "target triple or data layout does not match HART shadeops");
+    const auto* provenance = shadeops.getNamedGlobal(
+        "__hart_device_storage_abi_v1");
+    if (!provenance || !provenance->hasInitializer())
+        return fail("embedded device-storage ABI provenance is missing");
+    bool has_provenance = false;
+    for (const auto& global : library->globals()) {
+        if (global.getName().find("__hart_device_storage_abi_") != 0)
+            continue;
+        if (global.getName().split('.').first != provenance->getName()
+            || !global.isConstant() || !global.hasInitializer()
+            || global.getAddressSpace() != provenance->getAddressSpace()
+            || global.getInitializer() != provenance->getInitializer())
+            return fail("incompatible device-storage ABI provenance");
+        has_provenance = true;
+    }
+    if (!has_provenance)
+        return fail("missing device-storage ABI provenance");
+    if (!library->getModuleInlineAsm().empty() || !library->alias_empty()
+        || !library->ifunc_empty()
+        || library->getNamedGlobal("llvm.global_ctors")
+        || library->getNamedGlobal("llvm.global_dtors"))
+        return fail(
+            "assembly, aliases and global initialization are unsupported");
+    for (const auto& function : *library) {
+        if (function.isDeclaration())
+            continue;
+        const auto cpu = function.getFnAttribute("target-cpu");
+        if (!cpu.isStringAttribute()
+            || cpu.getValueAsString()
+                   != llvm::StringRef(arch.data(), arch.size()))
+            return fail(fmtformat("function '{}' does not target {}",
+                                  function.getName().str(), arch));
+        if (function.getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL
+            || function.getName().find("__direct_callable__") == 0)
+            return fail(
+                "libraries must not define kernels or callable exports");
+        for (const auto& block : function)
+            for (const auto& instruction : block)
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(
+                        &instruction))
+                    if (!llvm::isa<llvm::Function>(
+                            call->getCalledOperand()->stripPointerCasts()))
+                        return fail(
+                            "indirect calls and inline assembly are unsupported");
+    }
+    for (const auto& symbol : library->global_values()) {
+        if (symbol.hasLocalLinkage() || symbol.getName() == "llvm.used"
+            || symbol.getName() == "llvm.compiler.used")
+            continue;
+        const auto* function = llvm::dyn_cast<llvm::Function>(&symbol);
+        if (function && function->isIntrinsic())
+            continue;
+        const auto* existing = shadeops.getNamedValue(symbol.getName());
+        if (!existing) {
+            if (symbol.isDeclaration() && !symbol.use_empty())
+                return fail(fmtformat("unresolved import '{}'",
+                                      symbol.getName().str()));
+            continue;
+        }
+        if (symbol.getValueType() != existing->getValueType()
+            || symbol.getType()->getPointerAddressSpace()
+                   != existing->getType()->getPointerAddressSpace())
+            return fail(fmtformat("incompatible type for '{}'",
+                                  symbol.getName().str()));
+        if (function) {
+            const auto* declaration = llvm::dyn_cast<llvm::Function>(existing);
+            if (!declaration
+                || function->getCallingConv() != declaration->getCallingConv())
+                return fail(
+                    fmtformat("incompatible calling convention for '{}'",
+                              symbol.getName().str()));
+            for (unsigned i = 0; i <= function->arg_size(); ++i)
+                for (auto kind :
+                     { llvm::Attribute::SExt, llvm::Attribute::ZExt,
+                       llvm::Attribute::InReg, llvm::Attribute::StructRet,
+                       llvm::Attribute::ByVal, llvm::Attribute::InAlloca,
+                       llvm::Attribute::Preallocated, llvm::Attribute::Nest,
+                       llvm::Attribute::SwiftSelf,
+                       llvm::Attribute::SwiftError })
+                    if (function->getAttributes().getAttributeAtIndex(i, kind)
+                        != declaration->getAttributes().getAttributeAtIndex(
+                            i, kind))
+                        return fail(
+                            fmtformat("incompatible ABI attributes for '{}'",
+                                      symbol.getName().str()));
+        }
+        if (!symbol.isDeclaration() && !existing->isDeclaration()
+            && !(symbol.isWeakForLinker() && existing->isWeakForLinker()))
+            return fail(fmtformat("duplicate definition of '{}'",
+                                  symbol.getName().str()));
+    }
+    if (!ll.absorb_module(std::move(library)))
+        return fail("cannot link device bitcode");
+    const auto digest = llvm::SHA256::hash(
+        { reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size() });
+    auto& llvm_context = ll.module()->getContext();
+    llvm::Metadata* identity[]
+        = { llvm::MDString::get(llvm_context, llvm::toHex(digest)) };
+    // Retain the whole library's identity even when unused code is pruned.
+    auto* metadata = ll.module()->getOrInsertNamedMetadata(
+        "osl.hart.renderer_library");
+    metadata->clearOperands();
+    metadata->addOperand(llvm::MDNode::get(llvm_context, identity));
+    return true;
+}
+#endif
+
+
+
 void
 BackendLLVM::run()
 {
@@ -2243,6 +2384,12 @@ BackendLLVM::run()
                 return;
             }
             ll.module(hart_module.get());
+            if (!link_hart_renderer_library(ll, shadingsys().m_lib_bitcode,
+                                            shadingsys().hart_arch(),
+                                            *shadingcontext())) {
+                ll.module(nullptr);
+                return;
+            }
 #    endif
         } else if (!use_optix()) {
             if (use_rs_bitcode()) {

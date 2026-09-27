@@ -964,6 +964,135 @@ run_userdata(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 
 
 bool
+run_renderer_library(string_view stdosl, string_view mode,
+                     string_view library_dir, Diagnostics& diagnostics)
+{
+    OutputFiles files;
+    if (!files.create(diagnostics))
+        return false;
+    std::string arch;
+    auto renderer = testshade_hart_renderer(0, arch);
+    if (!renderer)
+        return false;
+    renderer->errhandler().verbosity(ErrorHandler::VERBOSE);
+    ShadingSystem ss(renderer.get(), nullptr, &diagnostics);
+    renderer->init_shadingsys(&ss);
+    if (!ss.attribute("hart_arch", arch)
+        || !ss.attribute("llvm_debugging_symbols", 0)
+        || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? 1048576 : 0)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+        || !ss.attribute("optimize", mode == "unoptimized" ? 0 : 2))
+        return false;
+    std::string libraries[2];
+    for (int i = 0; i < 2; ++i) {
+        const auto path = std::filesystem::path(std::string(library_dir.data(),
+                                                            library_dir.size()))
+                          / arch
+                          / fmtformat("hart_renderer_services_test_{}_{}.bc",
+                                      i ? "b" : "a", arch);
+        OIIO::Filesystem::IOFile input(path.string(),
+                                       OIIO::Filesystem::IOProxy::Read);
+        if (!input.opened() || !input.size()
+            || input.size() > size_t(std::numeric_limits<int>::max())) {
+            diagnostics.errorfmt("Cannot open renderer library '{}'",
+                                 path.string());
+            return false;
+        }
+        libraries[i].resize(input.size());
+        if (input.read(libraries[i].data(), libraries[i].size())
+            != libraries[i].size()) {
+            diagnostics.errorfmt("Cannot read renderer library '{}'",
+                                 path.string());
+            return false;
+        }
+    }
+    OSLCompiler compiler(&diagnostics);
+    std::string oso;
+    if (!compiler.compile_buffer(
+            "shader hart_renderer_library(float renderer_value=-99 "
+            "[[int lockgeom=0]], output color Cout=0) { "
+            "Cout=color(renderer_value,Dx(renderer_value),Dy(renderer_value)); }",
+            oso, { }, stdosl)
+        || !ss.LoadMemoryCompiledShader("hart_renderer_library", oso))
+        return false;
+    ShaderGroupRef groups[2];
+    std::string artifacts[2];
+    const void* addresses[2] = { nullptr, nullptr };
+    for (int i = 0; i < 2; ++i) {
+        if (!ss.attribute("lib_bitcode",
+                          TypeDesc(TypeDesc::UINT8, int(libraries[i].size())),
+                          libraries[i].data()))
+            return false;
+        groups[i] = ss.ShaderGroupBegin(i ? "hart_library_b"
+                                          : "hart_library_a");
+        if (!groups[i] || !ss.Shader("surface", "hart_renderer_library", "out")
+            || !ss.ShaderGroupEnd())
+            return false;
+        const SymLocationDesc output("out.Cout", TypeColor, false,
+                                     SymArena::Outputs, 0, 12);
+        ss.add_symlocs(groups[i].get(), { &output, 1 });
+        ss.optimize_group(groups[i].get(), nullptr);
+        if (!artifact(ss, *groups[i], artifacts[i], addresses[i], diagnostics))
+            return false;
+    }
+    OIIO_CHECK_ASSERT(artifacts[0] != artifacts[1]);
+    HartOptions options;
+    options.fused = mode == "fused" || mode == "fused-local";
+    const Matrix44 identity;
+    std::array<std::vector<float>, 3> images;
+    for (int pass = 0; pass < 3; ++pass) {
+        const int version = pass == 1 ? 1 : 0;
+        print("HART library pass {}\n", pass);
+        std::fflush(stdout);
+        if (!testshade_hart_generated(*renderer, ss, *groups[version], options,
+                                      arch, width, height, 1, false, true, 0,
+                                      false, files.files[pass], "float",
+                                      identity, identity))
+            return false;
+        OIIO::ImageBuf image(files.files[pass]);
+        if (!image.read(0, 0, true, TypeFloat) || image.nchannels() != 3
+            || image.spec().width != width || image.spec().height != height) {
+            diagnostics.errorfmt("Invalid renderer-library output: {}",
+                                 image.geterror());
+            return false;
+        }
+        images[pass].resize(width * height * 3);
+        if (!image.get_pixels(image.roi(), TypeFloat, images[pass].data())) {
+            diagnostics.errorfmt("Cannot read renderer-library output: {}",
+                                 image.geterror());
+            return false;
+        }
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                const int index      = width * y + x;
+                const float expected = (version ? -2.5f : 1.25f)
+                                       + float(x) / (width - 1)
+                                       + 2.0f * y / (height - 1)
+                                       + 0.125f * index;
+                OIIO_CHECK_EQUAL(images[pass][3 * index], expected);
+                OIIO_CHECK_EQUAL(images[pass][3 * index + 1],
+                                 1.0f / (width - 1));
+                OIIO_CHECK_EQUAL(images[pass][3 * index + 2],
+                                 2.0f / (height - 1));
+            }
+        for (int i = 0; i < 2; ++i) {
+            std::string current;
+            const void* address = nullptr;
+            if (!artifact(ss, *groups[i], current, address, diagnostics))
+                return false;
+            OIIO_CHECK_EQUAL(current, artifacts[i]);
+            OIIO_CHECK_EQUAL(address, addresses[i]);
+        }
+    }
+    OIIO_CHECK_ASSERT(images[0] != images[1] && images[0] == images[2]);
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
+bool
 run_raytypes(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 {
     OutputFiles files;
@@ -1081,21 +1210,25 @@ main(int argc, char* argv[])
     const bool interactive = argc == 4 && string_view(argv[3]) == "interactive";
     const bool userdata    = argc == 4 && string_view(argv[3]) == "userdata";
     const bool raytypes    = argc == 4 && string_view(argv[3]) == "raytypes";
+    const bool library     = argc == 5 && string_view(argv[3]) == "library";
     const string_view mode(argc >= 3 ? argv[2] : "split");
     if ((argc != 2 && argc != 3 && !color && !outputs && !interactive
-         && !userdata && !raytypes)
+         && !userdata && !raytypes && !library)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
-            && !((color || outputs || interactive || userdata || raytypes)
+            && !((color || outputs || interactive || userdata || raytypes
+                  || library)
                  && mode == "unoptimized"))) {
         print(
             stderr,
             "Usage: hart_transform_test stdosl.h "
-            "[split|fused|fused-local|unoptimized] [color|outputs|interactive|userdata|raytypes]\n");
+            "[split|fused|fused-local|unoptimized] "
+            "[color|outputs|interactive|userdata|raytypes|library BITCODE_DIR]\n");
         return 1;
     }
     Diagnostics diagnostics;
     OIIO_CHECK_ASSERT(
-        raytypes   ? run_raytypes(argv[1], mode, diagnostics)
+        library    ? run_renderer_library(argv[1], mode, argv[4], diagnostics)
+        : raytypes ? run_raytypes(argv[1], mode, diagnostics)
         : userdata ? run_userdata(argv[1], mode, diagnostics)
         : outputs  ? run_outputs(argv[1], mode, diagnostics)
                    : run(argv[1], mode, color, interactive, diagnostics));
