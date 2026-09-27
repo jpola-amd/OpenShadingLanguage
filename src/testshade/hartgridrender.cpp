@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -708,7 +709,6 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     OIIO::ArgParse ap;
     ap.exit_on_error(false);
     std::string device = "0";
-    std::vector<std::string> names, files;
     std::string format;
     bool parameter_hints = false, has_shader = false;
     // clang-format off
@@ -727,7 +727,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--print");
     ap.arg("-v");
     ap.arg("--debug");
-    ap.arg("-o %L:VARIABLE %L:FILE", &names, &files);
+    ap.arg("-o %s:VARIABLE %s:FILE");
     ap.arg("-d %s:FORMAT", &format);
     ap.arg("--groupname %s:NAME");
     ap.arg("--layer %s:NAME");
@@ -799,18 +799,9 @@ testshade_hart_validate_generated(int argc, const char* argv[],
                      "iteration count must be positive");
         return false;
     }
-    if (names.size() > 1 || (!names.empty() && names[0] != "Cout")) {
-        err.errorfmt("Generated HART mode supports one RGB output: Cout");
-        return false;
-    }
     if (!format.empty() && format != "float" && format != "half"
         && format != "uint8") {
         err.errorfmt("Unsupported HART output format '{}'", format);
-        return false;
-    }
-    if (size_t(width) > std::vector<float>().max_size() / 3 / size_t(height)) {
-        err.errorfmt(
-            "HART grid dimensions exceed the output buffer size limit");
         return false;
     }
     if (size_t(width)
@@ -910,7 +901,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          int iterations, bool warmup, bool verbose, int raytype,
                          bool print_pixels, string_view output_file,
                          string_view dataformat, const Matrix44& object2common,
-                         const Matrix44& shader2common)
+                         const Matrix44& shader2common,
+                         cspan<HartOutputRequest> requests)
 {
     auto& err  = renderer.errhandler();
     auto* generated = dynamic_cast<GeneratedRenderer*>(&renderer);
@@ -918,22 +910,26 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         err.errorfmt("Generated HART mode requires its HART renderer");
         return false;
     }
+    if (width <= 0 || height <= 0 || iterations <= 0
+        || size_t(width) > size_t(std::numeric_limits<int>::max()) / height) {
+        err.errorfmt(
+            "Invalid generated HART grid dimensions or iteration count");
+        return false;
+    }
+    if (!dataformat.empty() && dataformat != "float" && dataformat != "half"
+        && dataformat != "uint8") {
+        err.errorfmt("Unsupported HART output format '{}'", dataformat);
+        return false;
+    }
     int layers = 0;
     if (!shadingsys.getattribute(&group, "num_layers", layers) || layers < 1) {
         err.errorfmt("Generated HART mode requires at least one shader layer");
         return false;
     }
-    int outputs    = 0;
-    bool has_cout  = false;
+    std::vector<OSLQuery> queries;
     for (int layer = 0; layer < layers; ++layer) {
-        OSLQuery query = shadingsys.oslquery(group, layer);
-        for (const auto& parameter : query) {
-            if (layer == layers - 1 && parameter.isoutput) {
-                ++outputs;
-                has_cout |= parameter.name == "Cout"
-                            && parameter.type == TypeColor
-                            && !parameter.isclosure;
-            }
+        queries.push_back(shadingsys.oslquery(group, layer));
+        for (const auto& parameter : queries.back()) {
             if (parameter.isclosure) {
                 err.errorfmt(
                     "Generated HART mode does not support parameter '{}' "
@@ -943,11 +939,6 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
             }
         }
     }
-    if (!has_cout || outputs != 1) {
-        err.errorfmt("Generated HART mode requires exactly one RGB color "
-                     "output parameter on the last layer: Cout");
-        return false;
-    }
     std::vector<ustring> layer_names(layers);
     if (!shadingsys.getattribute(&group, "layer_names",
                                  TypeDesc(TypeDesc::STRING, layers),
@@ -955,10 +946,155 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         err.errorfmt("Cannot retrieve HART shader layer names");
         return false;
     }
-    const SymLocationDesc output(fmtformat("{}.Cout", layer_names.back()),
-                                 TypeColor, false, SymArena::Outputs, 0,
-                                 3 * sizeof(float));
-    shadingsys.add_symlocs(&group, { &output, 1 });
+    const bool default_output = requests.empty();
+    const HartOutputRequest default_request { "Cout",
+                                              std::string(output_file) };
+    if (default_output)
+        requests = { &default_request, 1 };
+    struct OutputBinding {
+        int layer;
+        ustring parameter;
+        SymLocationDesc location;
+    };
+    std::vector<OutputBinding> bindings;
+    std::vector<size_t> request_bindings;
+    for (const auto& request : requests) {
+        const OSLQuery::Parameter* selected = nullptr;
+        int selected_layer                  = -1;
+        // Prefer explicit layer-qualified names, then the last matching layer.
+        for (int qualified = 1; qualified >= 0 && !selected; --qualified)
+            for (int layer = layers - 1; layer >= 0 && !selected; --layer)
+                for (const auto& parameter : queries[layer]) {
+                    if (!parameter.isoutput)
+                        continue;
+                    const std::string name = qualified
+                                                 ? fmtformat("{}.{}",
+                                                             layer_names[layer],
+                                                             parameter.name)
+                                                 : parameter.name.string();
+                    if (request.name == name) {
+                        selected       = &parameter;
+                        selected_layer = layer;
+                        break;
+                    }
+                }
+        if (default_output
+            && (!selected || selected_layer != layers - 1
+                || selected->type != TypeColor || selected->isclosure)) {
+            err.errorfmt("Generated HART mode requires an RGB color output "
+                         "parameter on the last layer by default: Cout");
+            return false;
+        }
+        if (!selected) {
+            err.errorfmt("Unknown HART output '{}'", request.name);
+            return false;
+        }
+        if (selected->isstruct || selected->isclosure
+            || (selected->type.basetype != TypeDesc::FLOAT
+                && selected->type.basetype != TypeDesc::INT)) {
+            err.errorfmt("HART output '{}' must be numeric; got '{}'",
+                         request.name, selected->type_name());
+            return false;
+        }
+        const ustring name(
+            fmtformat("{}.{}", layer_names[selected_layer], selected->name));
+        const auto found = std::find_if(bindings.begin(), bindings.end(),
+                                        [&](const OutputBinding& binding) {
+                                            return binding.location.name
+                                                   == name;
+                                        });
+        request_bindings.push_back(size_t(found - bindings.begin()));
+        if (found == bindings.end())
+            bindings.push_back({ selected_layer, selected->name,
+                                 SymLocationDesc(name, selected->type, false,
+                                                 SymArena::Outputs) });
+    }
+    int was_optimized = 0;
+    if (!shadingsys.getattribute(&group, "is_optimized", was_optimized)) {
+        err.errorfmt("Cannot retrieve HART group optimization state");
+        return false;
+    }
+    size_t stride      = 0;
+    const size_t count = size_t(width) * size_t(height);
+    const size_t limit = std::vector<std::byte>().max_size();
+    for (auto& binding : bindings) {
+        const TypeDesc type = binding.location.type;
+        const auto* symbol
+            = was_optimized
+                  ? shadingsys.find_symbol(group, layer_names[binding.layer],
+                                           binding.parameter)
+                  : nullptr;
+        if ((was_optimized
+             && (!symbol || shadingsys.symbol_typedesc(symbol) != type))
+            || type.arraylen < 0 || !type.size()
+            || (type.basetype != TypeDesc::FLOAT
+                && type.basetype != TypeDesc::INT)
+            || type.size() > size_t(std::numeric_limits<int>::max())) {
+            err.errorfmt("HART output '{}' has no resolved numeric storage",
+                         binding.location.name);
+            return false;
+        }
+        if (type.size() > limit - stride
+            || stride + type.size() > limit / count) {
+            err.errorfmt("HART outputs exceed the output buffer size limit");
+            return false;
+        }
+        binding.location.type   = type;
+        binding.location.offset = int64_t(stride);
+        stride += type.size();
+    }
+    for (auto& binding : bindings)
+        binding.location.stride = int64_t(stride);
+
+    // A compiled callable keeps all its stores, even if a later invocation
+    // requests fewer outputs. Never resize or reinterpret that baked layout.
+    for (int layer = 0; layer < layers; ++layer)
+        for (const auto& parameter : queries[layer]) {
+            const ustring name(
+                fmtformat("{}.{}", layer_names[layer], parameter.name));
+            const auto* existing = shadingsys.find_symloc(&group, name,
+                                                          SymArena::Outputs);
+            if (!existing)
+                existing = shadingsys.find_symloc(&group, parameter.name,
+                                                  SymArena::Outputs);
+            if (!existing || existing->offset < 0)
+                continue;
+            const auto found = std::find_if(bindings.begin(), bindings.end(),
+                                            [&](const OutputBinding& binding) {
+                                                return binding.location.name
+                                                       == name;
+                                            });
+            if (found == bindings.end()
+                || existing->type != found->location.type || existing->derivs
+                || existing->offset != found->location.offset
+                || existing->stride != found->location.stride) {
+                err.errorfmt("HART output selection does not match the existing "
+                             "output layout for '{}'; create a new group",
+                             name);
+                return false;
+            }
+        }
+    if (was_optimized) {
+        for (const auto& binding : bindings) {
+            auto* existing = shadingsys.find_symloc(&group,
+                                                    binding.location.name,
+                                                    SymArena::Outputs);
+            if (!existing)
+                existing = shadingsys.find_symloc(&group, binding.parameter,
+                                                  SymArena::Outputs);
+            if (!existing || existing->offset < 0) {
+                err.errorfmt("HART output '{}' must be selected before group "
+                             "optimization",
+                             binding.location.name);
+                return false;
+            }
+        }
+    } else {
+        std::vector<SymLocationDesc> locations;
+        for (const auto& binding : bindings)
+            locations.push_back(binding.location);
+        shadingsys.add_symlocs(&group, locations);
+    }
     shadingsys.optimize_group(&group, nullptr);
 
     int group_size = -1, group_alignment = 0, local_groupdata = 0;
@@ -968,13 +1104,6 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                         group_size, group_alignment, local_groupdata, err)
         || !embedded_raygen(arch, modules[0], err))
         return false;
-    const auto* symbol = shadingsys.find_symbol(group, layer_names.back(),
-                                                ustring("Cout"));
-    if (!symbol || shadingsys.symbol_typedesc(symbol) != TypeColor) {
-        err.errorfmt("Compiled HART group has no RGB color Cout symbol");
-        return false;
-    }
-
     auto& textures = generated->textures();
     if (!textures.prepare(shadingsys))
         return false;
@@ -987,13 +1116,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
         || !runtime.load(modules, entry, callables, options.runstats))
         return false;
-    std::vector<float> pixels(size_t(width) * size_t(height) * 3);
+    std::vector<std::byte> pixels(count * stride);
     const Matrix44 transforms[] = { object2common, object2common.inverse(),
                                     shader2common, shader2common.inverse() };
     const bool rendered
-        = runtime.render(width, height, iterations, warmup,
-                         { reinterpret_cast<std::byte*>(pixels.data()),
-                           pixels.size() * sizeof(float) },
+        = runtime.render(width, height, iterations, warmup, pixels,
                          size_t(group_size), size_t(group_alignment), raytype,
                          &textures, transforms,
                          options.fused ? size_t(local_groupdata) : 0);
@@ -1001,36 +1128,81 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!rendered || !cleared)
         return false;
     if (print_pixels) {
+        const bool rgb_cout = requests.size() == 1 && requests[0].name == "Cout"
+                              && bindings[0].location.type == TypeColor;
         for (int y = 0; y < height; ++y)
             for (int x = 0; x < width; ++x) {
-                const size_t offset = (size_t(y) * width + x) * 3;
-                print("Pixel ({}, {}): Cout = {:.9g} {:.9g} {:.9g}\n", x, y,
-                      pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+                if (rgb_cout)
+                    print("Pixel ({}, {}): Cout =", x, y);
+                else
+                    print("Pixel ({}, {}):\n", x, y);
+                for (size_t i = 0; i < requests.size(); ++i) {
+                    const auto& location
+                        = bindings[request_bindings[i]].location;
+                    const auto* data = pixels.data()
+                                       + (size_t(y) * width + x) * stride
+                                       + location.offset;
+                    if (!rgb_cout)
+                        print("  {} :", requests[i].name);
+                    for (size_t channel = 0;
+                         channel < location.type.basevalues(); ++channel) {
+                        if (location.type.basetype == TypeDesc::INT) {
+                            int value;
+                            std::memcpy(&value, data + channel * sizeof(value),
+                                        sizeof(value));
+                            print(" {}", value);
+                        } else {
+                            float value;
+                            std::memcpy(&value, data + channel * sizeof(value),
+                                        sizeof(value));
+                            print(" {:.9g}", value);
+                        }
+                    }
+                    print("\n");
+                }
             }
-    } else if (output_file != "null") {
-        OIIO::ImageBuf image(
-            OIIO::ImageSpec(width, height, 3, TypeDesc::FLOAT));
+    } else
+        for (size_t i = 0; i < requests.size(); ++i) {
+            const auto& filename = requests[i].filename;
+            if (filename == "null")
+                continue;
+            const auto& location = bindings[request_bindings[i]].location;
+            const TypeDesc base  = location.type.scalartype();
+            OIIO::ImageSpec spec(width, height, int(location.type.basevalues()),
+                                 base);
+            if (location.type != TypeColor) {
+                spec.alpha_channel = spec.z_channel = -1;
+                for (int channel = 0; channel < spec.nchannels; ++channel)
+                    spec.channelnames[channel] = fmtformat("channel{:09}",
+                                                           channel);
+            }
 #if OIIO_VERSION_GREATER_EQUAL(3, 1, 0)
-        bool copied = image.set_pixels(OIIO::ROI::All(),
-                                       OIIO::make_cspan(pixels));
+            OIIO::ImageBuf image(spec, OIIO::make_span(pixels),
+                                 pixels.data() + location.offset,
+                                 OIIO::stride_t(stride),
+                                 OIIO::stride_t(stride * width));
 #else
-        bool copied = image.set_pixels(OIIO::ROI::All(), TypeDesc::FLOAT,
-                                       pixels.data());
+            OIIO::ImageBuf image(spec, pixels.data() + location.offset,
+                                 OIIO::stride_t(stride),
+                                 OIIO::stride_t(stride * width));
 #endif
-        if (OIIO::Strutil::iends_with(output_file, ".jpg")
-            || OIIO::Strutil::iends_with(output_file, ".jpeg")
-            || OIIO::Strutil::iends_with(output_file, ".gif")
-            || OIIO::Strutil::iends_with(output_file, ".png"))
-            image = OIIO::ImageBufAlgo::colorconvert(image, "linear", "sRGB");
-        const TypeDesc format = dataformat == "half"    ? TypeDesc::HALF
-                                : dataformat == "uint8" ? TypeDesc::UINT8
-                                                        : TypeDesc::FLOAT;
-        if (!copied || image.has_error() || !image.write(output_file, format)) {
-            err.errorfmt("Cannot write HART output '{}': {}", output_file,
-                         image.geterror());
-            return false;
+            if (location.type == TypeColor
+                && (OIIO::Strutil::iends_with(filename, ".jpg")
+                    || OIIO::Strutil::iends_with(filename, ".jpeg")
+                    || OIIO::Strutil::iends_with(filename, ".gif")
+                    || OIIO::Strutil::iends_with(filename, ".png")))
+                image = OIIO::ImageBufAlgo::colorconvert(image, "linear",
+                                                         "sRGB");
+            const TypeDesc format = dataformat == "half"    ? TypeDesc::HALF
+                                    : dataformat == "uint8" ? TypeDesc::UINT8
+                                    : dataformat == "float" ? TypeDesc::FLOAT
+                                                            : base;
+            if (image.has_error() || !image.write(filename, format)) {
+                err.errorfmt("Cannot write HART output '{}': {}", filename,
+                             image.geterror());
+                return false;
+            }
         }
-    }
     return true;
 }
 

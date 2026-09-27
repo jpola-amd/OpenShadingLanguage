@@ -30,6 +30,11 @@ struct HartOptions {
     bool has_module = false, has_callables = false, has_entry = false;
 };
 
+struct HartOutputRequest {
+    std::string name;
+    std::string filename;
+};
+
 int
 testshade_hart(int argc, const char* argv[]);
 
@@ -56,6 +61,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          int iterations, bool warmup, bool verbose, int raytype,
                          bool print_pixels, string_view output_file,
                          string_view dataformat, const Matrix44& object2common,
-                         const Matrix44& shader2common);
+                         const Matrix44& shader2common,
+                         cspan<HartOutputRequest> outputs = { });
 
 OSL_NAMESPACE_END

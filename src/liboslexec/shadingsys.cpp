@@ -802,6 +802,13 @@ ShadingSystem::clear_symlocs()
 void
 ShadingSystem::clear_symlocs(ShaderGroup* group)
 {
+    uint64_t hart_size = 0;
+    if (group
+        && getattribute(group, "hart_bitcode_size", TypeUInt64, &hart_size)) {
+        m_impl->errorfmt(
+            "Cannot clear symbol locations of a compiled HART group");
+        return;
+    }
     if (group)
         group->clear_symlocs();
     else
@@ -821,6 +828,13 @@ ShadingSystem::add_symlocs(cspan<SymLocationDesc> symlocs)
 void
 ShadingSystem::add_symlocs(ShaderGroup* group, cspan<SymLocationDesc> symlocs)
 {
+    uint64_t hart_size = 0;
+    if (group
+        && getattribute(group, "hart_bitcode_size", TypeUInt64, &hart_size)) {
+        m_impl->errorfmt(
+            "Cannot change symbol locations of a compiled HART group");
+        return;
+    }
     if (group)
         group->add_symlocs(symlocs);
     else
@@ -2163,6 +2177,10 @@ ShadingSystemImpl::attribute(ShaderGroup* group, string_view name,
         return attribute(name, type, val);
     lock_guard lock(group->m_mutex);
     if (name == "renderer_outputs" && type.basetype == TypeDesc::STRING) {
+        if (!group->m_hart_bitcode.empty()) {
+            errorfmt("Cannot change renderer outputs of a compiled HART group");
+            return false;
+        }
         group->m_renderer_outputs.clear();
         for (size_t i = 0; i < type.numelements(); ++i)
             group->m_renderer_outputs.emplace_back(((const char**)val)[i]);
@@ -2200,6 +2218,10 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
     }
     if (name == "num_layers" && type == TypeInt) {
         *(int*)val = group->nlayers();
+        return true;
+    }
+    if (name == "is_optimized" && type == TypeInt) {
+        *(int*)val = group->optimized();
         return true;
     }
     if (name == "layer_names" && type.basetype == TypeDesc::STRING) {

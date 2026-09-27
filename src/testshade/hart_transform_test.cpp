@@ -597,6 +597,134 @@ run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
     return diagnostics.errors == 0 && diagnostics.warnings == 0;
 }
 
+bool
+run_outputs(string_view stdosl, string_view mode, Diagnostics& diagnostics)
+{
+    OutputFiles files;
+    if (!files.create(diagnostics))
+        return false;
+    for (auto& file : files.files)
+        file += ".tif";
+    std::string arch;
+    auto renderer = testshade_hart_renderer(0, arch);
+    if (!renderer)
+        return false;
+    renderer->errhandler().verbosity(ErrorHandler::VERBOSE);
+    ShadingSystem ss(renderer.get(), nullptr, &diagnostics);
+    renderer->init_shadingsys(&ss);
+    if (!ss.attribute("hart_arch", arch)
+        || !ss.attribute("llvm_debugging_symbols", 0)
+        || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? 1048576 : 0)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+        || !ss.attribute("optimize", mode == "unoptimized" ? 0 : 2))
+        return false;
+    OSLCompiler compiler(&diagnostics);
+    std::string oso;
+    if (!compiler.compile_buffer(R"OSL(
+        shader hart_output_rebind(output int index = 0,
+                                  output float values[2] = {0,0},
+                                  output color Cout = 0)
+        {
+            index = 16777217 + int(2*u);
+            values[0] = u + 2*v;
+            values[1] = u - v;
+            Cout = color(u,v,1);
+        })OSL",
+                                 oso, { }, stdosl)
+        || !ss.LoadMemoryCompiledShader("hart_output_rebind", oso))
+        return false;
+    auto group = ss.ShaderGroupBegin("hart_output_rebind_group");
+    if (!group || !ss.Shader("surface", "hart_output_rebind", "out")
+        || !ss.ShaderGroupEnd())
+        return false;
+    HartOptions options;
+    options.fused = mode == "fused" || mode == "fused-local";
+    const Matrix44 identity(1);
+    std::string original_bitcode;
+    const void* original_address = nullptr;
+    for (int pass = 0; pass < 3; ++pass) {
+        const int columns = pass == 1 ? 1 : 3;
+        const std::array<HartOutputRequest, 3> requests { {
+            { "out.index", files.files[pass] },
+            { "index", "null" },
+            { "values", files.files[3] },
+        } };
+        print("HART output rebind pass {}\n", pass);
+        std::fflush(stdout);
+        if (!testshade_hart_generated(*renderer, ss, *group, options, arch,
+                                      columns, 2, 1, false, true, 0, false,
+                                      "null", "", identity, identity, requests))
+            return false;
+        OIIO::ImageBuf indices(files.files[pass]), values(files.files[3]);
+        std::vector<int> integer_pixels(size_t(columns) * 2);
+        std::vector<float> float_pixels(size_t(columns) * 4);
+        if (!indices.read(0, 0, true) || !values.read(0, 0, true)
+            || indices.spec().nchannels != 1 || values.spec().nchannels != 2) {
+            diagnostics.errorfmt("Cannot read HART output rebind images: {} {}",
+                                 indices.geterror(), values.geterror());
+            return false;
+        }
+#if OIIO_VERSION_GREATER_EQUAL(3, 1, 0)
+        const bool copied = indices.get_pixels(OIIO::ROI::All(),
+                                               OIIO::make_span(integer_pixels))
+                            && values.get_pixels(OIIO::ROI::All(),
+                                                 OIIO::make_span(float_pixels));
+#else
+        const bool copied = indices.get_pixels(OIIO::ROI::All(), TypeInt,
+                                               integer_pixels.data())
+                            && values.get_pixels(OIIO::ROI::All(), TypeFloat,
+                                                 float_pixels.data());
+#endif
+        if (!copied) {
+            diagnostics.errorfmt("Cannot copy HART output rebind pixels");
+            return false;
+        }
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < columns; ++x) {
+                const float u      = columns == 1 ? 0.5f : float(x) / 2;
+                const size_t index = size_t(y) * columns + x;
+                OIIO_CHECK_EQUAL(integer_pixels[index], 16777217 + int(2 * u));
+                OIIO_CHECK_EQUAL(float_pixels[2 * index], u + 2 * y);
+                OIIO_CHECK_EQUAL(float_pixels[2 * index + 1], u - y);
+            }
+        std::string bitcode;
+        const void* address = nullptr;
+        if (!artifact(ss, *group, bitcode, address, diagnostics))
+            return false;
+        if (pass == 0) {
+            original_bitcode = bitcode;
+            original_address = address;
+        } else {
+            OIIO_CHECK_EQUAL(address, original_address);
+            OIIO_CHECK_EQUAL(bitcode, original_bitcode);
+        }
+    }
+    // Subsets, reordered layouts and newly requested stores cannot reinterpret
+    // the allocation still used by the compiled callable.
+    const std::array<std::vector<HartOutputRequest>, 3> invalid { {
+        { { "index", "null" } },
+        { { "values", "null" }, { "index", "null" } },
+        { { "index", "null" }, { "values", "null" }, { "Cout", "null" } },
+    } };
+    for (const auto& requests : invalid) {
+        OIIO_CHECK_ASSERT(
+            !testshade_hart_generated(*renderer, ss, *group, options, arch, 3,
+                                      2, 1, false, true, 0, false, "null", "",
+                                      identity, identity, requests));
+    }
+    std::string bitcode;
+    const void* address = nullptr;
+    if (!artifact(ss, *group, bitcode, address, diagnostics))
+        return false;
+    OIIO_CHECK_EQUAL(address, original_address);
+    OIIO_CHECK_EQUAL(bitcode, original_bitcode);
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
 }  // namespace
 
 
@@ -605,16 +733,19 @@ int
 main(int argc, char* argv[])
 {
     const bool color = argc == 4 && string_view(argv[3]) == "color";
+    const bool outputs = argc == 4 && string_view(argv[3]) == "outputs";
     const string_view mode(argc >= 3 ? argv[2] : "split");
-    if ((argc != 2 && argc != 3 && !color)
+    if ((argc != 2 && argc != 3 && !color && !outputs)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
-            && !(color && mode == "unoptimized"))) {
-        print(stderr, "Usage: hart_transform_test stdosl.h "
-                      "[split|fused|fused-local|unoptimized] [color]\n");
+            && !((color || outputs) && mode == "unoptimized"))) {
+        print(stderr,
+              "Usage: hart_transform_test stdosl.h "
+              "[split|fused|fused-local|unoptimized] [color|outputs]\n");
         return 1;
     }
     Diagnostics diagnostics;
-    OIIO_CHECK_ASSERT(run(argv[1], mode, color, diagnostics));
+    OIIO_CHECK_ASSERT(outputs ? run_outputs(argv[1], mode, diagnostics)
+                              : run(argv[1], mode, color, diagnostics));
     OIIO_CHECK_EQUAL(diagnostics.errors, 0);
     OIIO_CHECK_EQUAL(diagnostics.warnings, 0);
     return unit_test_failures;

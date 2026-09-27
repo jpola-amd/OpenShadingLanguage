@@ -287,6 +287,18 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --diagnostics)
             set_tests_properties (hart-diagnostics-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            if (TARGET OpenImageIO::oiiotool)
+                set (hart_output_oiiotool "$<TARGET_FILE:OpenImageIO::oiiotool>")
+            else ()
+                set (hart_output_oiiotool "oiiotool")
+            endif ()
+            add_test (NAME hart-outputs-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-outputs.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>"
+                    --oiiotool "${hart_output_oiiotool}")
+            set_tests_properties (hart-outputs-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-derivatives-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
@@ -448,6 +460,15 @@ if (BUILD_TESTING AND OSL_USE_HART)
             set_target_properties (hart_transform_test PROPERTIES FOLDER "Unit Tests")
             if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
                 foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    add_test (NAME hart-output-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind outputs)
+                    set_tests_properties (hart-output-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
                     add_test (NAME hart-color-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"
                         "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
                         "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"

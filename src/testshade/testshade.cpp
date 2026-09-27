@@ -2167,12 +2167,15 @@ test_shade(int argc, const char* argv[])
 #if OSL_TESTSHADE_HART
     if (use_hart) {
         setup_transformations(*rend, Mshad, Mobj);
+        std::vector<HartOutputRequest> hart_outputs;
+        for (size_t i = 0; i < outputvars.size(); ++i)
+            hart_outputs.push_back({ outputvars[i], outputfiles[i] });
         const bool ok = testshade_hart_generated(
             *rend, *shadingsys, *shadergroup, hart, hart_arch, xres, yres,
             iters, warmup, verbose || debug1,
             shadingsys->raytype_bit(ustring(raytype_name)), print_outputs,
             outputfiles.empty() ? string_view("null") : outputfiles[0],
-            dataformatname, Mobj, Mshad);
+            dataformatname, Mobj, Mshad, hart_outputs);
         shadergroup.reset();
         delete shadingsys;
         shadingsys = nullptr;

@@ -5,8 +5,9 @@
 // GPU-independent compiler regression tests for the HART backend. Compile small
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, split/fused callable ABI, address spaces, group-data
-// alignment, string hash storage, packed diagnostics, linked shadeops, control
-// flow, HART provenance, and rejection of unsupported operations.
+// alignment, output placement, string hash storage, packed diagnostics, linked
+// shadeops, control flow, HART provenance, and rejection of unsupported
+// operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -31,6 +32,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <limits>
 #include <utility>
 
 #include <llvm/ADT/APInt.h>
@@ -1302,7 +1304,8 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              bool looping = false, int used_layers = 0, bool closures = false,
              bool aggregates = false, int spline_arraylen = 0,
              int color_transforms = -1, int noise_guard_flags = -1,
-             cspan<DiagnosticExpectation> diagnostics = {})
+             cspan<DiagnosticExpectation> diagnostics = { },
+             bool eager_layers                        = false)
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -1936,7 +1939,14 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                                && dominators.dominates(branch->getSuccessor(0),
                                                        call->getParent());
                 }
-                OIIO_CHECK_ASSERT(guarded);
+                if (eager_layers) {
+                    for (const auto& block : *call->getFunction())
+                        if (const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(
+                                block.getTerminator()))
+                            OIIO_CHECK_ASSERT(dominators.dominates(call, ret));
+                } else {
+                    OIIO_CHECK_ASSERT(guarded);
+                }
             }
             OIIO_CHECK_ASSERT(calls > 0);
         }
@@ -2859,6 +2869,515 @@ check_noise_modules(string_view arch, string_view stdosl)
                 check_module(ss, *group, arch, { shadeop }, optimize);
             }
         }
+    }
+    return true;
+}
+
+
+
+struct OutputPlacement {
+    SymLocationDesc location;
+    uint64_t bytes;
+};
+
+
+
+bool
+check_output_placement_ir(ShadingSystem& ss, ShaderGroup& group,
+                          cspan<OutputPlacement> expected,
+                          bool scheduled_producer = false)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_output_placement"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    auto& module        = **parsed;
+    auto split_constant = [](const llvm::Value* value, unsigned opcode,
+                             const llvm::ConstantInt*& constant,
+                             const llvm::Value*& other) {
+        const auto* operation = llvm::dyn_cast<llvm::BinaryOperator>(value);
+        if (!operation || operation->getOpcode() != opcode)
+            return false;
+        for (unsigned i = 0; i < 2; ++i)
+            if (const auto* number = llvm::dyn_cast<llvm::ConstantInt>(
+                    operation->getOperand(i))) {
+                constant = number;
+                other    = operation->getOperand(1 - i);
+                return true;
+            }
+        return false;
+    };
+    std::vector<int> copies(expected.size(), 0);
+    std::vector<const llvm::MemCpyInst*> consumer_copies;
+    for (const auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0)
+            continue;
+        OIIO_CHECK_EQUAL(function.arg_size(), 6);
+        if (function.arg_size() != 6)
+            continue;
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(&inst);
+                if (!copy)
+                    continue;
+                const auto* address = llvm::dyn_cast<llvm::IntToPtrInst>(
+                    copy->getRawDest()->stripPointerCasts());
+                const auto* sum = address
+                                      ? llvm::dyn_cast<llvm::BinaryOperator>(
+                                            address->getOperand(0))
+                                      : nullptr;
+                if (!sum || sum->getOpcode() != llvm::Instruction::Add)
+                    continue;
+                const llvm::Value* relative = nullptr;
+                for (unsigned i = 0; i < 2; ++i)
+                    if (const auto* base = llvm::dyn_cast<llvm::PtrToIntInst>(
+                            sum->getOperand(i)))
+                        if (base->getOperand(0)->stripPointerCasts()
+                            == function.getArg(3)) {
+                            OIIO_CHECK_ASSERT(base->getType()->isIntegerTy(64));
+                            relative = sum->getOperand(1 - i);
+                        }
+                if (!relative)
+                    continue;  // Not a renderer-output copy.
+                OIIO_CHECK_ASSERT(address->getType()->getPointerAddressSpace()
+                                  == 0);
+                const llvm::ConstantInt* offset = nullptr;
+                const llvm::Value* product      = relative;
+                split_constant(relative, llvm::Instruction::Add, offset,
+                               product);
+                const llvm::ConstantInt* stride = nullptr;
+                const llvm::Value* index        = nullptr;
+                OIIO_CHECK_ASSERT(split_constant(product,
+                                                 llvm::Instruction::Mul, stride,
+                                                 index));
+                if (!stride || !index)
+                    continue;
+                const auto* extended = llvm::dyn_cast<llvm::SExtInst>(index);
+                OIIO_CHECK_ASSERT(
+                    stride->getType()->isIntegerTy(64)
+                    && (!offset || offset->getType()->isIntegerTy(64))
+                    && extended && extended->getType()->isIntegerTy(64)
+                    && extended->getOperand(0) == function.getArg(4));
+                const auto found = std::find_if(
+                    expected.begin(), expected.end(), [&](const auto& test) {
+                        const string_view name(test.location.name);
+                        const auto dot = name.find('.');
+                        return dot != string_view::npos
+                               && function.getName()
+                                      == fmtformat(
+                                          "osl_layer_group_hart_test_group_name_{}",
+                                          name.substr(0, dot))
+                               && test.location.offset != -1
+                               && test.location.offset
+                                      == (offset ? offset->getSExtValue() : 0)
+                               && test.location.stride
+                                      == stride->getSExtValue();
+                    });
+                if (found == expected.end()) {
+                    print(stderr,
+                          "Unexpected output copy in {} at {} + {}*index\n",
+                          function.getName().str(),
+                          offset ? offset->getSExtValue() : 0,
+                          stride->getSExtValue());
+                    OIIO_CHECK_ASSERT(false);
+                    continue;
+                }
+                ++copies[found - expected.begin()];
+                const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                    copy->getLength());
+                OIIO_CHECK_ASSERT(length);
+                if (length)
+                    OIIO_CHECK_EQUAL(length->getZExtValue(), found->bytes);
+                OIIO_CHECK_ASSERT(!copy->isVolatile());
+                if (function.getName()
+                    == "osl_layer_group_hart_test_group_name_consumer")
+                    consumer_copies.push_back(copy);
+            }
+    }
+    for (size_t i = 0; i < expected.size(); ++i) {
+        if (copies[i] != (expected[i].location.offset == -1 ? 0 : 1))
+            print(stderr, "Wrong copy count for output '{}'\n",
+                  expected[i].location.name);
+        OIIO_CHECK_EQUAL(copies[i], expected[i].location.offset == -1 ? 0 : 1);
+    }
+    if (scheduled_producer) {
+        auto* producer = module.getFunction(
+            "osl_layer_group_hart_test_group_name_producer");
+        auto* consumer = module.getFunction(
+            "osl_layer_group_hart_test_group_name_consumer");
+        OIIO_CHECK_ASSERT(producer && consumer && !consumer_copies.empty());
+        if (!producer || !consumer)
+            return false;
+        llvm::DominatorTree dominators(*consumer);
+        bool scheduled = false;
+        for (const auto* user : producer->users()) {
+            const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+            if (!call || call->getCalledFunction() != producer
+                || call->getFunction() != consumer)
+                continue;
+            OIIO_CHECK_EQUAL(call->arg_size(), 6);
+            if (call->arg_size() != 6)
+                continue;
+            for (unsigned i = 0; i < 6; ++i)
+                OIIO_CHECK_EQUAL(call->getArgOperand(i), consumer->getArg(i));
+            bool dominates = true;
+            for (const auto* copy : consumer_copies)
+                dominates &= dominators.dominates(call, copy);
+            for (const auto& block : *consumer)
+                if (const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(
+                        block.getTerminator()))
+                    dominates &= dominators.dominates(call, ret);
+            scheduled |= dominates;
+        }
+        OIIO_CHECK_ASSERT(scheduled);
+    }
+    return true;
+}
+
+
+
+bool
+check_output_placement_modules(string_view arch, string_view stdosl,
+                               string_view basic, string_view producer,
+                               string_view consumer)
+{
+    const string_view source = R"osl(
+shader hart_output_values(output int integer=0, output float scalar=0,
+                         output color Cout=0, output vector direction=0,
+                         output matrix matrix_out=1, output int integers[3]={},
+                         output float floats[2]={}, output vector vectors[2]={},
+                         output float disabled=0) {
+    integer=int(10*u)+3; scalar=u-2*v;
+    Cout=color(u,v,u+v); direction=vector(u+1,v+2,u-v);
+    matrix_out=matrix(1+u,2,3,4,5,6+v,7,8,9,10,11,12,13,14,15,16);
+    integers[0]=integer; integers[1]=integer+1; integers[2]=integer+2;
+    floats[0]=scalar; floats[1]=u+v;
+    vectors[0]=direction; vectors[1]=vector(Cout);
+    disabled=u+42;
+}
+)osl";
+    OSLCompiler compiler;
+    std::string bytecode;
+    if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+        return false;
+    TypeDesc vectors                 = TypeVector;
+    vectors.arraylen                 = 2;
+    const OutputPlacement original[] = {
+        { { "layer0.integer", TypeInt, false, SymArena::Outputs, 8, 256 }, 4 },
+        { { "layer0.scalar", TypeFloat, false, SymArena::Outputs, 16, 256 }, 4 },
+        { { "layer0.Cout", TypeColor, false, SymArena::Outputs, 32, 256 }, 12 },
+        { { "layer0.direction", TypeVector, false, SymArena::Outputs, 48, 256 },
+          12 },
+        { { "layer0.matrix_out", TypeMatrix, false, SymArena::Outputs, 64, 256 },
+          64 },
+        { { "layer0.integers", TypeDesc(TypeDesc::INT, 3), false,
+            SymArena::Outputs, 136, 256 },
+          12 },
+        { { "layer0.floats", TypeDesc(TypeDesc::FLOAT, 2), false,
+            SymArena::Outputs, 152, 256 },
+          8 },
+        { { "layer0.vectors", vectors, false, SymArena::Outputs, 176, 256 },
+          24 },
+        { { "layer0.disabled", TypeFloat, false, SymArena::Outputs, -1, 4 }, 4 },
+    };
+    const struct {
+        int osl, llvm;
+        bool local;
+    } variants[] = { { 0, 10, false }, { 2, 10, true }, { 2, 3, true } };
+    for (const auto& variant : variants) {
+        HartServices renderer(false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", variant.osl);
+        ss.attribute("llvm_optimize", variant.llvm);
+        ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+        auto group = make_group(ss, bytecode);
+        ss.clear_symlocs(group.get());
+        std::vector<OutputPlacement> expected(std::begin(original),
+                                              std::end(original));
+        std::vector<SymLocationDesc> locations;
+        std::vector<ustring> names;
+        for (size_t i = 0; i < expected.size(); ++i) {
+            auto& location = expected[i].location;
+            if (variant.local && location.offset != -1)
+                location = SymLocationDesc(location.name, location.type, false,
+                                           SymArena::Outputs,
+                                           int64_t(65536 * (i + 1)),
+                                           i ? int64_t(expected[i].bytes
+                                                       + 4 * (i + 1))
+                                             : SymLocationDesc::AutoStride);
+            locations.push_back(location);
+            names.push_back(location.name);
+        }
+        OIIO_CHECK_ASSERT(
+            ss.attribute(group.get(), "renderer_outputs",
+                         TypeDesc(TypeDesc::STRING, int(names.size())),
+                         names.data()));
+        auto provisional = locations;
+        for (auto& location : provisional)
+            if (location.offset != -1) {
+                location.offset += 1024;
+                location.stride += 64;
+            }
+        ss.add_symlocs(group.get(), provisional);
+        for (int query = 0; query < 2; ++query) {
+            int optimized = -1;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "is_optimized", optimized));
+            OIIO_CHECK_EQUAL(optimized, 0);
+        }
+        ss.optimize_group(group.get(), nullptr, false);
+        int optimized = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "is_optimized", optimized));
+        OIIO_CHECK_EQUAL(optimized, 1);
+        const void* bytes = nullptr;
+        uint64_t size     = 0;
+        OIIO_CHECK_ASSERT(!ss.getattribute(group.get(), "hart_bitcode",
+                                           TypeDesc::PTR, &bytes));
+        OIIO_CHECK_ASSERT(!ss.getattribute(group.get(), "hart_bitcode_size",
+                                           TypeUInt64, &size));
+        OIIO_CHECK_ASSERT(!bytes && !size);
+        // Optimization preserves the named outputs; placement remains mutable
+        // until code generation bakes the final mappings into the artifact.
+        ss.clear_symlocs(group.get());
+        for (const auto& location : locations)
+            OIIO_CHECK_ASSERT(!ss.find_symloc(group.get(), location.name));
+        ss.add_symlocs(group.get(), locations);
+        OIIO_CHECK_ASSERT(
+            ss.attribute(group.get(), "renderer_outputs",
+                         TypeDesc(TypeDesc::STRING, int(names.size())),
+                         names.data()));
+        for (const auto& location : locations) {
+            const auto* symbol = ss.find_symbol(*group, location.name);
+            OIIO_CHECK_ASSERT(symbol);
+            if (symbol)
+                OIIO_CHECK_ASSERT(ss.symbol_typedesc(symbol) == location.type);
+        }
+        OIIO_CHECK_ASSERT(!ss.find_symloc(group.get(),
+                                          ustring("layer0.disabled"),
+                                          SymArena::Outputs));
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Typed outputs (OSL {}, LLVM {}, local={}):\n{}",
+                  variant.osl, variant.llvm, variant.local, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int group_size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", group_size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+        check_module(ss, *group, arch, { }, variant.llvm, false, false, false,
+                     0, false, true);
+        if (variant.llvm == 10)
+            OIIO_CHECK_ASSERT(check_output_placement_ir(ss, *group, expected));
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                          TypeDesc::PTR, &bytes));
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                          TypeUInt64, &size));
+        if (!bytes || !size)
+            return false;
+        const void* original_bytes = bytes;
+        const std::string artifact(static_cast<const char*>(bytes), size);
+        auto unchanged = [&]() {
+            const void* current = nullptr;
+            uint64_t length     = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                              TypeDesc::PTR, &current));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                              TypeUInt64, &length));
+            OIIO_CHECK_EQUAL(current, original_bytes);
+            OIIO_CHECK_EQUAL(length, artifact.size());
+            if (current && length == artifact.size())
+                OIIO_CHECK_ASSERT(
+                    string_view(static_cast<const char*>(current), length)
+                    == string_view(artifact));
+            for (const auto& location : locations) {
+                const auto* found = ss.find_symloc(group.get(), location.name);
+                OIIO_CHECK_ASSERT(found);
+                if (!found)
+                    continue;
+                OIIO_CHECK_EQUAL(found->name, location.name);
+                OIIO_CHECK_ASSERT(found->type == location.type);
+                OIIO_CHECK_EQUAL(found->offset, location.offset);
+                OIIO_CHECK_EQUAL(found->stride, location.stride);
+                OIIO_CHECK_ASSERT(found->arena == location.arena);
+                OIIO_CHECK_EQUAL(found->derivs, location.derivs);
+            }
+            OIIO_CHECK_ASSERT(
+                !ss.find_symloc(group.get(), ustring("late_output")));
+            int count = -1;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "num_renderer_outputs", count));
+            OIIO_CHECK_EQUAL(count, names.size());
+            std::vector<ustring> current_names(names.size());
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "renderer_outputs",
+                                TypeDesc(TypeDesc::STRING,
+                                         int(current_names.size())),
+                                current_names.data()));
+            OIIO_CHECK_ASSERT(current_names == names);
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "is_optimized", optimized));
+            OIIO_CHECK_EQUAL(optimized, 1);
+            int current_size = 0, current_allocated = -1;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "llvm_groupdata_size",
+                                              current_size));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              current_allocated));
+            OIIO_CHECK_EQUAL(current_size, group_size);
+            OIIO_CHECK_EQUAL(current_allocated, allocated);
+        };
+        const SymLocationDesc changed[] = {
+            { "layer0.scalar", TypeFloat, false, SymArena::Outputs, 512, 1024 },
+            { "late_output", TypeFloat, false, SymArena::Outputs, 768, 1024 },
+        };
+        int before = errors.errors;
+        ss.add_symlocs(group.get(), changed);
+        OIIO_CHECK_EQUAL(errors.errors, before + 1);
+        OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+            errors.last_error,
+            "Cannot change symbol locations of a compiled HART group"));
+        unchanged();
+        before = errors.errors;
+        ss.clear_symlocs(group.get());
+        OIIO_CHECK_EQUAL(errors.errors, before + 1);
+        OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+            errors.last_error,
+            "Cannot clear symbol locations of a compiled HART group"));
+        unchanged();
+        before = errors.errors;
+        const ustring changed_name("late_output");
+        OIIO_CHECK_ASSERT(!ss.attribute(group.get(), "renderer_outputs",
+                                        TypeString, &changed_name));
+        OIIO_CHECK_EQUAL(errors.errors, before + 1);
+        OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+            errors.last_error,
+            "Cannot change renderer outputs of a compiled HART group"));
+        unchanged();
+    }
+    const OutputPlacement layered[] = {
+        { { "producer.value", TypeFloat, false, SymArena::Outputs, 4, 64 }, 4 },
+        { { "consumer.Cout", TypeColor, false, SymArena::Outputs, 16, 64 }, 12 },
+    };
+    for (bool connected : { false, true })
+        for (int optimize : { 10, 3 }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", optimize == 10 ? 0 : 2);
+            ss.attribute("llvm_optimize", optimize);
+            ss.attribute("lazyunconnected", 1);
+            ss.attribute("max_hart_groupdata_alloc", optimize == 3 ? 4096 : 0);
+            ShaderGroupRef group;
+            if (connected) {
+                group = make_connected_group(ss, producer, consumer);
+            } else {
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_producer", producer));
+                OIIO_CHECK_ASSERT(
+                    ss.LoadMemoryCompiledShader("hart_consumer", basic));
+                group = ss.ShaderGroupBegin("hart_test_group");
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_producer", "producer"));
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_consumer", "consumer"));
+                OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            }
+            ss.clear_symlocs(group.get());
+            const SymLocationDesc locations[] = { layered[0].location,
+                                                  layered[1].location };
+            ss.add_symlocs(group.get(), locations);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "Mapped producer (connected={}, LLVM={}):\n{}",
+                      connected, optimize, errors.messages);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            // Renderer outputs force these producers to run unconditionally.
+            check_module(ss, *group, arch, { }, optimize, connected, false,
+                         false, 2, false, true, 0, -1, -1, { }, true);
+            int size = 0, allocated = -1;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "llvm_groupdata_size", size));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+            OIIO_CHECK_EQUAL(allocated, optimize == 3 ? size : 0);
+            if (optimize == 10)
+                OIIO_CHECK_ASSERT(
+                    check_output_placement_ir(ss, *group, layered, true));
+        }
+    TypeDesc unresolved = vectors, oversized = vectors;
+    unresolved.arraylen = -1;
+    // Only the descriptor is oversized; the shader still has two elements.
+    oversized.arraylen = std::numeric_limits<int>::max() / 12 + 1;
+    const struct {
+        SymLocationDesc location;
+        const char* diagnostic;
+    } rejected[] = {
+        { { "layer0.integer", TypeFloat, false, SymArena::Outputs, 0, 4 },
+          "does not match location type" },
+        { { "layer0.Cout", TypeFloat, false, SymArena::Outputs, 0, 4 },
+          "does not match location type" },
+        { { "layer0.floats", TypeDesc(TypeDesc::FLOAT, 3), false,
+            SymArena::Outputs, 0, 12 },
+          "does not match location type" },
+        { { "layer0.vectors", oversized, false, SymArena::Outputs, 0, 24 },
+          "does not match location type" },
+        { { "layer0.vectors", unresolved, false, SymArena::Outputs, 0, 24 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.scalar", TypeFloat, false, SymArena::Outputs, 0, -4 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.scalar", TypeFloat, false, SymArena::Outputs, 0, 0 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.scalar", TypeFloat, false, SymArena::Outputs, 0, 3 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.Cout", TypeColor, false, SymArena::Outputs, 0, 11 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.matrix_out", TypeMatrix, false, SymArena::Outputs, 0, 63 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.floats", TypeDesc(TypeDesc::FLOAT, 2), false,
+            SymArena::Outputs, 0, 7 },
+          "Invalid HART output location size or stride" },
+        { { "layer0.scalar", TypeFloat, true, SymArena::Outputs, 0, 8 },
+          "Invalid HART output location size or stride" },
+    };
+    for (const auto& test : rejected) {
+        HartServices renderer(false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        auto group = make_group(ss, bytecode);
+        ss.clear_symlocs(group.get());
+        ss.add_symlocs(group.get(), { &test.location, 1 });
+        const int previous_failures = unit_test_failures;
+        check_rejected_group(ss, *group, errors, test.diagnostic);
+        if (unit_test_failures != previous_failures)
+            print(stderr, "Output rejection failed for '{}' (stride={})\n",
+                  test.location.name, test.location.stride);
     }
     return true;
 }
@@ -6719,6 +7238,7 @@ main(int argc, char* argv[])
     }
     if (!check_aggregate_modules(arch, argv[2], oso[11])
         || !check_string_modules(arch, argv[2])
+        || !check_output_placement_modules(arch, argv[2], oso[0], oso[5], oso[6])
         || !check_diagnostic_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])

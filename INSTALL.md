@@ -291,11 +291,35 @@ passes verified AMDGPU bitcode and the generated init/entry names to HART.
 The renderer embeds a separate raygen module for every configured
 architecture; execution does not read device code from build-tree paths.
 Each point receives real `ShaderGlobals` and separately aligned group
-storage. Generated output placement writes `Cout` to RGB records; the
-renderer does not assume offsets inside the group.
+storage. Generated output placement uses a checked, contiguous output arena;
+the renderer does not assume offsets inside the group.
 
-This path supports **one or more layers, with exactly one
-`output color Cout` on the final layer**. A connected two-layer example is:
+With no `-o` options, this path still selects `output color Cout` on the final
+layer. Explicit `-o NAME FILE` options select one or more numeric outputs:
+integers, floats, triples, matrices, numeric arrays, and numeric struct fields.
+Use `layer.parameter` to disambiguate layers; unqualified names select the last
+matching layer. Struct fields retain their dotted parameter names. Whole
+structs, strings and closures are not image outputs. As on the CPU, shader
+output arrays must have a fixed size (unsized input arrays remain supported).
+
+Each point owns one packed record containing each distinct selected symbol,
+in first-request order. Aliases of the same symbol share storage but may write
+different files. Integer printing and integer image buffers retain int32
+values; `-d float`, `-d half`, and `-d uint8` explicitly request file conversion.
+Arrays and matrices become flattened image channels. Display conversion for
+JPEG/GIF/PNG applies to scalar color outputs, not numeric data outputs.
+`--print` suppresses all image files, and `null` suppresses individual files.
+
+Output mappings must be selected before group optimization. A compiled group
+may be rendered again with the same distinct outputs in the same order and
+different filenames, but a different layout requires a new group. The renderer
+checks existing mappings before allocating or launching; the shading system
+rejects changes to a compiled HART group's symbol locations or renderer-output
+selection. The arena belongs to the renderer and remains alive through
+synchronized readback and image writing. The six-argument callable ABI and
+the separate external-module RGB contract are unchanged.
+
+A connected two-layer example is:
 
 ```osl
 shader hart_group_producer(float scale = 1, output float value = 0)

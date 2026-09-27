@@ -3815,8 +3815,6 @@ try:
                 + ["--hart-local-groupdata", budget, "hart_first"],
                 "Invalid --hart-local-groupdata" if fused else
                 "requires --hart-fused")
-    run(base + ["-o", "other", "null"], "one RGB output")
-    run(base + ["-o", "Cout", "null", "-o", "Cout", "null"], "one RGB output")
     run(base + ["-g", "0", "1"], "must be positive")
     run(base + ["-g", "46341", "46341"], "int shade-index range")
     run(base + ["--iters", "0"], "must be positive")
@@ -4132,7 +4130,6 @@ try:
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
             ("hart_missing_output", "RGB color"),
-            ("hart_extra_output", "RGB color"),
             ("hart_closure", "does not support parameter"),
             ("hart_string", "unsupported operation 'strlen'"),
             ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),

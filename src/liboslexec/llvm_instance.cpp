@@ -1867,11 +1867,31 @@ BackendLLVM::build_llvm_instance(bool groupentry)
 
         if (!equivalent(s.typespec(), symloc->type)
             || s.typespec().is_closure()) {
+            if (use_hart()) {
+                shadingcontext()->errorfmt(
+                    "HART output '{}.{}' type '{}' does not match location type '{}'",
+                    inst()->layername(), s.name(), s.typespec(), symloc->type);
+                m_llvm_codegen_failed = true;
+                continue;
+            }
             std::cout << "No output copy for " << s.typespec() << ' '
                       << s.name()
                       << " because of type mismatch vs symloc=" << symloc->type
                       << "\n";
             continue;  // types didn't match
+        }
+
+        if (use_hart()
+            && (symloc->type.arraylen < 0 || !symloc->type.size()
+                || symloc->type.size() > size_t(std::numeric_limits<int>::max())
+                                             / (symloc->derivs ? 3 : 1)
+                || symloc->stride < int64_t(symloc->type.size())
+                                        * (symloc->derivs ? 3 : 1))) {
+            shadingcontext()->errorfmt(
+                "Invalid HART output location size or stride for '{}.{}'",
+                inst()->layername(), s.name());
+            m_llvm_codegen_failed = true;
+            continue;
         }
 
         int size = int(symloc->type.size());

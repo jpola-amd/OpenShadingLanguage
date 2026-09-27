@@ -494,6 +494,8 @@ public:
     /// in value.  Attributes that are currently documented include:
     ///   string groupname           The name of the shader group.
     ///   int num_layers             The number of layers in the group.
+    ///   int is_optimized           Whether optimization has finished, without
+    ///                              triggering optimization or code generation.
     ///   string[] layer_names       The names of the layers in the group.
     ///   int num_textures_needed    The number of texture names that are
     ///                                known to be potentially needed by the
@@ -1088,11 +1090,12 @@ public:
     /// to the optimizer, and will be determined strictly at execution time.
     void set_raytypes(ShaderGroup* group, int raytypes_on, int raytypes_off);
 
-    /// Clear any known mappings of symbol locations.
+    /// Clear any known mappings of symbol locations. Compiled HART groups
+    /// reject changes because these locations are baked into their code.
     void clear_symlocs();
     void clear_symlocs(ShaderGroup* group);
 
-    /// Add symbol location mappings.
+    /// Add symbol location mappings. Compiled HART groups reject changes.
     void add_symlocs(cspan<SymLocationDesc> symlocs);
     void add_symlocs(ShaderGroup* group, cspan<SymLocationDesc> symlocs);
 
