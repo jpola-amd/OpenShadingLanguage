@@ -5,8 +5,8 @@
 // GPU-independent compiler regression tests for the HART backend. Compile small
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, split/fused callable ABI, address spaces, group-data
-// alignment, linked shadeops, control flow, HART provenance, and rejection of
-// unsupported operations.
+// alignment, string hash storage, linked shadeops, control flow, HART provenance,
+// and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -148,10 +148,13 @@ public:
         if ((code & 0xffff0000) == EH_ERROR) {
             ++errors;
             last_error = message;
+            messages += message;
+            messages += '\n';
         }
     }
     int errors = 0;
     std::string last_error;
+    std::string messages;
 };
 
 
@@ -1912,9 +1915,6 @@ check_math_modules(string_view arch, string_view stdosl)
         { "float hidden(float x) { printf(\"no\"); return x; } "
           "shader bad(output color Cout=0) { Cout=color(hidden(u)); }",
           "unsupported operation 'printf'" },
-        { "string hidden() { return \"no\"; } "
-          "shader bad(output color Cout=0) { string s=hidden(); Cout=color(u); }",
-          "unsupported type 'string'" },
     };
     for (const auto& test : rejected) {
         OSLCompiler compiler;
@@ -2284,7 +2284,8 @@ check_noise_modules(string_view arch, string_view stdosl)
         std::string bytecode;
         if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
             return false;
-        check_rejection(arch, bytecode, "unsupported type 'string'");
+        check_rejection(arch, bytecode,
+                        "noise selectors must be literal strings");
         for (string_view name :
              { "perlin", "uperlin", "cell", "hash", "noise", "snoise" }) {
             OSLCompiler named_compiler;
@@ -2594,7 +2595,7 @@ check_gabor_modules(string_view arch, string_view stdosl)
           "noise options require gabor" },
         { "string option=u>v?\"bandwidth\":\"impulses\"; "
           "Cout=noise(\"gabor\",P,option,1.0);",
-          "unsupported type" },
+          "noise option names must be literal strings" },
     };
     for (const auto& test : rejected) {
         OSLCompiler compiler;
@@ -2631,7 +2632,10 @@ check_gabor_modules(string_view arch, string_view stdosl)
             ShadingSystem ss(&renderer, nullptr, &errors);
             ss.attribute("hart_arch", arch);
             auto group = make_group(ss, bytecode);
-            check_rejected_group(ss, *group, errors, "unsupported type");
+            check_rejected_group(
+                ss, *group, errors,
+                selector ? "noise selectors must be literal strings"
+                         : "noise option names must be literal strings");
         }
         {
             Diagnostics errors;
@@ -2857,6 +2861,26 @@ check_space_modules(string_view arch, string_view stdosl)
         auto group = make_group(ss, bytecode);
         check_rejected_group(ss, *group, errors,
                              "unsupported coordinate space");
+    }
+    for (string_view body :
+         { "Cout=color(transform(space,P));",
+           "matrix m=matrix(space,\"common\"); Cout=color(m[0][0]);",
+           "Cout=color(point(space,u,v,1));" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                fmtformat("shader dynamic_space(output color Cout=0) {{ "
+                          "string space=u>v?\"object\":\"shader\"; {} }}",
+                          body),
+                bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors,
+                             "coordinate spaces must be literal strings");
     }
     return true;
 }
@@ -3423,8 +3447,8 @@ check_texture_modules(string_view arch, string_view stdosl)
             "Cout=texture(filename,u,v,\"interp\",\"linear\",\"wrap\",\"clamp\"); }",
             bytecode, { }, stdosl))
         return false;
-    check_rejection(arch, bytecode, "unsupported type 'string'", 1, false,
-                    true);
+    check_rejection(arch, bytecode, "texture requires a literal filename", 1,
+                    false, true);
     return check_texture_alpha_modules(arch, stdosl)
            && check_texture_firstchannel_modules(arch, stdosl);
 }
@@ -3459,6 +3483,11 @@ check_closure_modules(string_view arch, string_view stdosl)
         { "shader hart_closure_null(output color Cout=0) { Ci=0; }",
           { },
           { },
+          false },
+        { "shader hart_closure_string(string name=\"diffuse\", "
+          "output color Cout=0) { Ci=diffuse(N); }",
+          { "osl_allocate_closure_component", "rs_allocate_closure" },
+          { "osl_allocate_closure_component", "rs_allocate_closure" },
           false },
         { "shader hart_closure_scalar(output color Cout=0) { "
           "Ci=(u+0.25)*diffuse(N); }",
@@ -3653,9 +3682,6 @@ check_closure_modules(string_view arch, string_view stdosl)
         const char* source;
         const char* error;
     } types[] = {
-        { "shader hart_closure_string(string name=\"diffuse\", "
-          "output color Cout=0) { Ci=diffuse(N); }",
-          "unsupported type" },
         { "shader hart_closure_global(output color Cout=0) { "
           "N=normal(u,v,1); Ci=diffuse(N); }",
           "writing shader global 'N'" },
@@ -4030,10 +4056,6 @@ check_aggregate_modules(string_view arch, string_view stdosl,
         { "shader unchecked [[int range_checking=0]] (output color Cout=0) { "
           "matrix m=matrix(1); m[int(u)][0]=v; Cout=color(m[0][0]); }",
           "range_checking" },
-        { "struct Holder { string label; float a[2]; }; "
-          "shader unused_string(Holder h={\"bad\",{0,0}}, output color Cout=0) "
-          "{ Cout=color(u,v,1); }",
-          "unsupported type 'string'" },
         { "shader interactive_array(float a[2]={0,0} [[int interactive=1]], "
           "output color Cout=0) { Cout=color(a[0]); }",
           "interactive" },
@@ -4049,6 +4071,427 @@ check_aggregate_modules(string_view arch, string_view stdosl,
         ss.attribute("hart_arch", arch);
         auto group = make_group(ss, bytecode);
         check_rejected_group(ss, *group, errors, test.error);
+    }
+    return true;
+}
+
+
+
+bool
+check_string_storage_ir(ShadingSystem& ss, ShaderGroup& group, bool comparisons,
+                        int arraylen, bool mixed,
+                        cspan<ustring> constants = { })
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size) {
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_string_storage"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        OIIO_CHECK_ASSERT(false);
+        return false;
+    }
+    auto& module       = **parsed;
+    const auto& layout = module.getDataLayout();
+    int equal = 0, unequal = 0, loads = 0, stores = 0;
+    for (const auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0
+            && function.getName().find("osl_init_group_") != 0)
+            continue;
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                    if (!cmp->getOperand(0)->getType()->isIntegerTy(64))
+                        continue;
+                    OIIO_CHECK_ASSERT(
+                        cmp->getOperand(1)->getType()->isIntegerTy(64));
+                    equal += cmp->getPredicate() == llvm::CmpInst::ICMP_EQ;
+                    unequal += cmp->getPredicate() == llvm::CmpInst::ICMP_NE;
+                }
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst))
+                    loads += load->getType()->isIntegerTy(64);
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+                    stores += store->getValueOperand()->getType()->isIntegerTy(
+                        64);
+            }
+    }
+    if (comparisons) {
+        OIIO_CHECK_ASSERT(equal > 0 && unequal > 0);
+        OIIO_CHECK_ASSERT(loads > 0 && stores > 0);
+    }
+    if (arraylen || mixed) {
+        auto* storage = llvm::StructType::getTypeByName(context, "Groupdata");
+        OIIO_CHECK_ASSERT(storage);
+        if (!storage)
+            return false;
+        const auto* fields = layout.getStructLayout(storage);
+        bool found_array = false, scalar = false, pair = false, triple = false;
+        bool integers = false, floats = false;
+        for (unsigned i = 0; i < storage->getNumElements(); ++i) {
+            auto* array = llvm::dyn_cast<llvm::ArrayType>(
+                storage->getElementType(i));
+            if (!array)
+                continue;
+            auto* element = array->getElementType();
+            OIIO_CHECK_ASSERT(!element->isPointerTy());
+            integers |= element->isIntegerTy(32);
+            floats |= element->isFloatTy();
+            if (!element->isIntegerTy(64))
+                continue;
+            // Read the emitted field's target layout, not sizeof(ustring).
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(element).getFixedValue(),
+                             8);
+            OIIO_CHECK_EQUAL(layout.getABITypeAlign(element).value(), 8);
+            OIIO_CHECK_EQUAL(fields->getElementOffset(i) % 8, 0);
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(array).getFixedValue(),
+                             8 * array->getNumElements());
+            found_array |= array->getNumElements() == uint64_t(arraylen);
+            scalar |= array->getNumElements() == 1;
+            pair |= array->getNumElements() == 2;
+            triple |= array->getNumElements() == 3;
+            if (mixed)
+                OIIO_CHECK_ASSERT(array->getNumElements() <= 3);
+        }
+        if (arraylen)
+            OIIO_CHECK_ASSERT(found_array);
+        if (mixed)
+            OIIO_CHECK_ASSERT(scalar && pair && triple && integers && floats);
+    }
+    bool found_constants = false;
+    for (const auto& global : module.globals()) {
+        if (global.getName().find("hart_test_group") == llvm::StringRef::npos
+            || !global.hasInitializer())
+            continue;
+        auto* array = llvm::dyn_cast<llvm::ArrayType>(global.getValueType());
+        OIIO_CHECK_ASSERT(array);
+        if (!array)
+            continue;
+        // Shader constants are flattened arrays. In particular, hashes must
+        // not be disguised as pointer elements, including null pointers.
+        OIIO_CHECK_ASSERT(!array->getElementType()->isPointerTy());
+        if (constants.empty() || global.use_empty()
+            || array->getNumElements() != constants.size()
+            || !array->getElementType()->isIntegerTy(64))
+            continue;
+        bool matches = true;
+        for (size_t i = 0; i < constants.size(); ++i) {
+            const auto* value = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+                global.getInitializer()->getAggregateElement(unsigned(i)));
+            matches &= value
+                       && value->getZExtValue()
+                              == ustringhash(constants[i]).hash();
+        }
+        if (!matches)
+            continue;
+        found_constants = true;
+        OIIO_CHECK_ASSERT(global.isConstant());
+        OIIO_CHECK_EQUAL(layout.getTypeAllocSize(array).getFixedValue(),
+                         8 * constants.size());
+        OIIO_CHECK_EQUAL(layout.getABITypeAlign(array).value(), 8);
+    }
+    if (!constants.empty()) {
+        if (!found_constants)
+            print(stderr, "Missing live i64[{}] string constant array\n",
+                  constants.size());
+        OIIO_CHECK_ASSERT(found_constants);
+    }
+    return true;
+}
+
+
+
+bool
+check_string_modules(string_view arch, string_view stdosl)
+{
+    const struct {
+        int osl_optimize;
+        int llvm_optimize;
+        bool local;
+    } variants[] = { { 0, 10, false }, { 2, 10, true }, { 2, 3, true } };
+    auto check   = [&](string_view label, ShadingSystem& ss, ShaderGroup& group,
+                       const Diagnostics& errors, const auto& variant,
+                       bool connected, bool checked) {
+        ss.optimize_group(&group, nullptr);
+        if (errors.errors)
+            print(stderr, "String {} (OSL {}, LLVM {}):\n{}", label,
+                  variant.osl_optimize, variant.llvm_optimize, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(ss.getattribute(&group, "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(&group, "hart_groupdata_alloc", allocated));
+        if (variant.local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, variant.local ? size : 0);
+        check_module(
+            ss, group, arch,
+            checked && variant.osl_optimize == 0
+                ? std::initializer_list<string_view> { "rs_hart_range_error" }
+                : std::initializer_list<string_view> { },
+            variant.llvm_optimize, connected, false, false, connected ? 2 : 0,
+            false, true);
+    };
+    const struct {
+        const char* label;
+        const char* producer;
+        const char* consumer;
+        int arraylen        = 0;
+        bool mixed          = false;
+        bool constant_array = false;
+        bool inspect        = true;
+    } tests[] = {
+        { "locked defaults, literals, copies and helper return",
+          "string copy_text(string text) { return text; } "
+          "shader strings(string label=\"alpha\" [[int lockgeom=1]], "
+          "string empty=\"\", output color Cout=0) { "
+          "string selected=label; if(u>v) selected=\"beta\"; "
+          "string copy=copy_text(selected); "
+          "Cout=color(copy==label,copy!=empty,"
+          "(copy==\"beta\")+2*(copy!=\"alpha\")); }",
+          "" },
+        { "constant arrays and indexed writes",
+          "shader string_arrays(output color Cout=0) { "
+          "string palette[3]={\"\",\"hart-string-alpha\",\"hart-string-beta\"}; "
+          "string copy[3]; copy=palette; int i=int(2*u); "
+          "string selected=palette[i]; "
+          "copy[(i+1)%3]=(u>v)?\"hart-string-beta\":\"\"; "
+          "Cout=color(selected==copy[i],copy[(i+1)%3]!=\"\",arraylength(copy)); }",
+          "", 0, false, true },
+        { "connected scalar",
+          "shader string_producer(output string value=\"\") { "
+          "value=u>v?\"alpha\":\"beta\"; }",
+          "shader string_consumer(string value=\"unconnected\", "
+          "output color Cout=0) { string copy=value; "
+          "Cout=color(copy==\"alpha\",copy!=\"beta\",copy==value); }",
+          1 },
+        { "connected resolved string array",
+          "shader string_array_producer("
+          "output string value[4]={\"\",\"\",\"\",\"\"}) { "
+          "value[0]=\"alpha\"; value[1]=\"beta\"; "
+          "value[2]=u>v?\"alpha\":\"\"; value[3]=u<v?\"\":\"beta\"; }",
+          "shader string_array_consumer(string value[]={\"unconnected\"}, "
+          "output color Cout=0) { string copy[4]; copy=value; "
+          "int i=int(3*u); copy[(i+1)%4]=value[i]; "
+          "Cout=color(copy[i]==\"alpha\",copy[(i+1)%4]!=\"\",arraylength(value)); }",
+          4 },
+        { "mixed nested struct arrays and whole-struct connection",
+          // Distinct names avoid the process-wide struct registry's earlier
+          // numeric fixtures. Initialize mixed leaf fields in the body, not
+          // through the compiler's row/field-confused nested initializers.
+          "struct HartStringLeaf { int flag; string label; float weight; }; "
+          "struct HartStringPacket { string tag; HartStringLeaf leaves[2]; "
+          "string names[3]; color tint; }; "
+          "shader string_packet_producer(output HartStringPacket value="
+          "{\"\",{},{\"\",\"\",\"\"},0}) { "
+          "value.tag=u>v?\"alpha\":\"beta\"; "
+          "value.leaves[0].flag=int(u>v); value.leaves[1].flag=int(u<v); "
+          "value.leaves[0].label=value.tag; value.leaves[1].label=\"\"; "
+          "value.leaves[0].weight=u*v; value.leaves[1].weight=u+v; "
+          "value.names[0]=\"alpha\"; value.names[1]=value.tag; "
+          "value.names[2]=\"beta\"; "
+          "value.tint=color(u,v,u*v); }",
+          "struct HartStringLeaf { int flag; string label; float weight; }; "
+          "struct HartStringPacket { string tag; HartStringLeaf leaves[2]; "
+          "string names[3]; color tint; }; "
+          "shader string_packet_consumer(HartStringPacket value="
+          "{\"\",{},{\"\",\"\",\"\"},0},output color Cout=0) { "
+          "HartStringPacket copy=value; HartStringLeaf leaves[2]; "
+          "leaves=copy.leaves; "
+          "int i=int(u>v); HartStringLeaf selected=leaves[i]; "
+          "string names[3]; names=copy.names; names[(i+1)%3]=selected.label; "
+          "float q=selected.weight+copy.tint[0]+copy.tint[1]+copy.tint[2]; "
+          "Cout=color((selected.label==copy.tag)+2*(names[i]!=\"\")"
+          "+selected.flag,q,Dx(q)+Dy(q)); }",
+          2, true },
+        { "unused string defaults and helper result",
+          "string hidden() { return \"no\"; } "
+          "struct HartUnusedStringHolder { string label; float a[2]; }; "
+          "shader unused_strings(string unused=\"unused\", "
+          "string labels[2]={\"alpha\",\"beta\"}, "
+          "HartUnusedStringHolder h={\"bad\",{0,0}}, "
+          "output color Cout=0) { string s=hidden(); Cout=color(u,v,1); }",
+          "", 0, false, false, false },
+    };
+    const ustring palette[] = { ustring(""), ustring("hart-string-alpha"),
+                                ustring("hart-string-beta") };
+    for (const auto& test : tests) {
+        OSLCompiler compiler, consumer_compiler;
+        std::string producer, consumer;
+        const bool connected = test.consumer[0] != '\0';
+        if (!compiler.compile_buffer(test.producer, producer, { }, stdosl)
+            || (connected
+                && !consumer_compiler.compile_buffer(test.consumer, consumer,
+                                                     { }, stdosl)))
+            return false;
+        if (test.constant_array)
+            check_rejection(arch, producer, "HARTArrayBounds");
+        for (const auto& variant : variants) {
+            HartServices renderer(false, false, false, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", variant.osl_optimize);
+            ss.attribute("llvm_optimize", variant.llvm_optimize);
+            ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+            auto group = connected
+                             ? make_connected_group(ss, producer, consumer)
+                             : make_group(ss, producer);
+            check(test.label, ss, *group, errors, variant, connected,
+                  test.constant_array || test.arraylen > 1);
+            if (variant.llvm_optimize == 10 && test.inspect)
+                OIIO_CHECK_ASSERT(check_string_storage_ir(
+                    ss, *group, variant.osl_optimize == 0, test.arraylen,
+                    test.mixed,
+                    test.constant_array && variant.osl_optimize == 2
+                        ? cspan<ustring>(palette)
+                        : cspan<ustring> { }));
+        }
+    }
+    OSLCompiler override_compiler;
+    std::string override_bytecode;
+    if (!override_compiler.compile_buffer(
+            "shader string_overrides(string label=\"default\" [[int lockgeom=1]], "
+            "string labels[]={\"default\",\"other\"}, output color Cout=0) { "
+            "int n=arraylength(labels); string selected=labels[int(u*(n-1))]; "
+            "Cout=color(selected==label,selected!=\"\",n); }",
+            override_bytecode, { }, stdosl))
+        return false;
+    const ustring overrides[] = { ustring("host-alpha"), ustring(""),
+                                  ustring("host-beta"), ustring("host-alpha"),
+                                  ustring("host-gamma") };
+    for (int length : { 3, 5 })
+        for (const auto& variant : variants) {
+            HartServices renderer(false, false, false, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", variant.osl_optimize);
+            ss.attribute("llvm_optimize", variant.llvm_optimize);
+            ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_test", override_bytecode));
+            auto group = ss.ShaderGroupBegin("hart_test_group");
+            const ustring label(length == 3 ? "" : "host-alpha");
+            OIIO_CHECK_ASSERT(
+                ss.Parameter("label", TypeString, &label, ParamHints::none));
+            OIIO_CHECK_ASSERT(ss.Parameter("labels",
+                                           TypeDesc(TypeDesc::STRING, length),
+                                           overrides, ParamHints::none));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("Cout", TypeColor, false,
+                                         SymArena::Outputs, 0,
+                                         3 * sizeof(float));
+            ss.add_symlocs(group.get(), { &output, 1 });
+            check("locked host overrides", ss, *group, errors, variant, false,
+                  true);
+            if (variant.llvm_optimize == 10)
+                OIIO_CHECK_ASSERT(check_string_storage_ir(
+                    ss, *group, variant.osl_optimize == 0, 0, false,
+                    variant.osl_optimize == 2
+                        ? cspan<ustring>(overrides, length)
+                        : cspan<ustring> { }));
+        }
+    const struct {
+        const char* source;
+        const char* error;
+    } rejected[] = {
+        { "shader bad(string s=\"alpha\" [[int interpolated=1]], "
+          "output color Cout=0) { Cout=color(s==\"alpha\"); }",
+          "interpolated or interactive" },
+        { "shader bad(string s=\"alpha\" [[int interactive=1]], "
+          "output color Cout=0) { Cout=color(s==\"alpha\"); }",
+          "interpolated or interactive" },
+        { "shader bad(string s[2]={\"alpha\",\"beta\"} [[int interpolated=1]], "
+          "output color Cout=0) { Cout=color(s[int(u)]==\"alpha\"); }",
+          "interpolated or interactive" },
+        { "shader bad(string s[2]={\"alpha\",\"beta\"} [[int interactive=1]], "
+          "output color Cout=0) { Cout=color(s[int(u)]==\"alpha\"); }",
+          "interpolated or interactive" },
+        { "shader bad [[int range_checking=0]] (output color Cout=0) { "
+          "string s[2]={\"alpha\",\"beta\"}; Cout=color(s[int(u)]==\"alpha\"); }",
+          "range_checking" },
+        { "shader bad(output color Cout=0) { "
+          "Cout=color(strlen(\"alpha\")); }",
+          "unsupported operation 'strlen'" },
+        { "shader bad(string s=\"alpha\", output color Cout=0) { "
+          "Cout=color(strlen(s)); }",
+          "unsupported operation 'strlen'" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(test.source, bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    const struct {
+        const char* operation;
+        unsigned operand;
+    } malformed[]
+        = { { "eq", 3 }, { "neq", 3 }, { "assign", 1 }, { "assign", 2 } };
+    for (const auto& test : malformed) {
+        const bool comparison = string_view(test.operation) != "assign";
+        const string_view source
+            = comparison
+                  ? "shader bad(string left=\"alpha\", string right=\"beta\", "
+                    "int number=7, output color Cout=0) { "
+                    "int result=(left==right)+(left!=right); "
+                    "Cout=color(result,number,u); }"
+                  : "shader bad(string text=\"alpha\", int number=7, "
+                    "output string value=\"\", output color Cout=0) { "
+                    "value=text; Cout=color(number,u,v); }";
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        const auto op    = bytecode.find(fmtformat("\t{}\t", test.operation));
+        const auto end   = bytecode.find('\n', op);
+        const auto hints = bytecode.find('%', op);
+        OIIO_CHECK_ASSERT(op != std::string::npos && end != std::string::npos
+                          && hints < end);
+        if (op == std::string::npos || end == std::string::npos || hints >= end)
+            return false;
+        std::vector<std::string> words;
+        OIIO::Strutil::split(string_view(bytecode).substr(op, hints - op),
+                             words, "", -1);
+        OIIO_CHECK_EQUAL(words.size(), comparison ? 4 : 3);
+        if (words.size() != (comparison ? 4 : 3))
+            return false;
+        if (!comparison) {
+            OIIO_CHECK_EQUAL(words[1], "value");
+            OIIO_CHECK_EQUAL(words[2], "text");
+            if (words[1] != "value" || words[2] != "text")
+                return false;
+        }
+        words[test.operand] = "number";
+        bytecode.replace(op, hints - op,
+                         fmtformat("\t{}\t", OIIO::Strutil::join(words, "\t")));
+        HartServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors,
+                             fmtformat("unsupported string operands for '{}'",
+                                       test.operation));
     }
     return true;
 }
@@ -4299,11 +4742,11 @@ check_spline_modules(string_view arch, string_view stdosl)
           "spline basis" },
         { "shader bad(string basis=\"linear\", output color Cout=0) { "
           "float k[4]={0,1,2,3}; Cout=color(spline(basis,u,k)); }",
-          "unsupported type" },
+          "spline basis must be a literal string" },
         { "shader bad(output color Cout=0) { float k[4]={0,1,2,3}; "
           "string basis=u>v?\"linear\":\"bezier\"; "
           "Cout=color(splineinverse(basis,u,k)); }",
-          "unsupported type" },
+          "spline basis must be a literal string" },
         { "shader bad [[int range_checking=0]] (output color Cout=0) { "
           "float k[4]={0,1,2,3}; Cout=color(spline(\"linear\",u,3,k)); }",
           "spline knot" },
@@ -4609,10 +5052,10 @@ check_color_modules(string_view arch, string_view stdosl)
           "unsupported color space" },
         { "shader bad(string space=\"rgb\", output color Cout=0) { "
           "Cout=transformc(space,\"XYZ\",color(u)); }",
-          "unsupported type" },
+          "color spaces must be literal strings" },
         { "shader bad(output color Cout=0) { "
           "string space=u>v?\"rgb\":\"XYZ\"; Cout=color(space,u,v,0.5); }",
-          "unsupported type" },
+          "color spaces must be literal strings" },
     };
     for (const auto& test : rejected) {
         OSLCompiler compiler;
@@ -4990,6 +5433,7 @@ main(int argc, char* argv[])
         check_rejected_group(ss, *group, errors, "default entry point");
     }
     if (!check_aggregate_modules(arch, argv[2], oso[11])
+        || !check_string_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])
         || !check_topology_modules(arch, argv[2])

@@ -49,6 +49,10 @@ namespace pvt {  // OSL::pvt
 inline bool
 equal_consts(const Symbol& A, const Symbol& B)
 {
+    // Null-backed and interned empty strings have different host pointers,
+    // but scalar execution compares their hashes.
+    if (A.typespec().is_string() && B.typespec().is_string())
+        return A.get_string().hash() == B.get_string().hash();
     return (
         &A == &B
         || (equivalent(A.typespec(), B.typespec())

@@ -648,10 +648,11 @@ value substantially even when the coordinates are numerically close.
 
 The literal selectors `"noise"` and `"snoise"` also select unsigned and signed
 Perlin, respectively, including periodic calls. Selectors resolve to existing
-device shadeops. String parameters, computed selectors, options on non-Gabor
-noise, and periodic simplex remain unsupported. Original-operation validation
-rejects them before specialization, even for constant inputs or unused layers;
-general string support is not enabled.
+device shadeops. String-valued parameters used as selectors, computed selectors,
+options on non-Gabor noise, and periodic simplex remain unsupported.
+Original-operation validation rejects them before specialization, even for
+constant inputs or unused layers;
+string storage does not by itself enable dynamic noise selection.
 
 Gabor accepts five literal option names with numeric, possibly varying values:
 `"anisotropic"` (int, default 0), `"do_filter"` (int, default 1),
@@ -710,7 +711,8 @@ globals are supported. Other instructions are rejected before
 runtime optimization, even if optimization could eliminate them.
 Inlined numeric function bodies, including standard-library wrappers such
 as `clamp`, undergo the same checks. Their internal function-name markers
-do not enable general string support. Early function returns remain unsupported.
+do not enable string allocation or character operations. Early function returns
+remain unsupported.
 Math domain boundaries and derivatives follow existing OSL semantics,
 including zero derivatives for `floor`, `ceil`, and `step`; this does not
 automatically filter discontinuities.
@@ -809,8 +811,8 @@ shader code or filenames.
 `Dz`, unlisted noise forms, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `Ps` and `dtime`, unlisted coordinate spaces and transforms,
-general strings, interpolated or interactive parameters, other
-renderer-service callbacks, batched execution, instrumentation,
+string allocation and character operations, interpolated or interactive
+parameters, other renderer-service callbacks, batched execution, instrumentation,
 explicit entry layers, multiple final outputs, and unlisted frontend
 options are unsupported.
 They fail explicitly; there is **no CPU fallback**.
@@ -819,8 +821,8 @@ mode and cannot override generated callables.
 The selected architecture is fixed for the lifetime of a `ShadingSystem`;
 its `hart_arch` attribute may be set again only to the same architecture.
 
-Numeric arrays and flattened structs support initialization, copying, length
-queries, runtime indexing, nested members and whole-aggregate connections.
+Numeric and string arrays and flattened structs support initialization, copying,
+length queries, runtime indexing, nested members and whole-aggregate connections.
 Unsized input arrays use the existing group-resolved parameter length; an empty
 initializer retains OSL's one-zero-element default. Unresolved or zero-length
 storage cannot be indexed. Differentiable members retain
@@ -839,6 +841,25 @@ fallback. The renderer must check the error before publishing output.
 `hart-aggregate-runtime` compares exact values and derivatives with CPU and
 independent references in split, fused, fused-local and unoptimized modes,
 and distinguishes pre-launch rejection from device bounds errors.
+
+String literals, ordinary locked parameters, copies, scalar equality/inequality
+and layer connections use 64-bit `ustringhash` values, including arrays and nested
+struct members. String constant arrays contain integer hashes, not fabricated
+pointers. No character data or host addresses are needed on the device.
+Empty strings compare equally whether supplied as a null-backed empty parameter
+or an interned literal; scalar constant folding now uses the same hash comparison
+as execution. String arrays use the existing bounds checks and group-resolved
+lengths. Final image output remains a single numeric `Cout`.
+
+`hart-string-values-runtime` checks exact CPU/GPU/independent results for
+parameters, array copies, nested structs and connected strings in all four
+storage/optimization modes, plus explicit bounds failures. `string-empty-compare`
+separately covers empty equality and inequality in ordinary CPU builds.
+The batched backend retains character-pointer comparisons and is excluded from
+this empty-representation regression pending separate qualification.
+Character operations, allocation, string hashing and dynamic service selectors
+remain explicit rejections in this storage-only subset; no placeholder
+`strlen`/`getchar` results are used.
 
 `hart-generated-cli` checks the supported CLI boundary without GPU execution.
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,

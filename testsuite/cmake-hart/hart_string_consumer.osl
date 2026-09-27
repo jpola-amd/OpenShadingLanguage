@@ -1,0 +1,11 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_string_consumer(string value = "unconnected",
+                           string words[3] = {"missing", "missing", "missing"},
+                           output color Cout = 0)
+{
+    Cout = color(value == "red", (words[0] == value) + 2*(words[1] == "literal"),
+                 words[2] == "");
+}

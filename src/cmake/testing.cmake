@@ -476,7 +476,7 @@ macro (osl_add_all_tests)
                 splineinverse-knots-ascend-reg splineinverse-knots-descend-reg
                 spline-boundarybug spline-derivbug
                 split-reg
-                string string-reg
+                string string-empty-compare string-reg
                 struct struct-array struct-array-mixture
                 struct-err struct-init-copy
                 struct-isomorphic-overload struct-layers

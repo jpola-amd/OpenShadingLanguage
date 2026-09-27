@@ -934,8 +934,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                             && parameter.type == TypeColor
                             && !parameter.isclosure;
             }
-            if (parameter.isclosure
-                || parameter.type.basetype == TypeDesc::STRING) {
+            if (parameter.isclosure) {
                 err.errorfmt(
                     "Generated HART mode does not support parameter '{}' "
                     "of type '{}'",

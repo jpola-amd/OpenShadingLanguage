@@ -27,6 +27,8 @@ suites.add_argument("--control-flow", action="store_true",
                     help="Run integer operators, loop exits and function/shader returns")
 suites.add_argument("--aggregates", action="store_true",
                     help="Run array/struct layout, derivatives and bounds cases")
+suites.add_argument("--strings", action="store_true",
+                    help="Run hashed string parameters, copies, comparisons and connections")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
@@ -77,7 +79,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                     help="Benchmark host-synchronized launch latency for split, "
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
-if (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
+if (args.loops or args.control_flow or args.aggregates or args.strings or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
@@ -1580,7 +1582,8 @@ def check_space_suite():
         shader_args = ([name] if case else
                        ["--shader", name, "unused", "--shader", "hart_first", "surface"])
         run(["--hart", "-v"] + shader_args,
-            "'string'" if case == 2 else "HART: unsupported coordinate space")
+            "coordinate spaces must be literal strings" if case == 2
+            else "HART: unsupported coordinate space")
 
 
 def geometry_globals_reference():
@@ -2421,8 +2424,74 @@ def check_aggregate_suite():
                        "-o", "Cout", str(rejected)] + shaders,
                     "index out of range", error_after_launch=True)
                 assert not rejected.exists()
-        run(["--hart", "-v"] + mode + flags + ["hart_aggregate_bad"],
-            "string")
+        check_image_render(["hart_aggregate_bad"], flags, mode, 9, 5,
+                           reference(9, 5, lambda u, v: (u, v, 0)))
+
+
+def check_string_suite():
+    configurations = [
+        ("-O0", "10", []), ("-O2", "3", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"])]
+    default_names = ["red", "green", "blue", "", "red"]
+    cases = [("alpha", default_names), ("red", default_names), ("", default_names),
+             ("ALPHA", [""]),
+             ("a-long-distinct-string", ["red", "Red", "", "green", "blue",
+                                       "alpha", "ALPHA", "red", "a-long-distinct-string"])]
+    for osl_opt, llvm_opt, mode in configurations:
+        flags = [osl_opt, "--llvm_opt", llvm_opt]
+        print("Checking HART string values", flags, mode, flush=True)
+        for text, names in cases:
+            arguments = ["--param:type=string", "text", text,
+                         f"--param:type=string[{len(names)}]", "names", ",".join(names)]
+
+            def expected(u, v):
+                i = (int(8*u+.5) + 9*int(4*v+.5)) % len(names)
+                original = names[i]
+                selected = text if v > .5 else original
+                return ((original == "red") + 2*(selected == text)
+                        + 4*(selected != "red") + 8*(original == "")
+                        + 16*(original != ""), 18, 31)
+
+            check_image_render(arguments + ["hart_string_values"], flags, mode,
+                               9, 5, reference(9, 5, expected))
+        for text in ("alpha", ""):
+            shaders = ["--param:type=string", "text", text,
+                       "--shader", "hart_string_source", "producer",
+                       "--shader", "hart_string_consumer", "consumer",
+                       "--connect", "producer", "value", "consumer", "value",
+                       "--connect", "producer", "words", "consumer", "words"]
+            expected = reference(9, 5, lambda u, v:
+                                 ((text if u > .5 else "red") == "red",
+                                  3, ("" if v > .5 else text) == ""))
+            check_image_render(shaders, flags, mode, 9, 5, expected)
+
+    source = root / "string_bounds.osl"
+    source.write_text(
+        'shader string_bounds(int write=0,int offset=0,output color Cout=0){'
+        'string a[3]={"red","green","blue"};int i=int(2*u);'
+        'if(write){a[i+offset]="changed";Cout=color(a[i]=="changed");}'
+        'else Cout=color(a[i+offset]=="red");}', encoding="ascii")
+    compile_fixture(source)
+    for osl_opt, llvm_opt, mode in (configurations[0], configurations[3]):
+        for write in (0, 1):
+            for offset in (-1, 3):
+                rejected = root / "string-rejected.pfm"
+                run(["--hart", "--hart-no-cache", "-v", osl_opt, "--llvm_opt",
+                     llvm_opt] + mode + ["-g", "9", "5", "--param", "write",
+                     str(write), "--param", "offset", str(offset), "-o", "Cout",
+                     str(rejected), "string_bounds"], "index out of range",
+                    error_after_launch=True)
+                assert not rejected.exists()
+
+    for expression, operation in (('strlen(s)', "strlen"), ('getchar(s,0)', "getchar"),
+                                   ('hash(s)', "hash"), ('regex_match(s,"a")', "regex_match")):
+        source = root / "string_operation.osl"
+        source.write_text(
+            f'shader string_operation(string s="alpha",output color Cout=0){{'
+            f'if(u<0)Cout=color({expression});}}', encoding="ascii")
+        compile_fixture(source)
+        run(["--hart", "-v", "string_operation"], f"unsupported operation '{operation}'")
 
 
 def check_spline_suite():
@@ -3499,6 +3568,9 @@ try:
     if args.aggregates:
         check_aggregate_suite()
 
+    if args.strings:
+        check_string_suite()
+
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
                                     producer="hart_deriv_producer")
@@ -3669,7 +3741,7 @@ try:
             check_noise_suite()
         else:
             for shader, error in (
-                ("hart_noise_dynamic", "unsupported type 'string'"),
+                ("hart_noise_dynamic", "noise selectors must be literal strings"),
                 ("hart_noise_unknown", "unsupported noise type 'unknown'"),
                 ("hart_noise_empty", "unsupported noise type ''"),
             ):
@@ -3733,7 +3805,7 @@ try:
     if args.fused_benchmark:
         check_fused_benchmark()
 
-    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
+    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
@@ -3746,7 +3818,7 @@ try:
             ("hart_missing_output", "RGB color"),
             ("hart_extra_output", "RGB color"),
             ("hart_closure", "does not support parameter"),
-            ("hart_string", "does not support parameter"),
+            ("hart_string", "unsupported operation 'strlen'"),
             ("hart_printf", "HART"),
             ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),
             ("hart_userdata", "HART"),
@@ -3840,6 +3912,8 @@ elif args.splines:
     suite = "splines"
 elif args.numeric_math:
     suite = "numeric math"
+elif args.strings:
+    suite = "string values"
 elif args.aggregates:
     suite = "aggregates"
 elif args.control_flow:

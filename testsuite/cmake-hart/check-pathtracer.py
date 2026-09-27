@@ -71,7 +71,10 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
             int i = u > v;
             Ci = copy[i] + copy[1-i];
         }""",
-        "path_producer": """shader path_producer(output color weight = 0) {
+        "path_producer": """shader path_producer(output color weight = 0,
+                                                output string label = "") {
+            string labels[2] = {"warm", "cool"};
+            label = labels[int(u>.5)];
             float knots[4] = {0, 0.5, 1, 2};
             weight = color(0.2 + 0.1*u, 0.3 + 0.1*v, 0.4)
                    * texture("path_texture.pfm", u, v, "wrap", "clamp",
@@ -83,8 +86,9 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
             weight *= 0.85+0.15*noise("gabor",point(2*u,2*v,.25+u+v),
                                      "anisotropic",1,"direction",vector(1,.5,.25));
         }""",
-        "path_connected": """shader path_connected(color weight = 0) {
-            Ci = weight * emission();
+        "path_connected": """shader path_connected(color weight = 0,
+                                                    string label = "missing") {
+            Ci = weight * (label=="warm" ? .8 : label=="cool" ? 1.2 : 0) * emission();
         }""",
         "path_bad": """shader path_bad() { Ci = background(); }""",
         "path_spline_bad": """shader path_spline_bad() {
@@ -111,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
       <ShaderGroup>color tint 0.6 0.1 0.2; int globals 1; shader path_emit m;</ShaderGroup>
       <Quad corner="-2,-1.4,0" edge_x="1.8,0,0" edge_y="0,2.8,0"/>
       <ShaderGroup>shader path_producer p; shader path_connected c;
-        connect p.weight c.weight;</ShaderGroup>
+        connect p.weight c.weight; connect p.label c.label;</ShaderGroup>
       <Quad corner="0.2,-1.4,0" edge_x="1.8,0,0" edge_y="0,2.8,0"/>
       </World>"""
     offset_camera = camera.replace('eye="0,0,4"', 'eye="0.13,0.07,4"')

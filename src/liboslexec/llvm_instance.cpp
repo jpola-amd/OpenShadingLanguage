@@ -738,12 +738,15 @@ BackendLLVM::llvm_create_constant(const Symbol& sym)
                 const_element = ll.constant(sym.get_int(linear_index));
             }
             if (sym.typespec().is_string_based()) {
-                // TODO:  right now stored as char *, but change to int64 when we can
-                const_element = reinterpret_cast<llvm::Constant*>(
-                    ll.constant_ptr(
-                        OSL::bitcast<char*>(
-                            ustring(sym.get_string(linear_index)).hash()),
-                        ll.type_char_ptr()));
+                const uint64_t hash = sym.get_string(linear_index).hash();
+                if (use_hart()) {
+                    const_element = ll.constant64(hash);
+                } else {
+                    // Legacy CPU/CUDA constant storage uses pointer-shaped hashes.
+                    const_element = reinterpret_cast<llvm::Constant*>(
+                        ll.constant_ptr(OSL::bitcast<char*>(hash),
+                                        ll.type_char_ptr()));
+                }
             }
             OSL_ASSERT(const_element && "unhandled type");
             elements.push_back(const_element);

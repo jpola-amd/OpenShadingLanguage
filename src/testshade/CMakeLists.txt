@@ -266,6 +266,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --aggregates)
             set_tests_properties (hart-aggregate-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-string-values-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --strings)
+            set_tests_properties (hart-string-values-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-derivatives-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"

@@ -392,6 +392,7 @@ ShaderInstance::validate_hart() const
         }
         if ((type.is_closure_based() && !closures)
             || (!type.is_float_based() && !type.is_int_based()
+                && !type.is_string_based()
                 && !(closures && type.is_closure_based()))) {
             shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
                                   "in shader '{}'",
@@ -399,6 +400,39 @@ ShaderInstance::validate_hart() const
             return false;
         }
         return true;
+    };
+    auto validate_string_operands = [&](const Opcode& op) {
+        auto type = [&](int arg) -> const TypeSpec& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
+                .typespec();
+        };
+        const ustring name = op.opname();
+        bool valid         = name == ustring("useparam");
+        if (op.nargs() == 2
+            && (name == ustring("assign") || name == ustring("arraycopy"))) {
+            valid = type(0).is_string_based() && type(1).is_string_based()
+                    && type(0).is_array() == type(1).is_array()
+                    && (name != ustring("arraycopy") || type(0).is_array());
+        } else if (op.nargs() == 2 && name == ustring("arraylength")) {
+            valid = type(0).is_int() && type(1).is_string_based()
+                    && type(1).is_array();
+        } else if (op.nargs() == 3 && name == ustring("aref")) {
+            valid = type(0).is_string() && type(1).is_string_based()
+                    && type(1).is_array() && type(2).is_int();
+        } else if (op.nargs() == 3 && name == ustring("aassign")) {
+            valid = type(0).is_string_based() && type(0).is_array()
+                    && type(1).is_int() && type(2).is_string();
+        } else if (op.nargs() == 3
+                   && (name == ustring("eq") || name == ustring("neq"))) {
+            valid = type(0).is_int() && type(1).is_string()
+                    && type(2).is_string();
+        }
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: unsupported string operands for '{}' in shader '{}' "
+                "({}:{})",
+                name, shadername(), op.sourcefile(), op.sourceline());
+        return valid;
     };
     auto validate_closure = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
@@ -1005,6 +1039,9 @@ ShaderInstance::validate_hart() const
                 continue;
             }
             if (!validate_type(sym))
+                return false;
+            if (sym.typespec().is_string_based()
+                && !validate_string_operands(op))
                 return false;
             if (sym.symtype() == SymTypeGlobal) {
                 if (closures && sym.name() == ustring("Ci"))
