@@ -20,7 +20,8 @@ enum HartDeviceError : unsigned int {
     HartInvalidRayHit               = 64,
     HartArrayIndexOutOfBounds       = 128,
     HartInvalidSpline               = 256,
-    HartUnsupportedColorTransform   = 512
+    HartUnsupportedColorTransform   = 512,
+    HartInvalidNoiseArguments       = 1024
 };
 
 // Texture IDs are one-based indices into the launch-time descriptor table.

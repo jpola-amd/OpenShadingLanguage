@@ -347,16 +347,20 @@ test_resources()
     OIIO_CHECK_EQUAL(state.count, uint64_t(6));
 
     for (unsigned int bit :
-         { 1u, 2u, 4u, 7u, 8u, 15u, 16u, 128u, 256u, 512u }) {
+         { 1u, 2u, 4u, 7u, 8u, 15u, 16u, 128u, 256u, 512u, 1024u }) {
         const int before_errors = errors.errors;
         if (!hip_ok(hipMemcpy(state.errors, &bit, sizeof(bit),
                               hipMemcpyHostToDevice)))
             return;
         OIIO_CHECK_ASSERT(!store.check_errors());
         OIIO_CHECK_EQUAL(errors.errors, before_errors + 1);
-        if (bit == testshade::HartUnsupportedColorTransform) {
+        if (bit == testshade::HartUnsupportedColorTransform
+            || bit == testshade::HartInvalidNoiseArguments) {
             OIIO_CHECK_ASSERT(
-                errors.last_message.find("unsupported color transform")
+                errors.last_message.find(
+                    bit == testshade::HartUnsupportedColorTransform
+                        ? "unsupported color transform"
+                        : "invalid noise arguments")
                 != std::string::npos);
             OIIO_CHECK_ASSERT(errors.last_message.find("unknown error")
                               == std::string::npos);

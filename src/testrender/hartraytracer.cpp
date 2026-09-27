@@ -407,7 +407,8 @@ HartRaytracer::supports(string_view feature) const
 {
     return feature == "HART" || feature == "HARTClosures"
            || feature == "HARTTextures" || feature == "HARTArrayBounds"
-           || feature == "HARTSplineErrors" || feature == "HARTColorSystem";
+           || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
+           || feature == "HARTNoiseErrors";
 }
 
 

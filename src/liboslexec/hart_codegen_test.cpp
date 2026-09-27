@@ -58,13 +58,15 @@ class HartServices final : public RendererServices {
 public:
     explicit HartServices(bool textures = false, bool transforms = false,
                           bool closures = false, bool arrays = false,
-                          bool splines = false, bool colors = false)
+                          bool splines = false, bool colors = false,
+                          bool noise = false)
         : m_textures(textures)
         , m_transforms(transforms)
         , m_closures(closures)
         , m_arrays(arrays)
         , m_splines(splines)
         , m_colors(colors)
+        , m_noise(noise)
     {
     }
     int supports(string_view feature) const override
@@ -74,7 +76,8 @@ public:
                || (m_closures && feature == "HARTClosures")
                || (m_arrays && feature == "HARTArrayBounds")
                || (m_splines && feature == "HARTSplineErrors")
-               || (m_colors && feature == "HARTColorSystem");
+               || (m_colors && feature == "HARTColorSystem")
+               || (m_noise && feature == "HARTNoiseErrors");
     }
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -101,6 +104,7 @@ private:
     bool m_arrays;
     bool m_splines;
     bool m_colors;
+    bool m_noise;
 };
 
 
@@ -308,6 +312,203 @@ check_wrapper(const llvm::Function* wrapper,
     OIIO_CHECK_EQUAL(calls, targets.size());
     OIIO_CHECK_EQUAL(allocation != nullptr, storage != nullptr);
     OIIO_CHECK_EQUAL(cast != nullptr, storage != nullptr);
+}
+
+
+
+void
+check_noise_abi(llvm::Module& module, int optimize)
+{
+    const struct {
+        const char* name;
+        const char* args;
+    } signatures[] = {
+        { "osl_noise_dfdv", "pp" },
+        { "osl_snoise_dfdv", "pp" },
+        { "osl_pnoise_dfdvv", "ppp" },
+        { "osl_psnoise_dfdvv", "ppp" },
+        { "osl_gabornoise_dfdf", "lpppp" },
+        { "osl_gabornoise_dfdfdf", "lppppp" },
+        { "osl_gabornoise_dfdv", "lpppp" },
+        { "osl_gabornoise_dfdvdf", "lppppp" },
+        { "osl_gabornoise_dvdf", "lpppp" },
+        { "osl_gabornoise_dvdfdf", "lppppp" },
+        { "osl_gabornoise_dvdv", "lpppp" },
+        { "osl_gabornoise_dvdvdf", "lppppp" },
+        { "osl_gaborpnoise_dfdff", "lppfpp" },
+        { "osl_gaborpnoise_dfdfdfff", "lpppffpp" },
+        { "osl_gaborpnoise_dfdvv", "lppppp" },
+        { "osl_gaborpnoise_dfdvdfvf", "lppppfpp" },
+        { "osl_gaborpnoise_dvdff", "lppfpp" },
+        { "osl_gaborpnoise_dvdfdfff", "lpppffpp" },
+        { "osl_gaborpnoise_dvdvv", "lppppp" },
+        { "osl_gaborpnoise_dvdvdfvf", "lppppfpp" },
+        { "osl_init_noise_options", "pp" },
+        { "osl_noiseparams_set_anisotropic", "pi" },
+        { "osl_noiseparams_set_do_filter", "pi" },
+        { "osl_noiseparams_set_direction", "pp" },
+        { "osl_noiseparams_set_bandwidth", "pf" },
+        { "osl_noiseparams_set_impulses", "pf" },
+        { "rs_hart_noise_error", "p" },
+    };
+    const auto& layout       = module.getDataLayout();
+    const auto* init_options = module.getFunction("osl_init_noise_options");
+    std::vector<const llvm::CallBase*> used_resets;
+    int gabor_calls = 0, initializers = 0;
+    for (const auto& signature : signatures) {
+        auto* function = module.getFunction(signature.name);
+        if (!function || function->use_empty())
+            continue;
+        const string_view name(signature.name), args(signature.args);
+        const bool callback = name == "rs_hart_noise_error";
+        const bool gabor    = OIIO::Strutil::starts_with(name, "osl_gabor");
+        bool original_call  = false;
+        if (!callback && optimize == 10)
+            for (auto* user : function->users()) {
+                auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                if (!call || call->getCalledFunction() != function)
+                    continue;
+                const auto caller = call->getFunction()->getName();
+                if (caller.find("osl_layer_group_") != 0
+                    && caller.find("osl_init_group_") != 0)
+                    continue;
+                original_call = true;
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 function->getCallingConv());
+                initializers += name == "osl_init_noise_options";
+                if (!gabor)
+                    continue;
+                ++gabor_calls;
+                OIIO_CHECK_EQUAL(call->arg_size(), args.size());
+                if (call->arg_size() != args.size())
+                    continue;
+                const auto* selector = llvm::dyn_cast<llvm::ConstantInt>(
+                    call->getArgOperand(0));
+                OIIO_CHECK_ASSERT(selector);
+                if (selector)
+                    OIIO_CHECK_EQUAL(selector->getZExtValue(),
+                                     ustringhash("gabor").hash());
+                OIIO_CHECK_EQUAL(
+                    call->getArgOperand(args.size() - 2)->stripPointerCasts(),
+                    call->getFunction()->getArg(0));
+                const auto* options = llvm::dyn_cast<llvm::AllocaInst>(
+                    call->getArgOperand(args.size() - 1)->stripPointerCasts());
+                OIIO_CHECK_ASSERT(options);
+                if (options) {
+                    OIIO_CHECK_EQUAL(options->getAddressSpace(), 5);
+                    OIIO_CHECK_EQUAL(options->getAllocatedType(),
+                                     llvm::StructType::getTypeByName(
+                                         module.getContext(), "NoiseOptions"));
+                    llvm::DominatorTree dominators(*call->getFunction());
+                    const llvm::CallBase* reset = nullptr;
+                    if (init_options)
+                        for (const auto* init_user : init_options->users()) {
+                            const auto* candidate
+                                = llvm::dyn_cast<llvm::CallBase>(init_user);
+                            if (!candidate
+                                || candidate->getCalledFunction()
+                                       != init_options
+                                || candidate->getFunction()
+                                       != call->getFunction()
+                                || candidate->arg_size() != 2
+                                || candidate->getArgOperand(1)
+                                           ->stripPointerCasts()
+                                       != options
+                                || !dominators.dominates(candidate, call))
+                                continue;
+                            if (!reset
+                                || dominators.dominates(reset, candidate))
+                                reset = candidate;
+                        }
+                    if (!reset)
+                        print(stderr,
+                              "Missing dominating NoiseOptions reset "
+                              "for {} in {}\n",
+                              name, caller.str());
+                    OIIO_CHECK_ASSERT(reset);
+                    if (reset) {
+                        OIIO_CHECK_EQUAL(
+                            reset->getArgOperand(0)->stripPointerCasts(),
+                            call->getFunction()->getArg(0));
+                        // Each original call must reset its own options, not
+                        // inherit a preceding call's option setters.
+                        const bool fresh = std::find(used_resets.begin(),
+                                                     used_resets.end(), reset)
+                                           == used_resets.end();
+                        if (!fresh)
+                            print(stderr,
+                                  "Reused NoiseOptions reset for {} "
+                                  "in {}\n",
+                                  name, caller.str());
+                        OIIO_CHECK_ASSERT(fresh);
+                        used_resets.push_back(reset);
+                    }
+                }
+                // Value-only results and constant/partial coordinates still
+                // need full dual temporaries for Gabor's filtering ABI.
+                const auto suffix = name.substr(name.find_last_of('_') + 1);
+                for (size_t i = 0; i + 1 < suffix.size() && suffix[i] == 'd';
+                     i += 2) {
+                    const auto* allocation = llvm::dyn_cast<llvm::AllocaInst>(
+                        call->getArgOperand(1 + i / 2)->stripPointerCasts());
+                    if (!allocation)
+                        continue;  // ShaderGlobals or Groupdata field.
+                    const auto* count = llvm::dyn_cast<llvm::ConstantInt>(
+                        allocation->getArraySize());
+                    OIIO_CHECK_ASSERT(count);
+                    if (count)
+                        OIIO_CHECK_ASSERT(
+                            layout.getTypeAllocSize(
+                                      allocation->getAllocatedType())
+                                    .getFixedValue()
+                                * count->getZExtValue()
+                            >= uint64_t(suffix[i + 1] == 'f' ? 12 : 36));
+                }
+            }
+        // Only original calls retain the full shadeop ABI after specialization.
+        if (!callback && !original_call)
+            continue;
+        OIIO_CHECK_EQUAL(function->isDeclaration(), callback);
+        OIIO_CHECK_ASSERT(!function->isVarArg());
+        OIIO_CHECK_ASSERT(function->getReturnType()->isVoidTy());
+        OIIO_CHECK_EQUAL(function->arg_size(), args.size());
+        for (const auto& arg : function->args()) {
+            if (arg.getArgNo() >= args.size())
+                continue;
+            const char kind = args[arg.getArgNo()];
+            OIIO_CHECK_ASSERT(
+                kind == 'p'
+                    ? arg.getType()->isPointerTy()
+                          && arg.getType()->getPointerAddressSpace() == 0
+                    : (kind == 'f' ? arg.getType()->isFloatTy()
+                                   : arg.getType()->isIntegerTy(
+                                         kind == 'i' ? 32 : 64)));
+        }
+    }
+    if (!gabor_calls)
+        return;
+    OIIO_CHECK_EQUAL(initializers, gabor_calls);
+    auto* options = llvm::StructType::getTypeByName(module.getContext(),
+                                                    "NoiseOptions");
+    OIIO_CHECK_ASSERT(options && options->getNumElements() == 5);
+    if (!options || options->getNumElements() != 5)
+        return;
+    const uint64_t offsets[] = { 0, 4, 8, 20, 24 };
+    for (unsigned int i = 0; i < std::size(offsets); ++i)
+        OIIO_CHECK_EQUAL(layout.getStructLayout(options)->getElementOffset(i),
+                         offsets[i]);
+    OIIO_CHECK_EQUAL(layout.getTypeAllocSize(options).getFixedValue(), 28);
+    OIIO_CHECK_EQUAL(layout.getABITypeAlign(options).value(), 4);
+    OIIO_CHECK_ASSERT(options->getElementType(0)->isIntegerTy(32)
+                      && options->getElementType(1)->isIntegerTy(32)
+                      && options->getElementType(3)->isFloatTy()
+                      && options->getElementType(4)->isFloatTy());
+    const auto* direction = llvm::dyn_cast<llvm::StructType>(
+        options->getElementType(2));
+    OIIO_CHECK_ASSERT(direction && direction->getNumElements() == 3);
+    if (direction)
+        for (const auto* component : direction->elements())
+            OIIO_CHECK_ASSERT(component->isFloatTy());
 }
 
 
@@ -596,6 +797,7 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
         print(stderr, "{}\n", error);
     OIIO_CHECK_EQUAL(module.getDataLayout().getAllocaAddrSpace(), 5);
     check_color_abi(module, optimize, color_transforms);
+    check_noise_abi(module, optimize);
     if (closures) {
         const auto& layout = module.getDataLayout();
         OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
@@ -2052,14 +2254,15 @@ check_noise_modules(string_view arch, string_view stdosl)
         string_view expression;
         string_view error;
     } rejected[] = {
-        { "noise(\"gabor\",point(0.25))", "unsupported noise type 'gabor'" },
+        { "noise(\"gabor\",point(0.25))", "HARTNoiseErrors" },
         { "noise(\"\",P)", "unsupported noise type ''" },
         { "noise(\"unknown\",P)", "unsupported noise type 'unknown'" },
-        { "noise(\"perlin\",P,\"bandwidth\",1.0)", "unsupported type 'string'" },
+        { "noise(\"perlin\",P,\"bandwidth\",1.0)",
+          "noise options require gabor" },
         { "pnoise(\"simplex\",P,point(2))", "unsupported noise type 'simplex'" },
         { "pnoise(\"usimplex\",P,point(2))",
           "unsupported noise type 'usimplex'" },
-        { "pnoise(\"gabor\",P,point(2))", "unsupported noise type 'gabor'" },
+        { "pnoise(\"gabor\",P,point(2))", "HARTNoiseErrors" },
         { "noise(Ps)", "unsupported shader global 'Ps'" },
     };
     for (const auto& test : rejected) {
@@ -2082,7 +2285,8 @@ check_noise_modules(string_view arch, string_view stdosl)
         if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
             return false;
         check_rejection(arch, bytecode, "unsupported type 'string'");
-        for (string_view name : { "perlin", "uperlin", "cell", "hash" }) {
+        for (string_view name :
+             { "perlin", "uperlin", "cell", "hash", "noise", "snoise" }) {
             OSLCompiler named_compiler;
             const auto named_source = fmtformat(
                 "shader hart_named_noise(output color Cout=0) {{ "
@@ -2097,22 +2301,386 @@ check_noise_modules(string_view arch, string_view stdosl)
                 ShadingSystem ss(&renderer, nullptr, &errors);
                 ss.attribute("hart_arch", arch);
                 ss.attribute("llvm_optimize", optimize);
+                const bool alias = name == "noise" || name == "snoise";
+                if (alias)
+                    ss.attribute("optimize", optimize == 10 ? 0 : 2);
                 auto group = make_group(ss, bytecode);
                 ss.optimize_group(group.get(), nullptr);
                 if (errors.errors)
                     print(stderr, "{}\n", errors.last_error);
                 OIIO_CHECK_EQUAL(errors.errors, 0);
                 const bool periodic = operation == "pnoise";
-                const bool derivs   = name == "perlin" || name == "uperlin";
-                const auto family   = name == "perlin"    ? "snoise"
-                                      : name == "uperlin" ? "noise"
-                                      : name == "cell"    ? "cellnoise"
-                                                          : "hashnoise";
+                const bool derivs   = name == "perlin" || name == "uperlin"
+                                      || alias;
+                const auto family   = name == "perlin" || name == "snoise"
+                                          ? "snoise"
+                                      : name == "uperlin" || name == "noise"
+                                          ? "noise"
+                                      : name == "cell" ? "cellnoise"
+                                                       : "hashnoise";
                 const auto shadeop
                     = fmtformat("osl_{}{}_{}{}", periodic ? "p" : "", family,
                                 derivs ? "dfdv" : "fv", periodic ? "v" : "");
                 check_module(ss, *group, arch, { shadeop }, optimize);
             }
+        }
+    }
+    return true;
+}
+
+
+
+bool
+check_gabor_modules(string_view arch, string_view stdosl)
+{
+    auto check = [&](string_view label, string_view producer,
+                     string_view consumer,
+                     std::initializer_list<string_view> shadeops,
+                     int osl_optimize, int optimize, bool local = false) {
+        HartServices renderer(false, false, false, false, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", local ? 4096 : 0));
+        const bool connected = !consumer.empty();
+        auto group = connected ? make_connected_group(ss, producer, consumer)
+                               : make_group(ss, producer);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Gabor {} (OSL {}, LLVM {}, connected {}): {}\n",
+                  label, osl_optimize, optimize, connected, errors.last_error);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        int size = 0, allocated = -1;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", size));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        if (local)
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, local ? size : 0);
+        const int previous_failures = unit_test_failures;
+        check_module(ss, *group, arch, shadeops, optimize, connected, false,
+                     false, connected ? 2 : 0);
+        if (unit_test_failures != previous_failures)
+            print("Gabor module checks failed: {} (OSL {}, LLVM {}, "
+                  "connected {})\n",
+                  label, osl_optimize, optimize, connected);
+    };
+    const struct {
+        int osl_optimize;
+        int llvm_optimize;
+        bool connected;
+        bool local;
+    } variants[] = {
+        { 0, 10, false, false },
+        { 2, 10, true, true },
+        { 2, 3, true, false },
+    };
+    for (bool periodic : { false, true }) {
+        const string_view operation = periodic ? "pnoise" : "noise";
+        const string_view family    = periodic ? "gaborpnoise" : "gabornoise";
+        const string_view per1      = periodic ? ",2.0" : "";
+        const string_view per2      = periodic ? ",2.0,3.0" : "";
+        const string_view per3      = periodic ? ",point(2,3,4)" : "";
+        const string_view per4      = periodic ? ",point(2,3,4),5.0" : "";
+        for (string_view type : { "float", "color" }) {
+            // Every dimension has a live result. The extra 2D/4D calls force
+            // each partial-coordinate promotion; 4D still ignores time.
+            const auto assignment = fmtformat(
+                "{0} a={1}(\"gabor\",x{2}); "
+                "{0} b={1}(\"gabor\",x,y{3}); "
+                "{0} c={1}(\"gabor\",p{4}); "
+                "{0} d={1}(\"gabor\",p,t{5}); "
+                "{0} e={1}(\"gabor\",x,0.31{3}); "
+                "{0} f={1}(\"gabor\",0.23,y{3}); "
+                "{0} g={1}(\"gabor\",p,0.19{5}); "
+                "{0} h={1}(\"gabor\",point(0.3,0.4,0.5),t{5}); "
+                "value=a+0.7*b+0.6*c+0.5*d+0.4*e+0.3*f+0.2*g+0.1*h; ",
+                type, operation, per1, per2, per3, per4);
+            const string_view coordinates
+                = "float x=1.7*u-0.23, y=2.3*v+0.31, t=0.2+u*v; "
+                  "point p=point(x,y,0.7+u*v); ";
+            const std::string sources[] = {
+                fmtformat("shader gabor_values(output color Cout=0) {{ "
+                          "{} {} value=0; {} Cout=color(value); }}",
+                          coordinates, type, assignment),
+                fmtformat("shader gabor_producer(output {} value=0) {{ "
+                          "{} {} }}",
+                          type, coordinates, assignment),
+                fmtformat("shader gabor_consumer({0} value=0, "
+                          "output color Cout=0) {{ "
+                          "Cout=color(value+Dx(value)+Dy(value))"
+                          "+color(filterwidth({1})); }}",
+                          type, type == "float" ? "value" : "vector(value)"),
+            };
+            std::string bytecode[3];
+            for (size_t i = 0; i < std::size(sources); ++i) {
+                OSLCompiler compiler;
+                if (!compiler.compile_buffer(sources[i], bytecode[i], { },
+                                             stdosl))
+                    return false;
+            }
+            const auto prefix = fmtformat("osl_{}_{}", family,
+                                          type == "float" ? "df" : "dv");
+            const std::string helpers[] = {
+                prefix + "df" + (periodic ? "f" : ""),
+                prefix + "dfdf" + (periodic ? "ff" : ""),
+                prefix + "dv" + (periodic ? "v" : ""),
+                prefix + "dvdf" + (periodic ? "vf" : ""),
+            };
+            for (const auto& variant : variants)
+                check(fmtformat("{} {}", operation, type),
+                      bytecode[variant.connected ? 1 : 0],
+                      variant.connected ? bytecode[2] : "",
+                      { helpers[0], helpers[1], helpers[2], helpers[3],
+                        "osl_init_noise_options", "rs_hart_noise_error" },
+                      variant.osl_optimize, variant.llvm_optimize,
+                      variant.local);
+        }
+        {
+            const auto source
+                = fmtformat("shader gabor_options(output color Cout=0) {{ "
+                            "point p=point(0.3+u,0.4+v,0.5+u*v); "
+                            "vector direction=vector(1+0.1*u,0.2*v,0.3); "
+                            "float a={0}(\"gabor\",p{1},"
+                            "\"anisotropic\",int(u>v),\"do_filter\",int(u<0.75),"
+                            "\"direction\",direction,\"bandwidth\",0.9+0.2*u,"
+                            "\"impulses\",8.0+v); "
+                            "color b={0}(\"gabor\",p,0.3+u{2},"
+                            "\"anisotropic\",2,\"do_filter\",0,"
+                            "\"direction\",color(0.2+v,0.5,0.9),"
+                            "\"bandwidth\",2,\"impulses\",8); "
+                            "float c={0}(\"gabor\",0.37{3}); "
+                            "color d={0}(\"gabor\",point(0.2,0.3,0.4){1},"
+                            "\"direction\",normal(1,0,0),\"do_filter\",1,"
+                            "\"bandwidth\",-1.0,\"impulses\",1000); "
+                            "Cout=color(a+Dx(a)+Dy(a)+c)+b+Dx(b)+Dy(b)+d; }}",
+                            operation, per3, per4, per1);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            for (int optimize : { 10, 3 })
+                check(fmtformat("{} options and reset", operation), bytecode,
+                      "",
+                      { fmtformat("osl_{}_dfdv{}", family, periodic ? "v" : ""),
+                        fmtformat("osl_{}_dvdvdf{}", family,
+                                  periodic ? "vf" : ""),
+                        fmtformat("osl_{}_dfdf{}", family, periodic ? "f" : ""),
+                        fmtformat("osl_{}_dvdv{}", family, periodic ? "v" : ""),
+                        "osl_init_noise_options",
+                        "osl_noiseparams_set_anisotropic",
+                        "osl_noiseparams_set_do_filter",
+                        "osl_noiseparams_set_direction",
+                        "osl_noiseparams_set_bandwidth",
+                        "osl_noiseparams_set_impulses", "rs_hart_noise_error" },
+                      optimize == 10 ? 0 : 2, optimize);
+        }
+        {
+            const auto source
+                = fmtformat("shader gabor_defaults(float x=0.25, float y=0.5, "
+                            "point p=point(0.2,0.3,0.4), float t=0.75, "
+                            "output color Cout=0) {{ "
+                            "float a={0}(\"gabor\",x{1}); "
+                            "float b={0}(\"gabor\",x,y{2}); "
+                            "float c={0}(\"gabor\",p{3}); "
+                            "float d={0}(\"gabor\",p,t{4}); "
+                            "color e={0}(\"gabor\",x{1}); "
+                            "color f={0}(\"gabor\",x,y{2}); "
+                            "color g={0}(\"gabor\",p{3}); "
+                            "color h={0}(\"gabor\",p,t{4}); "
+                            "Cout=color(a+b+c+d)+e+f+g+h; }}",
+                            operation, per1, per2, per3, per4);
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            for (int optimize : { 10, 3 })
+                check(fmtformat("{} constant defaults", operation), bytecode,
+                      "",
+                      { fmtformat("osl_{}_dfdf{}", family, periodic ? "f" : ""),
+                        fmtformat("osl_{}_dfdfdf{}", family,
+                                  periodic ? "ff" : ""),
+                        fmtformat("osl_{}_dfdv{}", family, periodic ? "v" : ""),
+                        fmtformat("osl_{}_dfdvdf{}", family,
+                                  periodic ? "vf" : ""),
+                        fmtformat("osl_{}_dvdf{}", family, periodic ? "f" : ""),
+                        fmtformat("osl_{}_dvdfdf{}", family,
+                                  periodic ? "ff" : ""),
+                        fmtformat("osl_{}_dvdv{}", family, periodic ? "v" : ""),
+                        fmtformat("osl_{}_dvdvdf{}", family,
+                                  periodic ? "vf" : ""),
+                        "osl_init_noise_options", "rs_hart_noise_error" },
+                      2, optimize);
+        }
+    }
+    {
+        // Keep these independent branches together: the isolated periodic
+        // embedding did not reproduce the GPU seed-wrapping mismatch.
+        const string_view source
+            = "shader gabor_compound_periodic(float offset_u=0, "
+              "float offset_v=0, output color Cout=0) { "
+              "float U=u+offset_u, V=v+offset_v; "
+              "point p=point(.317+1.3*U,.127+.7*V,.233+.4*U+.2*V); "
+              "int probe=(int(8*u+.5)+9*int(4*v+.5))%16; float d=0; "
+              "if (probe==9) { "
+              "float a=pnoise(\"gabor\",p[0],p[1],3,4); "
+              "color b=pnoise(\"gabor\",p[0],p[1],3,4); d=a-b[0]; } "
+              "if (probe==10) { "
+              "float a=pnoise(\"gabor\",p,point(3,4,5)); "
+              "color b=pnoise(\"gabor\",p,point(3,4,5)); d=a-b[0]; } "
+              "if (probe==11) { "
+              "float a=pnoise(\"gabor\",p,.61+.3*U-.2*V,point(3,4,5),7); "
+              "color b=pnoise(\"gabor\",p,.61+.3*U-.2*V,point(3,4,5),7); "
+              "d=a-b[0]; } "
+              "if (probe==12) { "
+              "color a=pnoise(\"gabor\",p[0],3), "
+              "b=pnoise(\"gabor\",point(p[0],0,0),point(3,1,1)); "
+              "d=a[0]-b[0]; } "
+              "if (probe==14) { "
+              "color a=pnoise(\"gabor\",p,point(3,4,5)), "
+              "b=pnoise(\"gabor\",p,.61+.3*U-.2*V,point(3,4,5),7); "
+              "d=a[0]-b[0]; } "
+              "if (probe==15) { "
+              "color a=pnoise(\"gabor\",p,point(3,4,5)), "
+              "b=pnoise(\"gabor\",p,point(3,4,5),\"anisotropic\",0,"
+              "\"do_filter\",1,\"direction\",vector(1,0,0),"
+              "\"bandwidth\",1,\"impulses\",16); d=a[0]-b[0]; } "
+              "Cout=color(d,Dx(d),Dy(d)); }";
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        for (int optimize : { 10, 3 })
+            check("compound periodic branches", bytecode, "",
+                  { "osl_gaborpnoise_dfdfdfff", "osl_gaborpnoise_dvdfdfff",
+                    "osl_gaborpnoise_dfdvv", "osl_gaborpnoise_dvdvv",
+                    "osl_gaborpnoise_dfdvdfvf", "osl_gaborpnoise_dvdvdfvf",
+                    "osl_gaborpnoise_dvdff", "osl_init_noise_options",
+                    "osl_noiseparams_set_anisotropic",
+                    "osl_noiseparams_set_do_filter",
+                    "osl_noiseparams_set_direction",
+                    "osl_noiseparams_set_bandwidth",
+                    "osl_noiseparams_set_impulses", "rs_hart_noise_error" },
+                  optimize == 10 ? 0 : 2, optimize, optimize == 3);
+    }
+    const struct {
+        const char* body;
+        const char* error;
+    } rejected[] = {
+        { "Cout=noise(\"gabor\",P,\"unknown\",1);", "unsupported noise option" },
+        { "Cout=pnoise(\"gabor\",P,point(2),\"\",1);",
+          "unsupported noise option" },
+        { "Cout=noise(\"gabor\",P,\"anisotropic\",1.0);",
+          "unsupported noise option" },
+        { "Cout=pnoise(\"gabor\",P,point(2),\"do_filter\",1.0);",
+          "unsupported noise option" },
+        { "Cout=noise(\"gabor\",P,\"direction\",0.5);",
+          "unsupported noise option" },
+        { "Cout=pnoise(\"gabor\",P,point(2),\"bandwidth\",color(1));",
+          "unsupported noise option" },
+        { "Cout=noise(\"gabor\",P,\"impulses\",vector(1));",
+          "unsupported noise option" },
+        { "Cout=noise(\"gabor\",P,\"do_filter\",\"true\");",
+          "unsupported noise option" },
+        { "float a[2]={1,2}; Cout=noise(\"gabor\",P,\"bandwidth\",a);",
+          "unsupported noise option" },
+        { "Cout=noise(\"noise\",P,\"do_filter\",0);",
+          "noise options require gabor" },
+        { "Cout=pnoise(\"snoise\",P,point(2),\"bandwidth\",1.0);",
+          "noise options require gabor" },
+        { "string option=u>v?\"bandwidth\":\"impulses\"; "
+          "Cout=noise(\"gabor\",P,option,1.0);",
+          "unsupported type" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source
+            = fmtformat("shader bad_gabor(output color Cout=0) {{ {} }}",
+                        test.body);
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        HartServices renderer(false, false, false, true, false, false, true);
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    for (string_view operation : { "noise", "pnoise" }) {
+        const string_view period = operation == "pnoise" ? ",point(2)" : "";
+        for (bool selector : { false, true }) {
+            const auto source
+                = fmtformat("shader dynamic_gabor(string token=\"{0}\", "
+                            "output color Cout=0) {{ Cout={1}({2},P{3}{4}); }}",
+                            selector ? "gabor" : "bandwidth", operation,
+                            selector ? "token" : "\"gabor\"", period,
+                            selector ? "" : ",token,1.0");
+            OSLCompiler compiler;
+            std::string bytecode;
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            HartServices renderer(false, false, false, false, false, false,
+                                  true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            auto group = make_group(ss, bytecode);
+            check_rejected_group(ss, *group, errors, "unsupported type");
+        }
+        {
+            Diagnostics errors;
+            OSLCompiler compiler(&errors);
+            std::string bytecode;
+            const auto source
+                = fmtformat("shader odd_gabor(output color Cout=0) {{ "
+                            "Cout={}(\"gabor\",P{},\"bandwidth\"); }}",
+                            operation, period);
+            OIIO_CHECK_ASSERT(
+                !compiler.compile_buffer(source, bytecode, { }, stdosl));
+            OIIO_CHECK_ASSERT(errors.errors > 0);
+        }
+        {
+            // Exercise the preoptimization check too, bypassing the source
+            // compiler's token/value-pair requirement without false built-ins.
+            OSLCompiler compiler;
+            std::string bytecode;
+            const auto source
+                = fmtformat("shader malformed_gabor(output color Cout=0) {{ "
+                            "Cout={}(\"gabor\",P{},\"bandwidth\",0.91); }}",
+                            operation, period);
+            if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+                return false;
+            const auto op    = bytecode.find(fmtformat("\t{}\t", operation));
+            const auto end   = bytecode.find('\n', op);
+            const auto hints = bytecode.find('%', op);
+            OIIO_CHECK_ASSERT(op != std::string::npos
+                              && end != std::string::npos && hints < end);
+            if (op == std::string::npos || end == std::string::npos
+                || hints >= end)
+                return false;
+            std::vector<std::string> words;
+            OIIO::Strutil::split(string_view(bytecode).substr(op, hints - op),
+                                 words, "", -1);
+            OIIO_CHECK_EQUAL(words.size(), operation == "noise" ? 6 : 7);
+            if (words.size() != (operation == "noise" ? 6 : 7))
+                return false;
+            words.pop_back();
+            bytecode.replace(op, end - op,
+                             fmtformat("\t{}", OIIO::Strutil::join(words, " ")));
+            HartServices renderer(false, false, false, false, false, false,
+                                  true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            auto group = make_group(ss, bytecode);
+            check_rejected_group(ss, *group, errors,
+                                 "invalid noise option list");
         }
     }
     return true;
@@ -4431,6 +4999,7 @@ main(int argc, char* argv[])
         || !check_spline_modules(arch, argv[2])
         || !check_color_modules(arch, argv[2])
         || !check_noise_modules(arch, argv[2])
+        || !check_gabor_modules(arch, argv[2])
         || !check_procedural_modules(arch, argv[2])
         || !check_matrix_modules(arch, argv[2])
         || !check_space_modules(arch, argv[2])

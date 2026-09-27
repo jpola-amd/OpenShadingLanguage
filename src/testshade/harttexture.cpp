@@ -441,7 +441,7 @@ HartTextureStore::check_errors()
     if (!errors)
         return true;
     impl.err.errorfmt(
-        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}",
+        "HART device services failed (error bits {}): {}{}{}{}{}{}{}{}{}{}{}{}",
         errors,
         errors & testshade::HartTextureInvalidHandle ? "invalid handle; " : "",
         errors & testshade::HartTextureNonfiniteCoordinates
@@ -468,7 +468,10 @@ HartTextureStore::check_errors()
         errors & testshade::HartUnsupportedColorTransform
             ? "unsupported color transform; "
             : "",
-        errors & ~1023u ? "unknown error; " : "");
+        errors & testshade::HartInvalidNoiseArguments
+            ? "invalid noise arguments; "
+            : "",
+        errors & ~2047u ? "unknown error; " : "");
     return false;
 }
 

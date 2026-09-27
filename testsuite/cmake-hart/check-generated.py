@@ -37,6 +37,8 @@ suites.add_argument("--noise", action="store_true",
                     help="Run numeric Perlin noise runtime cases")
 suites.add_argument("--noise-families", action="store_true",
                     help="Run periodic, cell, hash and named noise runtime cases")
+suites.add_argument("--gabor", action="store_true",
+                    help="Run literal aliases, Gabor options, filtering and input guards")
 suites.add_argument("--math", action="store_true",
                     help="Run scalar and triple math runtime cases")
 suites.add_argument("--numeric-math", action="store_true",
@@ -76,7 +78,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
 if (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-        or args.noise or args.noise_families or args.math or args.numeric_math or args.splines or args.colors
+        or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
         or args.spaces or args.geometry or args.groups
@@ -2666,6 +2668,247 @@ def check_spline_suite():
     assert not rejected.exists()
 
 
+def check_gabor_suite():
+    width, height = 9, 5
+    configurations = [
+        ("-O2", "3", []), ("-O0", "10", []),
+        ("-O2", "3", ["--hart-fused"]),
+        ("-O2", "3", ["--hart-fused", "--hart-local-groupdata", "4096"])]
+    setup = ("float U=u+offset_u,V=v+offset_v;"
+             "point p=point(.317+1.3*U,.127+.7*V,.233+.4*U+.2*V);")
+    params = "float offset_u=0,float offset_v=0"
+    report = "Cout=color(n,Dx(n),Dy(n));"
+
+    def compile_source(name, body, parameters=params):
+        source = root / (name + ".osl")
+        source.write_text(f"shader {name}({parameters},output color Cout=0){{"
+                          + body + "}", encoding="ascii")
+        compile_fixture(source)
+
+    def call(selector, dimension, periodic, options="", point="p"):
+        coords = ((point+"[0]",), (point+"[0]", point+"[1]"),
+                  (point,), (point, ".61+.3*U-.2*V"))[dimension-1]
+        periods = (("3",), ("3", "4"), ("point(3,4,5)",),
+                   ("point(3,4,5)", "7"))[dimension-1] if periodic else ()
+        return (("pnoise" if periodic else "noise") + f'("{selector}",'
+                + ",".join(coords+periods) + options + ")")
+
+    def render(name, configuration=configurations[0], target=None, tolerance=2e-6,
+               arguments=()):
+        osl_opt, llvm_opt, mode = configuration
+        flags = [osl_opt, "--llvm_opt", llvm_opt]
+        shaders = list(arguments) + [name]
+        if target is None:
+            target = noise_cpu_image(flags + shaders, width, height)
+            assert all(math.isfinite(x) for x in target), name
+            assert max(abs(x) for x in target) > 1e-5, name
+        print("Checking Gabor", name, configuration, arguments, flush=True)
+        return check_image_render(shaders, flags, mode, width, height, target,
+                                  tolerance=tolerance)
+
+    aliases = []
+    for periodic in (False, True):
+        for alias, canonical in (("noise", "uperlin"), ("snoise", "perlin")):
+            for dimension in range(1, 5):
+                for triple in (False, True):
+                    kind = "color" if triple else "float"
+                    a, b = call(alias, dimension, periodic), call(canonical, dimension, periodic)
+                    aliases.append(f"{{{kind} a={a},b={b};"
+                                   + ("d=a[0]-b[0];}" if triple else "d=a-b;}"))
+    body = setup + "int probe=(int(8*u+.5)+9*int(4*v+.5))%32;float d=0;"
+    for index, expression in enumerate(aliases):
+        body += f"if(probe=={index})" + expression
+    compile_source("gabor_aliases", body + "Cout=color(d,Dx(d),Dy(d));")
+    for config in (configurations[1], configurations[3]):
+        render("gabor_aliases", config, [0]*(width*height*3), None)
+
+    for periodic in (False, True):
+        for dimension in range(1, 5):
+            for triple in (False, True):
+                for derivatives in (False, True):
+                    name = f"gabor_{int(periodic)}_{dimension}_{int(triple)}_{int(derivatives)}"
+                    kind = "color" if triple else "float"
+                    body = setup + f"{kind} q={call('gabor', dimension, periodic)};"
+                    if derivatives:
+                        body += ("float n=q[int(7*u+3*v)%3];" if triple else "float n=q;")
+                        body += report
+                    else:
+                        body += "Cout=color(q);"
+                    compile_source(name, body)
+                    images = render(name)
+                    if derivatives:
+                        assert max(abs(x) for x in images[1][1::3]) > 1e-5
+                    if not periodic and dimension == 3 and triple and derivatives:
+                        for config in configurations[1:]:
+                            render(name, config)
+
+    defaults = ',"anisotropic",0,"do_filter",1,"direction",vector(1,0,0),"bandwidth",1,"impulses",16'
+    relationships = []
+    for periodic in (False, True):
+        for dimension in range(1, 5):
+            scalar = call("gabor", dimension, periodic)
+            # Every Gabor color uses the scalar seed in channel zero.
+            relationships.append(f"{{float a={scalar};color b={scalar};d=a-b[0];}}")
+        for dimension, embedded in ((1, "point(p[0],0,0)"), (2, "point(p[0],p[1],0)")):
+            first = call("gabor", dimension, periodic)
+            periods = ",point(3,1,1)" if dimension == 1 else ",point(3,4,1)"
+            second = (("pnoise" if periodic else "noise") + f'("gabor",{embedded}'
+                      + (periods if periodic else "") + ")")
+            relationships.append(f"{{color a={first},b={second};d=a[0]-b[0];}}")
+        first, second = call("gabor", 3, periodic), call("gabor", 4, periodic)
+        relationships.append(f"{{color a={first},b={second};d=a[0]-b[0];}}")
+        explicit = call("gabor", 3, periodic, defaults)
+        relationships.append(f"{{color a={first},b={explicit};d=a[0]-b[0];}}")
+    body = setup + "int probe=(int(8*u+.5)+9*int(4*v+.5))%16;float d=0;"
+    for index, expression in enumerate(relationships):
+        body += f"if(probe=={index})" + expression
+    compile_source("gabor_relationships", body + "Cout=color(d,Dx(d),Dy(d));")
+    for config in (configurations[1], configurations[3]):
+        # All 16 cases must be visited, including the narrow embedding slices.
+        render("gabor_relationships", config, [0]*(width*height*3), 2e-6)
+
+    options = ('"anisotropic",anisotropic,"do_filter",filtered,'
+               '"direction",direction,"bandwidth",bandwidth,"impulses",impulses')
+    option_params = (params + ",int anisotropic=0,int filtered=1,"
+                     "vector direction=vector(1,0,0),float bandwidth=1,float impulses=16")
+    compile_source("gabor_options", setup + 'color q=noise("gabor",p,'
+                   + options + ");float n=q[int(7*u+3*v)%3];" + report, option_params)
+    variants = [
+        ("default", []),
+        ("unfiltered", ["--param", "filtered", "0"]),
+        ("directional", ["--param", "anisotropic", "1", "--param", "direction", "4,2,1"]),
+        ("directional-unfiltered", ["--param", "anisotropic", "1", "--param", "direction", "4,2,1",
+                                   "--param", "filtered", "0"]),
+        ("hybrid", ["--param", "anisotropic", "2", "--param", "direction", "2,1,.5"]),
+        ("bandwidth-low", ["--param:type=float", "bandwidth", ".01"]),
+        ("bandwidth-clamp-low", ["--param:type=float", "bandwidth", "-10"]),
+        ("bandwidth-high", ["--param:type=float", "bandwidth", "100"]),
+        ("bandwidth-clamp-high", ["--param:type=float", "bandwidth", "1e38"]),
+        ("impulses-low", ["--param:type=float", "impulses", "1"]),
+        ("impulses-clamp-low", ["--param:type=float", "impulses", "-2"]),
+        ("impulses-high", ["--param:type=float", "impulses", "32"]),
+        ("impulses-clamp-high", ["--param:type=float", "impulses", "1e38"])]
+    outputs = {}
+    # CPU/HIP radius constants and transcendental approximations differ.
+    # High directional frequencies amplify phase rounding (measured 2.31e-5);
+    # bandwidth .01 amplifies exp2 rounding (9.40e-6). Defaults stay at 2e-6.
+    option_tolerances = {"directional": 3e-6, "directional-unfiltered": 3e-5,
+                         "hybrid": 3e-6, "bandwidth-low": 1e-5,
+                         "bandwidth-clamp-low": 1e-5}
+    for label, arguments in variants:
+        outputs[label] = render("gabor_options", arguments=arguments,
+                                tolerance=option_tolerances.get(label, 2e-6))[1]
+    for key in ("bandwidth", "impulses"):
+        for end in ("low", "high"):
+            compare(outputs[key+"-"+end], outputs[key+"-clamp-"+end], 0, 0)
+    assert max(abs(a-b) for a, b in zip(outputs["directional"][::3],
+                                       outputs["directional-unfiltered"][::3])) > .002
+    assert max(abs(a-b) for a, b in zip(outputs["default"], outputs["hybrid"])) > .002
+
+    compile_source("gabor_option_derivatives",
+                   'float n=noise("gabor",point(.317,.127,.233),"bandwidth",1+u);' + report)
+    for image in render("gabor_option_derivatives"):
+        assert image[1::3] == image[2::3] == [0]*(width*height)
+
+    # A small affine patch keeps central differences away from the truncated
+    # kernel's support boundary. Check both steps, not a filtered subset.
+    for periodic in (False, True):
+        name = f"gabor_finite_difference_{int(periodic)}"
+        patch = ("float U=u+offset_u,V=v+offset_v;"
+                 "point p=point(.317+U/1024,.127+V/2048,.233+U/4096+V/2048);")
+        kind = "color" if periodic else "float"
+        expression = call("gabor", 3, periodic, ',"do_filter",0')
+        body = patch + f"{kind} q={expression};"
+        body += "float n=q[int(7*u+3*v)%3];" if periodic else "float n=q;"
+        compile_source(name, body + report)
+        images = render(name)
+        for step in (1/32, 1/64):
+            for axis, extent, channel in (("offset_u", width, 1),
+                                          ("offset_v", height, 2)):
+                plus, minus = [
+                    noise_cpu_image(["-O2", "--llvm_opt", "3",
+                                     "--param:type=float", axis, str(sign*step),
+                                     name], width, height)[::3]
+                    for sign in (1, -1)]
+                gradient = [(p-m)/(2*step) for p, m in zip(plus, minus)]
+                assert max(abs(x) for x in gradient) > 1e-5
+                for image in images:
+                    actual = [x*(extent-1) for x in image[channel::3]]
+                    error = max(abs(a-b) for a, b in zip(actual, gradient))
+                    print("Gabor finite difference", periodic, axis, step,
+                          "maximum error", error, flush=True)
+                    compare(actual, gradient, 5e-6)
+
+    def f32(value):
+        return struct.unpack("f", struct.pack("f", value))[0]
+
+    # Gabor repeats in cells, not world units. Use its HIP constant and
+    # rounded-float radius; CPU's constant differs by one ULP.
+    a = f32(2/3 * f32(2.12893403886245235863))
+    log_truncate = f32(math.log(f32(.02)))
+    radius = f32(f32(math.sqrt(f32(-log_truncate/f32(math.pi))))/a)
+    compile_source("gabor_periodic",
+                   setup + "vector delta=max(vector(1),floor(vector(periods)))"
+                   "*(world_units ? 1 : radius);"
+                   'color a=pnoise("gabor",p,periods,"do_filter",0);'
+                   'color b=pnoise("gabor",p+delta,periods,"do_filter",0);'
+                   "int c=int(7*u+3*v)%3;float n=a[c]-b[c];" + report,
+                   params + f",float radius={radius},int world_units=0,"
+                   "point periods=point(3.8,4.5,5.1)")
+    for periods in ("3.8,4.5,5.1", "0,-2,.7"):
+        # The radius and translated positions each incur float rounding.
+        render("gabor_periodic", target=[0]*(width*height*3), tolerance=2e-5,
+               arguments=["--param", "periods", periods])
+    control = render("gabor_periodic", tolerance=2e-5,
+                     arguments=["--param", "world_units", "1"])
+    assert max(abs(x) for x in control[1][::3]) > .01
+
+    compile_source("gabor_input", setup + "value=p;", params + ",output point value=0")
+    compile_source("gabor_connected", 'float n=noise("gabor",value);' + report,
+                   "point value=0")
+    connected = connected_group("gabor_connected", producer="gabor_input")
+    target = noise_cpu_image(["-O2", "--llvm_opt", "3"] + connected, width, height)
+    check_image_render(connected, ["-O2", "--llvm_opt", "3"], configurations[3][2],
+                       width, height, target, tolerance=2e-6)
+
+    compile_source("gabor_invalid", setup
+                   + 'if(fault==0)p[0]=special;'
+                     'if(fault==1)p=point(u*special,v*special,.233);'
+                     'vector d=fault==2 ? vector(special,0,0) : vector(1,0,0);'
+                     'float b=fault==3 ? special : 1;'
+                     'float i=fault==4 ? special : 16;'
+                     'point period=fault==5 ? point(special) : point(3,4,5);'
+                     'if(fault==5)Cout=pnoise("gabor",p,period,"direction",d,"bandwidth",b,"impulses",i);'
+                     'else Cout=noise("gabor",p,"direction",d,"bandwidth",b,"impulses",i);',
+                   params + ",int fault=0,float special=0")
+    for fault in range(6):
+        special_values = ["nan", "inf", "-inf"]
+        if fault in (0, 1, 2, 5):
+            special_values.append("1e12" if fault == 5 else "1e38")
+        for special in special_values:
+            image = root / "gabor-invalid.pfm"
+            if image.exists():
+                image.unlink()
+            output = run(["--hart", "-v", "--hart-no-cache", "-O0",
+                          "--llvm_opt", "10", "-g", str(width), str(height),
+                          "--param", "fault", str(fault), "--param:type=float",
+                          "special", special, "-o", "Cout", str(image),
+                          "gabor_invalid"],
+                         "invalid noise arguments", error_after_launch=True)
+            assert "error bits 1024" in output and not image.exists(), output
+
+    for index, expression in enumerate((
+            'noise("gabor",p,"unknown",1)',
+            'noise("gabor",p,"bandwidth",vector(1))',
+            'noise("gabor",p,"do_filter",.5)',
+            'noise("perlin",p,"bandwidth",1)',
+            'noise("unknown",p)')):
+        name = f"gabor_rejected_{index}"
+        compile_source(name, setup + f"if(u<0)Cout={expression};")
+        for shaders in ([name], ["--shader", name, "unused", "--shader", "hart_first", "last"]):
+            run(["--hart", "-v"] + shaders, "HART:")
+
+
 def check_color_suite():
     # Double-precision solution from source primaries and its D65 y=.3291.
     to_xyz = ((.412135323427, .357675002654, .180356796374),
@@ -3415,8 +3658,8 @@ try:
 
     if args.noise or args.noise_families:
         for shader, error in (
-            ("hart_noise_named", "unsupported noise type 'gabor'"),
-            ("hart_noise_options", "unsupported type 'string'"),
+            ("hart_noise_named", "unsupported noise type 'unknown'"),
+            ("hart_noise_options", "noise options require gabor"),
             ("hart_noise_periodic", "unsupported noise type 'simplex'"),
         ):
             run(["--hart", "-v", shader], error)
@@ -3434,6 +3677,9 @@ try:
                 run(["--hart", "-v", "--shader", shader, "producer",
                      "--shader", "hart_first", "consumer"], error)
             check_noise_family_suite()
+
+    if args.gabor:
+        check_gabor_suite()
 
     if args.math:
         check_math_suite()
@@ -3488,7 +3734,7 @@ try:
         check_fused_benchmark()
 
     if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.derivatives or args.surface or args.filterwidth
-                         or args.noise or args.noise_families or args.math or args.numeric_math or args.splines or args.colors
+                         or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
                          or args.matrices
@@ -3586,7 +3832,9 @@ try:
 finally:
     shutil.rmtree(root)
 
-if args.colors:
+if args.gabor:
+    suite = "Gabor noise"
+elif args.colors:
     suite = "color systems"
 elif args.splines:
     suite = "splines"

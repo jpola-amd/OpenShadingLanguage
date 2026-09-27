@@ -635,6 +635,7 @@ The procedural noise family also includes:
 | Hash | `hashnoise(...)`, `noise("hash",...)` | `pnoise("hash",...)` |
 | Signed simplex | `noise("simplex",...)` | Unsupported |
 | Unsigned simplex | `noise("usimplex",...)` | Unsupported |
+| Gabor | `noise("gabor",...)` | `pnoise("gabor",...)` |
 
 These forms support 1D-4D coordinates and float/color/vector results.
 Periodic calls append matching period arguments: `(x,px)`, `(x,y,px,py)`,
@@ -645,11 +646,38 @@ including at discontinuities. Hash noise depends on the coordinate bit
 patterns, so rounding differences in upstream arithmetic can change its
 value substantially even when the coordinates are numerically close.
 
-Only the literal selectors listed above are accepted, and they resolve
-directly to existing device shadeops. String parameters, computed selectors,
-noise options, Gabor noise, and periodic simplex remain unsupported.
-Original-operation validation rejects them before specialization, even
-for constant inputs or unused layers; general string support is not enabled.
+The literal selectors `"noise"` and `"snoise"` also select unsigned and signed
+Perlin, respectively, including periodic calls. Selectors resolve to existing
+device shadeops. String parameters, computed selectors, options on non-Gabor
+noise, and periodic simplex remain unsupported. Original-operation validation
+rejects them before specialization, even for constant inputs or unused layers;
+general string support is not enabled.
+
+Gabor accepts five literal option names with numeric, possibly varying values:
+`"anisotropic"` (int, default 0), `"do_filter"` (int, default 1),
+`"direction"` (triple, default `(1,0,0)`), `"bandwidth"` (float/int, default 1),
+and `"impulses"` (float/int, default 16). Anisotropy 0 is isotropic, 1 is
+directional, and other integers select the existing hybrid behavior. Direction
+is not normalized. Finite bandwidth and impulse values clamp to `[.01,100]`
+and `[1,32]`. Filtering uses coordinate derivatives and disables itself for
+tiny or degenerate footprints. Options and periods do not contribute
+derivatives; 4D Gabor ignores time and its period. Scalar noise matches the
+first color channel.
+
+Gabor periods count grid cells: the world-space repeat distance on each axis
+is `radius * max(1,floor(period))`, where radius depends on bandwidth. They are
+not ordinary world-unit periods. HIP wrapping uses a signed-corrected remainder
+so reciprocal approximation cannot change a seed at exact cell multiples.
+The kernel has a hard support cutoff; analytic derivatives describe its smooth
+pieces, not jumps across that cutoff.
+
+Renderers must advertise `HARTNoiseErrors` and implement `rs_hart_noise_error`.
+Both supplied HART renderers do so. Device guards reject nonfinite coordinates,
+coordinate derivatives, options, used periods, derived parameters and active
+filter state, and check wrapped seed cells before signed-int conversion.
+Invalid arguments set error bit 1024 and prevent image publication. Finite
+values outside the bandwidth/impulse clamp intervals remain valid; ignored
+4D time arguments are not validated.
 
 These operations can be composed into a tileable, multi-octave color ramp:
 
@@ -909,7 +937,22 @@ are also checked with CPU central differences away from discontinuities.
 Hash inputs use binary-exact coordinates so the CPU/GPU comparisons test the
 same input bits. Values and simplex derivatives retain `2e-6`; only Perlin
 derivatives use `4e-6`. No production floating-point settings are changed.
-Dynamic/unknown/empty names, options, Gabor, and periodic simplex are rejected.
+Dynamic/unknown/empty names, non-Gabor options, and periodic simplex are rejected.
+
+`hart-gabor-runtime` covers literal Perlin aliases, real scalar/color Gabor in
+1D-4D, values and derivatives, option defaults/reset/clamps, filtering,
+embeddings, ignored time, connected groups and explicit prelaunch/device
+failures. Split, fused and callable-local variants include a compound periodic
+regression at exact seed-cell multiples. Separate unfiltered central differences
+check all points in a small smooth patch at two steps; periodic shifts use the
+bandwidth-derived radius and include a nonzero world-unit-shift control.
+Default CPU/HIP comparisons remain `2e-6`. CPU/GPU radius constants differ by
+one ULP and transcendental approximations differ: measured directional/hybrid
+cases use `3e-6`, the high-frequency unfiltered directional case uses `3e-5`,
+and bandwidth `.01` uses `1e-5`. Exact clamp identities are checked separately.
+These are localized numerical allowances, not changes to production math flags
+or other noise tests. The path tracer also exercises connected Gabor materials
+and verifies that invalid noise prevents output publication.
 
 `hart-texture-resources` checks the HART test renderer's image resource layer
 on a HIP device. It verifies float image uploads, existing and box-generated

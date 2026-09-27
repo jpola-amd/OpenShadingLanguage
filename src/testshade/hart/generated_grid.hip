@@ -7,6 +7,7 @@
 #include "array.h"
 #include "closure.h"
 #include "color.h"
+#include "noise.h"
 #include "texture.h"
 #include "transform.h"
 

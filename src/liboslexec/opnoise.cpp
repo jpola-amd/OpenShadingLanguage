@@ -481,6 +481,28 @@ PNOISE_IMPL_DERIV (psnoise, PeriodicSNoise)
 //     by the PTX backend. We will update this once string support has
 //     been improved.
 
+#if defined(__HIPCC__)
+OSL_HOSTDEVICE bool hart_gabor_valid(const Dual2<Vec3>& p,
+                                     const NoiseParams& opt,
+                                     const Vec3& period, bool periodic);
+extern "C" OSL_HOSTDEVICE void rs_hart_noise_error(OpaqueExecContextPtr ec);
+
+template<typename Result>
+OSL_HOSTDEVICE bool
+hart_gabor_check(ShaderGlobals* sg, Result& result, const Dual2<Vec3>& p,
+                 const NoiseParams& opt, const Vec3& period = Vec3(0.0f),
+                 bool periodic = false)
+{
+    if (hart_gabor_valid(p, opt, period, periodic))
+        return true;
+    rs_hart_noise_error(sg);
+    result = Result(Result::zero());
+    return false;
+}
+#endif
+
+
+
 struct GaborNoise {
     OSL_HOSTDEVICE GaborNoise() {}
 
@@ -488,66 +510,98 @@ struct GaborNoise {
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
-                           const Dual2<float>& x, ShaderGlobals* /*sg*/,
+                           const Dual2<float>& x, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x), *opt))
+            return;
+#endif
         result = gabor(x, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
                            const Dual2<float>& x, const Dual2<float>& y,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x, y), *opt))
+            return;
+#endif
         result = gabor(x, y, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
-                           const Dual2<Vec3>& p, ShaderGlobals* /*sg*/,
+                           const Dual2<Vec3>& p, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt))
+            return;
+#endif
         result = gabor(p, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
                            const Dual2<Vec3>& p, const Dual2<float>& /*t*/,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt))
+            return;
+#endif
         // FIXME -- This is very broken, we are ignoring 4D!
         result = gabor(p, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
-                           const Dual2<float>& x, ShaderGlobals* /*sg*/,
+                           const Dual2<float>& x, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x), *opt))
+            return;
+#endif
         result = gabor3(x, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
                            const Dual2<float>& x, const Dual2<float>& y,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x, y), *opt))
+            return;
+#endif
         result = gabor3(x, y, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
-                           const Dual2<Vec3>& p, ShaderGlobals* /*sg*/,
+                           const Dual2<Vec3>& p, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt))
+            return;
+#endif
         result = gabor3(p, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
                            const Dual2<Vec3>& p, const Dual2<float>& /*t*/,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt))
+            return;
+#endif
         // FIXME -- This is very broken, we are ignoring 4D!
         result = gabor3(p, opt);
     }
@@ -563,34 +617,52 @@ struct GaborPNoise {
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
                            const Dual2<float>& x, float px,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x), *opt,
+                              Vec3(px, 0.0f, 0.0f), true))
+            return;
+#endif
         result = pgabor(x, px, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
                            const Dual2<float>& x, const Dual2<float>& y,
-                           float px, float py, ShaderGlobals* /*sg*/,
+                           float px, float py, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x, y), *opt,
+                              Vec3(px, py, 0.0f), true))
+            return;
+#endif
         result = pgabor(x, y, px, py, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
                            const Dual2<Vec3>& p, const Vec3& pp,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt, pp, true))
+            return;
+#endif
         result = pgabor(p, pp, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<float>& result,
                            const Dual2<Vec3>& p, const Dual2<float>& /*t*/,
-                           const Vec3& pp, float /*tp*/, ShaderGlobals* /*sg*/,
+                           const Vec3& pp, float /*tp*/, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt, pp, true))
+            return;
+#endif
         // FIXME -- This is very broken, we are ignoring 4D!
         result = pgabor(p, pp, opt);
     }
@@ -598,34 +670,52 @@ struct GaborPNoise {
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
                            const Dual2<float>& x, float px,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x), *opt,
+                              Vec3(px, 0.0f, 0.0f), true))
+            return;
+#endif
         result = pgabor3(x, px, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
                            const Dual2<float>& x, const Dual2<float>& y,
-                           float px, float py, ShaderGlobals* /*sg*/,
+                           float px, float py, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, make_Vec3(x, y), *opt,
+                              Vec3(px, py, 0.0f), true))
+            return;
+#endif
         result = pgabor3(x, y, px, py, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
                            const Dual2<Vec3>& p, const Vec3& pp,
-                           ShaderGlobals* /*sg*/, const NoiseParams* opt) const
+                           ShaderGlobals* sg, const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt, pp, true))
+            return;
+#endif
         result = pgabor3(p, pp, opt);
     }
 
     OSL_HOSTDEVICE
     inline void operator()(ustringhash /*noisename*/, Dual2<Vec3>& result,
                            const Dual2<Vec3>& p, const Dual2<float>& /*t*/,
-                           const Vec3& pp, float /*tp*/, ShaderGlobals* /*sg*/,
+                           const Vec3& pp, float /*tp*/, ShaderGlobals* sg,
                            const NoiseParams* opt) const
     {
+#if defined(__HIPCC__)
+        if (!hart_gabor_check(sg, result, p, *opt, pp, true))
+            return;
+#endif
         // FIXME -- This is very broken, we are ignoring 4D!
         result = pgabor3(p, pp, opt);
     }

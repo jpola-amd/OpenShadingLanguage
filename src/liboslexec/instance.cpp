@@ -536,6 +536,98 @@ ShaderInstance::validate_hart() const
             return fail("texture requires explicit wrap modes");
         return true;
     };
+    auto validate_noise = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        auto numeric = [](const Symbol& sym) {
+            return !sym.typespec().is_array()
+                   && (sym.typespec().is_float() || sym.typespec().is_triple());
+        };
+        if (op.nargs() < 2 || !numeric(symbol(0)))
+            return fail("invalid noise result or argument list");
+        const bool periodic = op.opname() == ustring("pnoise");
+        int arg             = 1;
+        ustring name        = op.opname();
+        if (symbol(arg).typespec().is_string()) {
+            if (!symbol(arg).is_constant())
+                return fail("noise selectors must be literal strings");
+            name = symbol(arg++).get_string();
+            const bool supported_name
+                = name == ustring("perlin") || name == ustring("uperlin")
+                  || name == ustring("noise") || name == ustring("snoise")
+                  || name == ustring("cell") || name == ustring("hash")
+                  || name == ustring("gabor")
+                  || (!periodic
+                      && (name == ustring("simplex")
+                          || name == ustring("usimplex")));
+            if (!supported_name)
+                return fail(fmtformat("unsupported noise type '{}'", name));
+        }
+        if (arg >= op.nargs() || !numeric(symbol(arg)))
+            return fail("noise coordinates must be scalar or triple floats");
+        const bool triple = symbol(arg++).typespec().is_triple();
+        bool time         = false;
+        if (periodic) {
+            if (arg + 1 < op.nargs() && numeric(symbol(arg + 1)))
+                time = true;
+        } else if (arg < op.nargs() && symbol(arg).typespec().is_float()
+                   && !symbol(arg).typespec().is_array())
+            time = true;
+        if (time) {
+            if (arg >= op.nargs() || !symbol(arg).typespec().is_float()
+                || symbol(arg).typespec().is_array())
+                return fail("second noise coordinate must be a float");
+            ++arg;
+        }
+        if (periodic) {
+            if (arg >= op.nargs() || !numeric(symbol(arg))
+                || symbol(arg).typespec().is_triple() != triple)
+                return fail("noise period must match its coordinate type");
+            ++arg;
+            if (time) {
+                if (arg >= op.nargs() || !symbol(arg).typespec().is_float()
+                    || symbol(arg).typespec().is_array())
+                    return fail("second noise period must be a float");
+                ++arg;
+            }
+        }
+        if (name == ustring("gabor")) {
+            if (!shadingsys().renderer()->supports("HARTNoiseErrors"))
+                return fail("renderer lacks HARTNoiseErrors");
+        } else if (arg != op.nargs())
+            return fail("noise options require gabor");
+        if ((op.nargs() - arg) % 2)
+            return fail("invalid noise option list");
+        for (; arg < op.nargs(); arg += 2) {
+            const Symbol& token = symbol(arg);
+            const Symbol& value = symbol(arg + 1);
+            if (!token.typespec().is_string() || !token.is_constant())
+                return fail("noise option names must be literal strings");
+            const ustring option = token.get_string();
+            const TypeSpec& type = value.typespec();
+            const bool valid
+                = !type.is_array()
+                  && (((option == ustring("anisotropic")
+                        || option == ustring("do_filter"))
+                       && type.is_int())
+                      || (option == ustring("direction") && type.is_triple())
+                      || ((option == ustring("bandwidth")
+                           || option == ustring("impulses"))
+                          && (type.is_float() || type.is_int())));
+            if (!valid)
+                return fail(
+                    fmtformat("unsupported noise option '{}' or type '{}'",
+                              option, type.c_str()));
+        }
+        return true;
+    };
     auto validate_spline = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
             return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
@@ -792,6 +884,9 @@ ShaderInstance::validate_hart() const
             return false;
         if (op.opname() == ustring("closure") && !validate_closure(op))
             return false;
+        if ((op.opname() == ustring("noise") || op.opname() == ustring("pnoise"))
+            && !validate_noise(op))
+            return false;
         if ((op.opname() == ustring("spline")
              || op.opname() == ustring("splineinverse"))
             && !validate_spline(op))
@@ -903,24 +998,10 @@ ShaderInstance::validate_hart() const
                 && sym.is_constant() && sym.typespec().is_string()
                 && !op.argwrite(a))
                 continue;
-            // Resolve only literal noise selectors; no runtime string dispatch
-            // or noise options may enter the device module.
-            if (a == 1 && sym.is_constant() && sym.typespec().is_string()
+            // Selectors and option names were validated before optimization.
+            if (sym.is_constant() && sym.typespec().is_string()
                 && (op.opname() == ustring("noise")
                     || op.opname() == ustring("pnoise"))) {
-                const ustring name = sym.get_string();
-                const bool supported_name
-                    = name == ustring("perlin") || name == ustring("uperlin")
-                      || name == ustring("cell") || name == ustring("hash")
-                      || (op.opname() == ustring("noise")
-                          && (name == ustring("simplex")
-                              || name == ustring("usimplex")));
-                if (!supported_name) {
-                    shadingsys().errorfmt(
-                        "HART: unsupported noise type '{}' in shader '{}' ({}:{})",
-                        name, shadername(), op.sourcefile(), op.sourceline());
-                    return false;
-                }
                 continue;
             }
             if (!validate_type(sym))

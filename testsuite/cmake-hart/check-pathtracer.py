@@ -80,6 +80,8 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
             weight *= color(normalize(vector(blackbody(4000+2000*v))))
                     * transformc("hsv", "rgb", color(0.1+0.1*u,0.3,1))
                     * (0.5+luminance(wavelength_color(500+100*v)));
+            weight *= 0.85+0.15*noise("gabor",point(2*u,2*v,.25+u+v),
+                                     "anisotropic",1,"direction",vector(1,.5,.25));
         }""",
         "path_connected": """shader path_connected(color weight = 0) {
             Ci = weight * emission();
@@ -88,6 +90,9 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
         "path_spline_bad": """shader path_spline_bad() {
             float knots[4] = {0,1,2,3};
             Ci = spline("linear", u, 4+int(u>=0), knots) * emission();
+        }""",
+        "path_gabor_bad": """shader path_gabor_bad() {
+            Ci = noise("gabor",point(1e20,u,v))*emission();
         }""",
         "path_overflow": """shader path_overflow() {
             Ci = 0;
@@ -137,6 +142,7 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     scenes["spline-error"] = scenes["bad"].replace("path_bad", "path_spline_bad").replace(
         'corner="-2,-2,0" edge_x="4,0,0" edge_y="0,4,0"',
         'corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"')
+    scenes["gabor-error"] = scenes["spline-error"].replace("path_spline_bad", "path_gabor_bad")
     for name, scale in (("tiny", 0.001), ("large", 1000.0)):
         world = ET.fromstring(scenes["seams"])
         for node in world:
@@ -209,6 +215,12 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
               + ["--res", "2", "2", "spline-error.xml", str(image)], root, 1)
     assert "HART device services failed (error bits 256)" in out
     assert "invalid spline arguments" in out and "HART path tracer rendered" not in out
+    assert not image.exists()
+
+    out = run([renderer, "--hart", "-v"] + flags
+              + ["--res", "2", "2", "gabor-error.xml", str(image)], root, 1)
+    assert "HART device services failed (error bits 1024)" in out
+    assert "invalid noise arguments" in out and "HART path tracer rendered" not in out
     assert not image.exists()
 
 print("HART path tracer verified: " + mode)
