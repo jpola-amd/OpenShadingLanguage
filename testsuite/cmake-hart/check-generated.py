@@ -1583,11 +1583,15 @@ def check_space_suite():
         name = "hart_space_rejected_" + str(case)
         compile_fixture(fixtures / "hart_space_rejected.osl", name,
                         ("SPACE_CASE=" + str(case),))
-        shader_args = ([name] if case else
-                       ["--shader", name, "unused", "--shader", "hart_first", "surface"])
-        run(["--hart", "-v"] + shader_args,
-            "coordinate spaces must be literal strings" if case == 2
-            else "HART: unsupported coordinate space")
+        evaluate = (lambda u, v: (u, 2*v, 1)) if case == 0 else (
+            (lambda u, v: (u, v, 1)) if case == 1 else
+            (lambda u, v: (-v, u+1, 1)))
+        expected = reference(3, 2, evaluate)
+        for specialize in ("-O0", "-O2"):
+            shader_args = [specialize, "--llvm_opt", "3",
+                           "--param", "enabled", "1", name]
+            compare(noise_cpu_image(shader_args, 3, 2), expected)
+            check_texture_render(shader_args, 3, 2, expected)
 
 
 def geometry_globals_reference():
@@ -3925,11 +3929,12 @@ try:
     if args.surface:
         for shader, error in (
             ("hart_surface_incident", "unsupported shader global 'Ps'"),
-            ("hart_space_rejected", "HART: unsupported coordinate space"),
         ):
             run(["--hart", "-v", shader], error)
             run(["--hart", "-v", "--shader", shader, "producer",
                  "--shader", "hart_first", "consumer"], error)
+        check_render(["--param", "enabled", "1", "hart_space_rejected"], 3, 2,
+                     reference(3, 2, lambda u, v: (u, 2*v, 1)))
         connected = connected_group("hart_surface_consumer",
                                     producer="hart_surface_producer")
         for optimize in ("10", "3"):

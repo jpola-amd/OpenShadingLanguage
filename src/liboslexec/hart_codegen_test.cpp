@@ -7,8 +7,8 @@
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
 // diagnostics, interactive uploads, userdata caching, geometry state, renderer
-// attributes/libraries, linked shadeops, control flow, HART provenance, and
-// rejection of unsupported operations.
+// attributes/libraries, named transforms, linked shadeops, control flow, HART
+// provenance, and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -298,6 +298,62 @@ public:
 
 private:
     bool m_geometry;
+};
+
+
+
+class HartNamedTransformServices final : public RendererServices {
+public:
+    int supports(string_view feature) const override
+    {
+        return feature == "HART" || feature == "HARTArrayBounds"
+               || (transforms && feature == "HARTTransforms")
+               || (named && feature == "HARTNamedTransforms");
+    }
+    bool get_matrix(ShaderGlobals*, Matrix44& result, ustringhash) override
+    { return lookup(result); }
+    bool get_matrix(ShaderGlobals*, Matrix44& result, ustringhash,
+                    float) override
+    { return lookup(result); }
+    bool get_inverse_matrix(ShaderGlobals*, Matrix44& result,
+                            ustringhash) override
+    { return lookup(result); }
+    bool get_inverse_matrix(ShaderGlobals*, Matrix44& result, ustringhash,
+                            float) override
+    { return lookup(result); }
+    bool get_matrix(ShaderGlobals*, Matrix44& result,
+                    TransformationPtr) override
+    { return lookup(result); }
+    bool get_matrix(ShaderGlobals*, Matrix44& result, TransformationPtr,
+                    float) override
+    { return lookup(result); }
+    bool get_inverse_matrix(ShaderGlobals*, Matrix44& result,
+                            TransformationPtr) override
+    { return lookup(result); }
+    bool get_inverse_matrix(ShaderGlobals*, Matrix44& result, TransformationPtr,
+                            float) override
+    { return lookup(result); }
+    bool transform_points(ShaderGlobals*, ustringhash, ustringhash, float,
+                          const Vec3*, Vec3*, int,
+                          TypeDesc::VECSEMANTICS) override
+    {
+        ++nonlinear_queries;
+        return true;
+    }
+
+    bool transforms = true, named = true;
+    int matrix_queries = 0, nonlinear_queries = 0;
+
+private:
+    bool lookup(Matrix44& result)
+    {
+        // Successful nonidentity answers expose accidental compile-time folds.
+        ++matrix_queries;
+        result.makeIdentity();
+        result[0][0] = 7;
+        result[3][0] = 19;
+        return true;
+    }
 };
 
 
@@ -1072,7 +1128,36 @@ check_color_layout(string_view arch, string_view filename)
     };
     renderer_record("osl_hart_texture_abi_probe",
                     sizeof(testshade::HartTextureState),
-                    { 0, 8, 16, 24, 32, 40, 48 });
+                    { 0, 8, 16, 24, 32, 40, 48, 56 });
+    renderer_record("osl_hart_transform_abi_probe",
+                    sizeof(testshade::HartTransformState),
+                    { 0, 8, 16, 24, 28 });
+    renderer_record("osl_hart_transform_desc_abi_probe",
+                    sizeof(testshade::HartTransformDesc), { 0, 8, 12, 16, 80 });
+    for (const char* name : { "osl_hart_transform_abi_probe",
+                              "osl_hart_transform_desc_abi_probe" }) {
+        const auto* object = module.getNamedGlobal(name);
+        auto* record       = object ? llvm::dyn_cast<llvm::StructType>(
+                                          object->getValueType())
+                                    : nullptr;
+        if (!record || record->isOpaque() || record->getNumElements() != 5)
+            continue;  // renderer_record reports missing/malformed records.
+        const bool descriptor = string_view(name)
+                                == "osl_hart_transform_desc_abi_probe";
+        for (unsigned i = 0; i < 5; ++i) {
+            auto* field = record->getElementType(i);
+            if (descriptor && i >= 3) {
+                const auto* matrix = llvm::dyn_cast<llvm::ArrayType>(field);
+                OIIO_CHECK_ASSERT(matrix && matrix->getNumElements() == 16
+                                  && matrix->getElementType()->isFloatTy());
+            } else if (!descriptor && i == 0) {
+                OIIO_CHECK_ASSERT(field->isPointerTy()
+                                  && field->getPointerAddressSpace() == 0);
+            } else
+                OIIO_CHECK_ASSERT(field->isIntegerTy(
+                    descriptor ? (i == 0 ? 64 : 32) : (i < 3 ? 64 : 32)));
+        }
+    }
     renderer_record("osl_hart_userdata_abi_probe",
                     sizeof(testshade::HartUserdataState),
                     { 0, 8, 16, 24, 32, 40, 44 });
@@ -1266,6 +1351,11 @@ check_color_layout(string_view arch, string_view filename)
     OIIO_CHECK_ASSERT(
         !shadeops.getNamedGlobal("osl_hart_attributes_abi_probe"));
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_attributes_abi_address"));
+    OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_transform_abi_probe"));
+    OIIO_CHECK_ASSERT(
+        !shadeops.getNamedGlobal("osl_hart_transform_desc_abi_probe"));
+    OIIO_CHECK_ASSERT(
+        !shadeops.getFunction("osl_hart_transform_abi_addresses"));
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_userdata_abi_addresses"));
     int setters = 0;
     for (const auto& setter : shadeops) {
@@ -4790,7 +4880,7 @@ void
 check_userdata_host_layout()
 {
     using namespace testshade;
-    OIIO_CHECK_EQUAL(sizeof(HartTextureState), 56);
+    OIIO_CHECK_EQUAL(sizeof(HartTextureState), 64);
     OIIO_CHECK_EQUAL(alignof(HartTextureState), 8);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, textures), 0);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, count), 8);
@@ -4799,6 +4889,40 @@ check_userdata_host_layout()
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, diagnostics), 32);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, userdata), 40);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, attributes), 48);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, transforms), 56);
+    OIIO_CHECK_ASSERT((std::is_same<decltype(HartTextureState::transforms),
+                                    const HartTransformState*>::value));
+    OIIO_CHECK_EQUAL(sizeof(HartTransformState), 32);
+    OIIO_CHECK_EQUAL(alignof(HartTransformState), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformState, entries), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformState, count), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformState, commonspace), 16);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformState, unknown_error), 24);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformState, reserved), 28);
+    OIIO_CHECK_ASSERT((std::is_same<decltype(HartTransformState::entries),
+                                    const HartTransformDesc*>::value));
+    OIIO_CHECK_ASSERT((
+        std::is_same<decltype(HartTransformState::count), uint64_t>::value
+        && std::is_same<decltype(HartTransformState::commonspace), uint64_t>::value
+        && std::is_same<decltype(HartTransformState::unknown_error),
+                        uint32_t>::value
+        && std::is_same<decltype(HartTransformState::reserved),
+                        uint32_t>::value));
+    OIIO_CHECK_EQUAL(sizeof(HartTransformDesc), 144);
+    OIIO_CHECK_EQUAL(alignof(HartTransformDesc), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformDesc, name), 0);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformDesc, directions), 8);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformDesc, reserved), 12);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformDesc, forward), 16);
+    OIIO_CHECK_EQUAL(offsetof(HartTransformDesc, inverse), 80);
+    OIIO_CHECK_ASSERT((
+        std::is_same<decltype(HartTransformDesc::name), uint64_t>::value
+        && std::is_same<decltype(HartTransformDesc::directions), uint32_t>::value
+        && std::is_same<decltype(HartTransformDesc::reserved), uint32_t>::value));
+    OIIO_CHECK_ASSERT(
+        (std::is_same<decltype(HartTransformDesc::forward), float[16]>::value));
+    OIIO_CHECK_ASSERT(
+        (std::is_same<decltype(HartTransformDesc::inverse), float[16]>::value));
     OIIO_CHECK_ASSERT((std::is_same<decltype(HartTextureState::attributes),
                                     const RenderContext*>::value));
     OIIO_CHECK_EQUAL(sizeof(RenderContext), 128);
@@ -8040,6 +8164,431 @@ check_space_modules(string_view arch, string_view stdosl)
 
 
 
+struct NamedTransformExpectation {
+    const char* helper;
+    const char* from;
+    const char* to;
+    int semantic = -1;
+    int calls    = 1;
+};
+
+
+
+bool
+check_named_transform_ir(ShadingSystem& ss, ShaderGroup& group,
+                         cspan<NamedTransformExpectation> expected,
+                         int optimize)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_named_transforms"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module = **parsed;
+    for (const char* name :
+         { "osl_transform_triple_nonlinear", "rs_transform_points" }) {
+        const auto* function = module.getFunction(name);
+        OIIO_CHECK_ASSERT(!function || function->use_empty());
+    }
+    const struct {
+        const char* name;
+        const char* args;
+        unsigned result;
+        bool callback;
+    } signatures[] = {
+        { "osl_transform_triple", "ppipilli", 32, false },
+        { "osl_get_from_to_matrix", "ppll", 32, false },
+        { "osl_prepend_matrix_from", "ppl", 32, false },
+        { "rs_get_matrix_space_time", "pplf", 1, true },
+        { "rs_get_inverse_matrix_space_time", "pplf", 1, true },
+    };
+    for (const auto& signature : signatures) {
+        const auto* function = module.getFunction(signature.name);
+        if (expected.empty()) {
+            OIIO_CHECK_ASSERT(!function || function->use_empty());
+            continue;
+        }
+        if (!function || function->use_empty())
+            continue;
+        if (optimize != 10 && !signature.callback)
+            continue;
+        OIIO_CHECK_EQUAL(function->isDeclaration(), signature.callback);
+        OIIO_CHECK_ASSERT(
+            !function->isVarArg()
+            && function->getReturnType()->isIntegerTy(signature.result));
+        const string_view args(signature.args);
+        OIIO_CHECK_EQUAL(function->arg_size(), args.size());
+        for (const auto& arg : function->args()) {
+            if (arg.getArgNo() >= args.size())
+                continue;
+            const char kind = args[arg.getArgNo()];
+            OIIO_CHECK_ASSERT(
+                kind == 'p'
+                    ? arg.getType()->isPointerTy()
+                          && arg.getType()->getPointerAddressSpace() == 0
+                : kind == 'f'
+                    ? arg.getType()->isFloatTy()
+                    : arg.getType()->isIntegerTy(kind == 'l' ? 64 : 32));
+        }
+    }
+    if (!expected.empty())
+        for (const char* name : { "rs_get_matrix_space_time",
+                                  "rs_get_inverse_matrix_space_time" }) {
+            const auto* function = module.getFunction(name);
+            OIIO_CHECK_ASSERT(function && !function->use_empty());
+        }
+    if (optimize != 10)
+        return true;
+    auto hash_matches = [](const llvm::Value* value, const char* name) {
+        const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+        return name
+                   ? constant
+                         && constant->getZExtValue() == ustringhash(name).hash()
+                   : !llvm::isa<llvm::Constant>(value);
+    };
+    std::vector<int> seen(expected.size(), 0);
+    for (const auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0)
+            continue;
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                const auto* call   = llvm::dyn_cast<llvm::CallBase>(&inst);
+                const auto* helper = call ? call->getCalledFunction() : nullptr;
+                if (!helper)
+                    continue;
+                const bool triple = helper->getName() == "osl_transform_triple";
+                const bool pair = helper->getName() == "osl_get_from_to_matrix";
+                const bool prepend = helper->getName()
+                                     == "osl_prepend_matrix_from";
+                if (!triple && !pair && !prepend)
+                    continue;
+                OIIO_CHECK_EQUAL(call->arg_size(), triple ? 8 : pair ? 4 : 3);
+                if (call->arg_size() != (triple ? 8 : pair ? 4 : 3))
+                    continue;
+                OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                 helper->getCallingConv());
+                OIIO_CHECK_EQUAL(call->getArgOperand(0)->stripPointerCasts(),
+                                 function.getArg(0));
+                int semantic = -1;
+                if (triple) {
+                    const auto* kind = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(7));
+                    OIIO_CHECK_ASSERT(kind);
+                    if (kind)
+                        semantic = int(kind->getSExtValue());
+                    for (unsigned a : { 2, 4 }) {
+                        const auto* derivatives
+                            = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(a));
+                        OIIO_CHECK_ASSERT(derivatives && derivatives->isOne());
+                    }
+                } else {
+                    const auto* allocation = llvm::dyn_cast<llvm::AllocaInst>(
+                        call->getArgOperand(1)->stripPointerCasts());
+                    OIIO_CHECK_ASSERT(allocation);
+                    if (allocation) {
+                        const auto* count = llvm::dyn_cast<llvm::ConstantInt>(
+                            allocation->getArraySize());
+                        OIIO_CHECK_EQUAL(allocation->getAddressSpace(), 5);
+                        OIIO_CHECK_ASSERT(count);
+                        if (count)
+                            OIIO_CHECK_ASSERT(
+                                module.getDataLayout()
+                                        .getTypeAllocSize(
+                                            allocation->getAllocatedType())
+                                        .getFixedValue()
+                                    * count->getZExtValue()
+                                >= sizeof(Matrix44));
+                    }
+                }
+                int matches = 0;
+                for (size_t i = 0; i < expected.size(); ++i) {
+                    const auto& test = expected[i];
+                    if (helper->getName() != test.helper
+                        || semantic != test.semantic
+                        || !hash_matches(call->getArgOperand(triple ? 5 : 2),
+                                         test.from)
+                        || (!prepend
+                            && !hash_matches(call->getArgOperand(triple ? 6 : 3),
+                                             test.to)))
+                        continue;
+                    ++matches;
+                    ++seen[i];
+                }
+                OIIO_CHECK_EQUAL(matches, 1);
+            }
+    }
+    for (size_t i = 0; i < expected.size(); ++i)
+        OIIO_CHECK_EQUAL(seen[i], expected[i].calls);
+    return true;
+}
+
+
+
+bool
+check_named_transform_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader named_literal(output color Cout=0) { "
+        "point p=point(\"model\",u,v,1); vector q=vector(\"basis\",u,1,v); "
+        "normal n=normal(\"world\",1+u,1+v,1); "
+        "matrix a=matrix(\"model\",\"camera\"), b=matrix(\"basis\",1+u); "
+        "matrix c=matrix(\"model\",1,0,0,0,0,1,0,0,0,0,1,0,u,v,0,1), d=1; "
+        "int ok=getmatrix(\"common\",\"screen\",d); "
+        "point pp=transform(\"model\",\"camera\",p); "
+        "vector qq=transform(\"basis\",\"NDC\",q); "
+        "normal nn=transform(\"world\",\"raster\",n); "
+        "Cout=color(pp+Dx(pp)+Dy(pp))+color(qq+Dx(qq)+Dy(qq))"
+        "+color(nn+Dx(nn)+Dy(nn))+color(a[0][0]+b[0][0]+c[3][0]+d[1][1]+ok); }",
+        "shader named_dynamic(output color Cout=0) { "
+        "string spaces[3]={\"model\",\"basis\",\"world\"}; "
+        "string from=spaces[int(2*u)], to=u>v?\"camera\":\"common\"; "
+        "point p=point(from,u,v,1); vector q=vector(from,u,1,v); "
+        "normal n=normal(from,1,u,v); matrix a=matrix(from,to), b=matrix(from,1); "
+        "matrix c=matrix(from,1,0,0,0,0,1,0,0,0,0,1,0,u,v,0,1), d=1; "
+        "int ok=getmatrix(from,to,d); point pp=transform(from,to,p); "
+        "vector qq=transform(from,to,q); normal nn=transform(from,to,n); "
+        "Cout=color(pp+Dx(pp)+Dy(pp))+color(qq+Dx(qq)+Dy(qq))"
+        "+color(nn+Dx(nn)+Dy(nn))+color(a[0][0]+b[0][0]+c[3][0]+d[1][1]+ok); }",
+        "shader named_alias(output color Cout=0) { "
+        "matrix a=matrix(\"world\",\"common\"), b=matrix(\"common\",\"world\"); "
+        "matrix c=matrix(\"world\",1); "
+        "matrix d=matrix(\"world\",1,0,0,0,0,1,0,0,0,0,1,0,1,2,3,1), e=1, f=1; "
+        "int ok=getmatrix(\"world\",\"common\",e); "
+        "ok+=getmatrix(\"common\",\"world\",f); "
+        "point p=point(\"world\",1,2,3), pp=transform(\"world\",\"common\",P); "
+        "vector q=vector(\"world\",2,3,4); "
+        "vector qq=transform(\"common\",\"world\",vector(u,v,1)); "
+        "normal n=normal(\"world\",3,4,5); "
+        "normal nn=transform(\"world\",\"common\",normal(u,v,1)); "
+        "Cout=color(p+Dx(p)+Dy(p)+pp+Dx(pp)+Dy(pp))"
+        "+color(q+Dx(q)+Dy(q)+qq+Dx(qq)+Dy(qq))"
+        "+color(n+Dx(n)+Dy(n)+nn+Dx(nn)+Dy(nn))"
+        "+color(a[0][0]+b[0][0]+c[0][0]+d[3][0]+e[0][0]+f[0][0]+ok); }",
+        "shader named_identity(output color Cout=0) { "
+        "matrix a=matrix(\"model\",\"model\"), b=matrix(\"common\",1); "
+        "matrix c=matrix(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1), d=1; "
+        "int ok=getmatrix(\"model\",\"model\",d); "
+        "point p=point(\"common\",1,2,3); "
+        "point q=transform(\"model\",\"model\",p); "
+        "vector direction=transform(matrix(1),vector(u,v,1)); "
+        "Cout=color(q)+color(transform(a*b*c*d,direction))+color(ok); }",
+        "shader named_unusual(output color Cout=0) { "
+        "string name=u>v?\"model\":\"world\"; "
+        "matrix a=matrix(name,\"$unknown1$\"), b=matrix(\"$unknown2$\",name); "
+        "matrix c=matrix(\"\",name), d=matrix(\"unregistered\",\"common\"); "
+        "Cout=color(a[0][0]+b[0][0]+c[0][0]+d[0][0]); }",
+        "shader named_clean(output color Cout=0) { Cout=color(u,v,1); }",
+    };
+    std::string oso[std::size(sources)];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], oso[i], { }, stdosl))
+            return false;
+    }
+    const NamedTransformExpectation literal[] = {
+        { "osl_transform_triple", "model", "common", TypeDesc::POINT },
+        { "osl_transform_triple", "basis", "common", TypeDesc::VECTOR },
+        { "osl_transform_triple", "world", "common", TypeDesc::NORMAL },
+        { "osl_transform_triple", "model", "camera", TypeDesc::POINT },
+        { "osl_transform_triple", "basis", "NDC", TypeDesc::VECTOR },
+        { "osl_transform_triple", "world", "raster", TypeDesc::NORMAL },
+        { "osl_get_from_to_matrix", "model", "camera" },
+        { "osl_get_from_to_matrix", "common", "screen" },
+        { "osl_prepend_matrix_from", "basis", nullptr },
+        { "osl_prepend_matrix_from", "model", nullptr },
+    };
+    const NamedTransformExpectation dynamic[] = {
+        { "osl_transform_triple", nullptr, "common", TypeDesc::POINT },
+        { "osl_transform_triple", nullptr, "common", TypeDesc::VECTOR },
+        { "osl_transform_triple", nullptr, "common", TypeDesc::NORMAL },
+        { "osl_transform_triple", nullptr, nullptr, TypeDesc::POINT },
+        { "osl_transform_triple", nullptr, nullptr, TypeDesc::VECTOR },
+        { "osl_transform_triple", nullptr, nullptr, TypeDesc::NORMAL },
+        { "osl_get_from_to_matrix", nullptr, nullptr, -1, 2 },
+        { "osl_prepend_matrix_from", nullptr, nullptr, -1, 2 },
+    };
+    const NamedTransformExpectation alias[] = {
+        { "osl_transform_triple", "world", "common", TypeDesc::POINT, 2 },
+        { "osl_transform_triple", "world", "common", TypeDesc::VECTOR },
+        { "osl_transform_triple", "world", "common", TypeDesc::NORMAL, 2 },
+        { "osl_transform_triple", "common", "world", TypeDesc::VECTOR },
+        { "osl_get_from_to_matrix", "world", "common", -1, 2 },
+        { "osl_get_from_to_matrix", "common", "world", -1, 2 },
+        { "osl_prepend_matrix_from", "world", nullptr, -1, 2 },
+    };
+    const NamedTransformExpectation unusual[] = {
+        { "osl_get_from_to_matrix", nullptr, "$unknown1$" },
+        { "osl_get_from_to_matrix", "$unknown2$", nullptr },
+        { "osl_get_from_to_matrix", "", nullptr },
+        { "osl_get_from_to_matrix", "unregistered", "common" },
+    };
+    const cspan<NamedTransformExpectation> expectations[]
+        = { literal, dynamic, alias, { }, unusual };
+    const struct {
+        int source, osl, llvm;
+        bool local;
+        const char* common = "world";
+    } variants[] = {
+        { 0, 0, 10, false }, { 0, 2, 10, true },
+        { 0, 2, 3, false },  { 1, 0, 10, false },
+        { 1, 2, 10, true },  { 1, 2, 3, true },
+        { 2, 0, 10, false }, { 2, 2, 10, true },
+        { 2, 2, 3, true },   { 2, 2, 10, false, "other_common" },
+        { 3, 2, 10, false }, { 3, 2, 3, true },
+        { 4, 0, 10, false }, { 4, 2, 10, true },
+    };
+    for (const auto& variant : variants) {
+        HartNamedTransformServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", variant.osl));
+        OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", variant.llvm));
+        OIIO_CHECK_ASSERT(ss.attribute("commonspace", variant.common));
+        OIIO_CHECK_ASSERT(
+            ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0));
+        auto group = make_group(ss, oso[variant.source]);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "Named transforms source {} OSL{} LLVM{}: {}\n",
+                  variant.source, variant.osl, variant.llvm, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        check_module(ss, *group, arch, { }, variant.llvm, false, false, false,
+                     0, false, true);
+        if (!check_named_transform_ir(ss, *group, expectations[variant.source],
+                                      variant.llvm))
+            return false;
+        int allocated = -1, group_size = 0;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", group_size));
+        OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+        OIIO_CHECK_EQUAL(renderer.matrix_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.nonlinear_queries, 0);
+    }
+    for (int failure = 0; failure < 3; ++failure) {
+        HartNamedTransformServices renderer;
+        renderer.transforms = failure != 0;
+        renderer.named      = failure == 0;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+        auto group = make_group(ss, oso[0]);
+        if (failure == 2) {
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("named_clean", oso[5]));
+            group = ss.ShaderGroupBegin("hart_test_group");
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "unused"));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "named_clean", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("layer0.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+        }
+        check_rejected_group(ss, *group, errors,
+                             failure == 0 ? "renderer lacks HARTTransforms"
+                                          : "unsupported coordinate space");
+        OIIO_CHECK_EQUAL(renderer.matrix_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.nonlinear_queries, 0);
+    }
+    const struct {
+        const char* body;
+        const char* opcode;
+        unsigned operand;
+        const char* replacement;
+    } malformed[] = {
+        { "m=matrix(name,\"common\");", "matrix", 2, "names" },
+        { "m=matrix(name,\"common\");", "matrix", 1, "p" },
+        { "m=matrix(name,x);", "matrix", 2, "x" },
+        { "m=matrix(name,x);", "matrix", 3, "floats" },
+        { "m=matrix(x);", "assign", 0, "transform" },
+        { "m=matrix(name,\"common\");", "matrix", 0, "getmatrix" },
+        { "m=matrix(1,0,0,0,0,1,0,0,0,0,1,0,x,0,0,1);", "matrix", 2, "floats" },
+        { "m=matrix(name,1,0,0,0,0,1,0,0,0,0,1,0,x,0,0,1);", "matrix", 2,
+          "names" },
+        { "ok=getmatrix(name,\"common\",m);", "getmatrix", 4, "p" },
+        { "ok=getmatrix(name,\"common\",m);", "getmatrix", 1, "x" },
+        { "p=point(name,x,1,2);", "point", 2, "names" },
+        { "direction=vector(name,x,1,2);", "vector", 3, "floats" },
+        { "n=normal(name,x,1,2);", "normal", 1, "m" },
+        { "p=transform(name,\"common\",p);", "transform", 2, "names" },
+        { "direction=transform(name,\"common\",direction);", "transformv", 4,
+          "floats" },
+        { "n=transform(name,\"common\",n);", "transformn", 1, "name" },
+        { "p=transform(m,p);", "transform", 2, "names" },
+    };
+    for (const auto& test : malformed) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const auto source = fmtformat(
+            "shader named_bad(string name=\"model\", string names[2]={{\"a\",\"b\"}}, "
+            "float x=0.2, float floats[2]={{1,2}}, output matrix m=1, output point p=0, "
+            "output vector direction=0, output normal n=0, output int ok=0, output color Cout=0) {{ {} "
+            "Cout=color(p)+color(direction)+color(n)+color(m[0][0]+ok+x); }}",
+            test.body);
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        // Matrix and triple type declarations also contain the opcode names.
+        const auto line  = bytecode.find(fmtformat("\n\t{}\t", test.opcode));
+        const auto op    = line == std::string::npos ? line : line + 1;
+        const auto end   = bytecode.find('\n', op);
+        const auto hints = bytecode.find('%', op);
+        OIIO_CHECK_ASSERT(op != std::string::npos && end != std::string::npos
+                          && hints < end);
+        if (op == std::string::npos || end == std::string::npos
+            || hints >= end) {
+            print(stderr, "Missing '{}' in named fixture '{}':\n{}\n",
+                  test.opcode, test.body, bytecode);
+            return false;
+        }
+        std::vector<std::string> words;
+        OIIO::Strutil::split(string_view(bytecode).substr(op, hints - op),
+                             words, "", -1);
+        OIIO_CHECK_ASSERT(test.operand < words.size());
+        if (test.operand >= words.size())
+            return false;
+        words[test.operand] = test.replacement;
+        bytecode.replace(op, hints - op,
+                         fmtformat("\t{}\t", OIIO::Strutil::join(words, "\t")));
+        HartNamedTransformServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+        if (!ss.LoadMemoryCompiledShader("hart_test", bytecode)) {
+            print(stderr,
+                  "Named fixture '{}' operand {} replacement '{}': {}\n",
+                  test.body, test.operand, test.replacement, errors.messages);
+            return false;
+        }
+        auto group = make_group(ss, bytecode, 1, false);
+        check_rejected_group(ss, *group, errors,
+                             "invalid coordinate transform operands");
+        OIIO_CHECK_EQUAL(renderer.matrix_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.nonlinear_queries, 0);
+    }
+    return true;
+}
+
+
+
 bool
 check_geometry_state_ir(ShadingSystem& ss, ShaderGroup& group,
                         bool zero_derivatives, bool connected)
@@ -11173,6 +11722,8 @@ main(int argc, char* argv[])
     const string_view arch(argv[1]);
     check_userdata_host_layout();
     if (!check_color_layout(arch, argv[3]) || unit_test_failures)
+        return 1;
+    if (!check_named_transform_modules(arch, argv[2]) || unit_test_failures)
         return 1;
     if (!check_closure_modules(arch, argv[2]) || unit_test_failures)
         return 1;

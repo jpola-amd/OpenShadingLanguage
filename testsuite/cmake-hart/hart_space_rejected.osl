@@ -13,7 +13,7 @@ shader hart_space_rejected(
     int enabled = 0, output color Cout = 0)
 {
 #if SPACE_CASE == 0
-    // Even a CPU-registered space is outside HART's literal whitelist.
+    // Formerly rejected; now exercise a real renderer-owned named space.
     if (enabled)
         Cout = color(point("myspace", u, v, 1));
 #elif SPACE_CASE == 1

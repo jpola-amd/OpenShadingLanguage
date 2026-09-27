@@ -152,6 +152,8 @@ struct HartTextureStore::Impl {
         , userdata_data(handler)
         , userdata_state(handler)
         , attributes(handler)
+        , transform_entries(handler)
+        , transform_state(handler)
         , diagnostic_host(std::make_unique<HartDiagnosticBuffer>())
     {
     }
@@ -259,6 +261,7 @@ struct HartTextureStore::Impl {
     DeviceBuffer descriptors, state, errors, colorsystem, diagnostics;
     DeviceBuffer userdata_entries, userdata_data, userdata_state;
     DeviceBuffer attributes;
+    DeviceBuffer transform_entries, transform_state;
     std::unique_ptr<HartDiagnosticBuffer> diagnostic_host;
     size_t colorsystem_bytes = 0;
     bool dirty               = true;
@@ -604,6 +607,68 @@ HartTextureStore::prepare_attributes(const RenderContext& context)
 
 
 bool
+HartTextureStore::prepare_transforms(cspan<HartTransformBinding> bindings,
+                                     ustringhash commonspace,
+                                     bool unknown_error)
+{
+    auto& impl = *m_impl;
+    if (bindings.size() > std::numeric_limits<size_t>::max()
+                              / sizeof(testshade::HartTransformDesc)) {
+        impl.err.errorfmt("HART transforms: too many named bindings");
+        return false;
+    }
+    std::vector<testshade::HartTransformDesc> entries;
+    entries.reserve(bindings.size());
+    for (const auto& binding : bindings) {
+        testshade::HartTransformDesc entry { };
+        entry.name       = binding.name.hash();
+        entry.directions = (binding.has_forward ? 1u : 0u)
+                           | (binding.has_inverse ? 2u : 0u);
+        for (int i = 0; i < 16; ++i) {
+            entry.forward[i] = binding.forward[i / 4][i % 4];
+            entry.inverse[i] = binding.inverse[i / 4][i % 4];
+        }
+        entries.push_back(entry);
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const auto& a, const auto& b) { return a.name < b.name; });
+    if (std::adjacent_find(entries.begin(), entries.end(),
+                           [](const auto& a, const auto& b) {
+                               return a.name == b.name;
+                           })
+        != entries.end()) {
+        impl.err.errorfmt("HART transforms: duplicate named-space hash");
+        return false;
+    }
+    DeviceBuffer device_entries(impl.err), state(impl.err);
+    const size_t bytes = entries.size() * sizeof(testshade::HartTransformDesc);
+    if ((bytes
+         && (!device_entries.allocate(bytes)
+             || !hip_check(impl.err,
+                           hipMemcpy(device_entries.data, entries.data(), bytes,
+                                     hipMemcpyHostToDevice),
+                           "hipMemcpy named transforms")))
+        || !state.allocate(sizeof(testshade::HartTransformState)))
+        return false;
+    const testshade::HartTransformState host {
+        static_cast<const testshade::HartTransformDesc*>(device_entries.data),
+        uint64_t(entries.size()), commonspace.hash(), uint32_t(unknown_error), 0
+    };
+    if (!hip_check(impl.err,
+                   hipMemcpy(state.data, &host, sizeof(host),
+                             hipMemcpyHostToDevice),
+                   "hipMemcpy transform state"))
+        return false;
+    std::swap(device_entries.data, impl.transform_entries.data);
+    std::swap(state.data, impl.transform_state.data);
+    impl.dirty = true;
+    bool ok    = state.clear();
+    return device_entries.clear() && ok;
+}
+
+
+
+bool
 HartTextureStore::prepare()
 {
     auto& impl = *m_impl;
@@ -640,7 +705,9 @@ HartTextureStore::prepare()
         static_cast<HartDiagnosticBuffer*>(diagnostics.data),
         static_cast<const testshade::HartUserdataState*>(
             impl.userdata_state.data),
-        static_cast<const RenderContext*>(impl.attributes.data)
+        static_cast<const RenderContext*>(impl.attributes.data),
+        static_cast<const testshade::HartTransformState*>(
+            impl.transform_state.data)
     };
     if (!hip_check(impl.err,
                    hipMemcpy(state.data, &host_state, sizeof(host_state),
@@ -802,6 +869,8 @@ HartTextureStore::clear()
     ok                     = impl.userdata_entries.clear() && ok;
     ok                     = impl.userdata_data.clear() && ok;
     ok                     = impl.attributes.clear() && ok;
+    ok                     = impl.transform_state.clear() && ok;
+    ok                     = impl.transform_entries.clear() && ok;
     impl.colorsystem_bytes = 0;
     for (auto& texture : impl.textures)
         ok = texture->clear() && ok;

@@ -607,10 +607,41 @@ are uploaded per render and referenced through `ShaderGlobals`; neither
 matrix values nor host addresses are baked into the compiled shader group.
 The generated launch parameters change, but the external-module ABI does not.
 Renderers must advertise `HARTTransforms` and supply the matrix callbacks.
-Dynamic names, other spaces (including `"world"`, `"camera"` and `"myspace"`),
-animated/nonlinear transforms, and color-space transforms remain unsupported.
-Unknown names fail before optimization, even for same-name identity transforms
-or unused code.
+Renderers advertising `HARTTransforms` without `HARTNamedTransforms` retain
+this literal-only subset and reject other names before optimization. The
+native path tracer currently advertises neither coordinate-service capability.
+
+Generated testshade also advertises `HARTNamedTransforms`. Spatial
+constructors, `transform`, `matrix` and `getmatrix` accept literal or runtime
+scalar string names, including names selected from string arrays. Its named
+transforms (normally `myspace`, with scale `(1,2,1)`) come from the actual
+`SimpleRenderer::name_transform` bindings. Camera, screen, NDC and raster
+inverse matrices use the current camera settings. As on `SimpleRenderer`,
+those camera names do not have a forward transform unless explicitly
+registered as a named transform. No forward camera transform is fabricated.
+
+Named matrices, the current `commonspace` synonym (normally `world`), and
+`unknown_coordsys_error` are bound before every render, never folded from host
+renderer data into HART code. The common synonym takes precedence over a named
+entry of the same name, including after A-B-A rebinding. Unknown names or
+unavailable directions return false and identity matrices, matching CPU lookup
+behavior; composed `getmatrix` results still include any successfully resolved
+direction. When `unknown_coordsys_error` is enabled, the lookup also reports a
+device error and prevents image publication. Malformed or nonfinite *queried*
+bindings always report an error; unused invalid matrices do not poison a
+render. Existing inverse-transpose normal and input-derivative shadeops are
+reused. These bindings are static and ignore time, as the reference renderer
+does; animated and nonlinear transforms are not implemented.
+
+`HartTextureState::transforms` points to a 32-byte `HartTransformState` with
+144-byte typed forward/inverse records. The texture state is now 64 bytes,
+with the transform pointer at offset 56 and camera pointer still at offset 48.
+The six-argument callable ABI is unchanged. The four `hart-space-rebind-*`
+tests compare 33 cases at three rows against CPU execution, including
+projection, point/vector/normal gradients, common-synonym changes, query misses
+and error recovery. Value comparisons use `2e-6 + 2e-6*abs(CPU)`; return codes,
+A-B-A artifact identity, repeated images and cache reuse are checked exactly.
+Genuine HIP layout probes and compiler tests cover all configured targets.
 
 `filterwidth` computes `sqrt(Dx(x)*Dx(x) + Dy(x)*Dy(x))` for a float input,
 or the same expression component-wise for a color, point, vector, or normal.
@@ -972,8 +1003,8 @@ dynamic shader metadata and unoptimized shader-name queries are not invented
 as runtime services. The native path tracer does not yet opt into this service.
 
 The grid uploads a fresh camera `RenderContext` with no host journal pointer
-before each render. Its pointer extends `HartTextureState` to 56 bytes, at
-offset 48; the six-argument callable ABI is unchanged. Genuine HIP probes
+before each render. Its pointer is at offset 48 in `HartTextureState`;
+the six-argument callable ABI is unchanged. Genuine HIP probes
 cross-check this record and camera layout for every configured architecture.
 The four `hart-attribute-rebind-*` tests check 33 query cases at three grid rows
 against exact numerical expectations and CPU execution, including return codes,

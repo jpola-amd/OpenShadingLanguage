@@ -166,7 +166,7 @@ struct OutputFiles {
     }
 
     std::string directory;
-    std::array<std::string, 4> files;
+    std::array<std::string, 5> files;
 };
 
 
@@ -1464,6 +1464,301 @@ shader hart_attributes(output color Cout=-1000)
 
 
 bool
+run_spaces(string_view stdosl, string_view mode, Diagnostics& diagnostics)
+{
+    constexpr int columns = 33, rows = 3;
+    OutputFiles files;
+    if (!files.create(diagnostics))
+        return false;
+    std::string arch;
+    auto renderer = testshade_hart_renderer(0, arch);
+    if (!renderer)
+        return false;
+    renderer->errhandler().verbosity(ErrorHandler::VERBOSE);
+    ShadingSystem ss(renderer.get(), nullptr, &diagnostics);
+    renderer->init_shadingsys(&ss);
+    const int optimize = mode == "unoptimized" ? 0 : 2;
+    if (!ss.attribute("hart_arch", arch)
+        || !ss.attribute("llvm_debugging_symbols", 0)
+        || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("optimize", optimize)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? 4096 : 0)
+        || !ss.attribute("unknown_coordsys_error", 0))
+        return false;
+    OSLCompiler compiler(&diagnostics);
+    std::string oso;
+    if (!compiler.compile_buffer(R"OSL(
+shader hart_spaces(output color Cout=999999)
+{
+    int column=int(32*u+.5);
+    point p=point(u+.25,2*v-.5,2+u+v);
+    vector q=0;
+    matrix M=1;
+    int matrix_result=0, ok=1;
+    if (column < 15) {
+        string from=column < 3 ? "myspace" : column < 6 ? "common" :
+                    column < 9 ? "object" : column < 12 ? "myspace" : "common";
+        string to=column < 3 ? "common" : column < 9 ? "myspace" :
+                  column < 12 ? "shader" :
+                  v < .25 ? "camera" : v < .75 ? "screen" : "raster";
+        if (column%3==0) q=vector(transform(from,to,p));
+        else if (column%3==1) q=transform(from,to,vector(p));
+        else q=vector(transform(from,to,normal(p)));
+    } else if (column == 15) {
+        ok=getmatrix("common","NDC",M); matrix_result=1;
+    } else if (column == 16) {
+        string missing=v < .25 ? "missing_a" : "missing_b";
+        ok=getmatrix(missing,"myspace",M); matrix_result=1;
+    } else if (column == 17) {
+        ok=getmatrix("camera","common",M); matrix_result=1;
+    } else if (column == 18) {
+        q=vector(point("world",u+.25,2*v-.5,2+u+v));
+    } else if (column == 19) {
+        M=matrix("world",1); matrix_result=1;
+    } else if (column == 20) {
+        M=matrix("world","common"); matrix_result=1;
+    } else if (column == 21) {
+        ok=getmatrix("common","world",M); matrix_result=1;
+    } else if (column == 22) {
+        q=vector(transform("world","common",p));
+    } else if (column == 23) {
+        q=transform("common","world",vector(p));
+    } else if (column == 24) {
+        q=vector("world",u+.25,2*v-.5,2+u+v);
+    } else if (column == 25) {
+        q=vector(normal("world",u+.25,2*v-.5,2+u+v));
+    } else if (column == 26) {
+        string names[4]={"world","stage","myspace","common"};
+        int index=int(2*v);
+        q=vector(transform(names[index],names[index+1],normal(p)));
+    } else if (column == 27) {
+        q=vector(point("stage",u+.25,2*v-.5,2+u+v));
+    } else if (column == 28) {
+        M=matrix("stage",1); matrix_result=1;
+    } else if (column == 29) {
+        ok=getmatrix("camera","stage",M); matrix_result=1;
+    } else if (column == 30) {
+        string moving=u>v ? "myspace" : "stage";
+        M=v < .5 ? matrix(moving,"$unknown1$") : matrix("$unknown2$",moving);
+        matrix_result=1;
+    } else if (column == 31) {
+        ok=getmatrix("object","shader",M); matrix_result=1;
+    } else {
+        M=matrix("myspace",1,0,0,0,0,2,0,0,0,0,3,0,.5,.25,0,1);
+        matrix_result=1;
+    }
+    if (matrix_result) {
+        float sum=0, diagonal=0;
+        for (int i=0;i<4;++i)
+            for (int j=0;j<4;++j) {
+                sum+=(4*i+j+1)*M[i][j];
+                if (i==j) diagonal+=M[i][j];
+            }
+        Cout=color(sum,diagonal,ok);
+    } else {
+        Cout=color(v < .25 ? q : v < .75 ? Dx(q) : Dy(q));
+    }
+}
+)OSL",
+                                 oso, { }, stdosl)
+        || !ss.LoadMemoryCompiledShader("hart_spaces", oso))
+        return false;
+    auto group = ss.ShaderGroupBegin("hart_spaces");
+    if (!group || !ss.Shader("surface", "hart_spaces", "out")
+        || !ss.ShaderGroupEnd())
+        return false;
+    const SymLocationDesc output("out.Cout", TypeColor, false,
+                                 SymArena::Outputs, 0, 12);
+    ss.add_symlocs(group.get(), { &output, 1 });
+    Matrix44 object(1), shader(1);
+    object.scale(Vec3(2, .5f, 4));
+    object.translate(Vec3(.25f, -.5f, 1));
+    shader.scale(Vec3(.5f, 2, 1));
+    shader[0][1] = .25f;
+    auto bind    = [&](SimpleRenderer& r, bool b) {
+        Matrix44 named(1), world(1), stage(1), camera(1);
+        named.scale(b ? Vec3(.5f, 2, -4) : Vec3(2, 4, .5f));
+        named[0][1] = b ? -.5f : .25f;
+        named.translate(b ? Vec3(-1, .5f, 2) : Vec3(.25f, 1, -.5f));
+        world.scale(Vec3(4, 2, .5f));
+        world.translate(Vec3(.5f, -.25f, 1));
+        stage.scale(Vec3(2, .5f, 4));
+        stage.translate(Vec3(-.5f, 1, .25f));
+        camera.scale(b ? Vec3(.5f, 2, 1) : Vec3(2, 1, .5f));
+        camera.translate(Vec3(.25f, -.5f, 2));
+        r.name_transform("myspace", named);
+        r.name_transform("world", world);
+        r.name_transform("stage", stage);
+        r.name_transform("$unknown1$", world);
+        r.name_transform("$unknown2$", stage);
+        Matrix44 unused(1);
+        unused[0][0] = std::numeric_limits<float>::quiet_NaN();
+        r.name_transform("unused_bad", unused);
+        r.camera_params(camera, ustringhash(b ? "orthographic" : "perspective"),
+                        b ? 60 : 90, b ? .5f : .125f, b ? 128 : 64,
+                        b ? 300 : 640, b ? 600 : 320);
+    };
+    HartOptions options;
+    options.fused = mode == "fused" || mode == "fused-local";
+    auto render   = [&](string_view path) {
+        return testshade_hart_generated(*renderer, ss, *group, options, arch,
+                                        columns, rows, 1, false, true, 0, false,
+                                        path, "float", object, shader);
+    };
+    auto read = [&](string_view path, std::vector<float>& pixels) {
+        OIIO::ImageBuf image(path);
+        if (!image.read(0, 0, true, TypeFloat) || image.nchannels() != 3
+            || image.spec().width != columns || image.spec().height != rows) {
+            diagnostics.errorfmt("Invalid named-space output: {}",
+                                 image.geterror());
+            return false;
+        }
+        pixels.resize(columns * rows * 3);
+        if (!image.get_pixels(image.roi(), TypeFloat, pixels.data())) {
+            diagnostics.errorfmt("Cannot read named-space output: {}",
+                                 image.geterror());
+            return false;
+        }
+        return true;
+    };
+    std::array<std::vector<float>, 3> images;
+    std::string original;
+    const void* original_address = nullptr;
+    for (int pass = 0; pass < 3; ++pass) {
+        const bool b = pass == 1;
+        bind(*renderer, b);
+        if (!ss.attribute("commonspace", b ? "stage" : "world"))
+            return false;
+        print("HART spaces pass {}\n", pass);
+        std::fflush(stdout);
+        if (!render(files.files[pass])
+            || !read(files.files[pass], images[pass]))
+            return false;
+        SimpleRenderer cpu_renderer;
+        bind(cpu_renderer, b);
+        ShadingSystem cpu(&cpu_renderer, nullptr, &diagnostics);
+        cpu_renderer.init_shadingsys(&cpu);
+        if (!cpu.attribute("optimize", optimize)
+            || !cpu.attribute("llvm_debugging_symbols", 0)
+            || !cpu.attribute("commonspace", b ? "stage" : "world")
+            || !cpu.attribute("unknown_coordsys_error", 0)
+            || !cpu.LoadMemoryCompiledShader("hart_spaces", oso))
+            return false;
+        auto cpu_group = cpu.ShaderGroupBegin("hart_spaces");
+        if (!cpu_group || !cpu.Shader("surface", "hart_spaces", "out")
+            || !cpu.ShaderGroupEnd())
+            return false;
+        cpu.add_symlocs(cpu_group.get(), { &output, 1 });
+        auto free_thread = [&](PerThreadInfo* p) {
+            cpu.destroy_thread_info(p);
+        };
+        std::unique_ptr<PerThreadInfo, decltype(free_thread)> thread(
+            cpu.create_thread_info(), free_thread);
+        auto free_context = [&](ShadingContext* p) { cpu.release_context(p); };
+        std::unique_ptr<ShadingContext, decltype(free_context)> context(
+            cpu.get_context(thread.get()), free_context);
+        std::vector<float> reference(columns * rows * 3, 999999);
+        for (int y = 0; y < rows; ++y)
+            for (int x = 0; x < columns; ++x) {
+                const int index = y * columns + x;
+                ShaderGlobals sg { };
+                sg.u             = float(x) / (columns - 1);
+                sg.v             = float(y) / (rows - 1);
+                sg.dudx          = 1.0f / (columns - 1);
+                sg.dvdy          = 1.0f / (rows - 1);
+                sg.time          = float(index);
+                sg.object2common = &object;
+                sg.shader2common = &shader;
+                if (!cpu.execute(*context, *cpu_group, 0, index, sg, nullptr,
+                                 reference.data()))
+                    return false;
+                if (x == 30) {
+                    const ustringhash moving(sg.u > sg.v ? "myspace" : "stage");
+                    Matrix44 from, to;
+                    OIIO_CHECK_ASSERT(cpu_renderer.get_matrix(
+                        nullptr, from,
+                        y == 0 ? moving : ustringhash("$unknown2$"), 0));
+                    OIIO_CHECK_ASSERT(cpu_renderer.get_inverse_matrix(
+                        nullptr, to,
+                        y == 0 ? ustringhash("$unknown1$") : moving, 0));
+                    const Matrix44 composed = from * to;
+                    float sum = 0, diagonal = 0;
+                    for (int i = 0; i < 16; ++i) {
+                        sum += (i + 1) * composed[i / 4][i % 4];
+                        if (i / 4 == i % 4)
+                            diagonal += composed[i / 4][i % 4];
+                    }
+                    OIIO_CHECK_EQUAL(reference[3 * index], sum);
+                    OIIO_CHECK_EQUAL(reference[3 * index + 1], diagonal);
+                }
+                for (int c = 0; c < 3; ++c) {
+                    const float actual   = images[pass][3 * index + c];
+                    const float expected = reference[3 * index + c];
+                    if (!std::isfinite(actual) || !std::isfinite(expected)
+                        || actual == 999999 || expected == 999999
+                        || std::abs(actual - expected)
+                               > 2e-6f + 2e-6f * std::abs(expected)) {
+                        diagnostics.errorfmt(
+                            "Spaces pass {} pixel ({},{}) channel {}: GPU {} CPU {}",
+                            pass, x, y, c, actual, expected);
+                        return false;
+                    }
+                }
+                if (x == 16 || x == 17 || x == 29)
+                    OIIO_CHECK_EQUAL(images[pass][3 * index + 2], 0);
+                if (x == 19 || x == 20 || x == 28 || x == 30 || x == 31
+                    || x == 32 || x == 15 || x == 21)
+                    OIIO_CHECK_EQUAL(images[pass][3 * index + 2], 1);
+            }
+        std::string current;
+        const void* address = nullptr;
+        if (!artifact(ss, *group, current, address, diagnostics))
+            return false;
+        if (pass == 0) {
+            original         = current;
+            original_address = address;
+        } else {
+            OIIO_CHECK_EQUAL(current, original);
+            OIIO_CHECK_EQUAL(address, original_address);
+        }
+    }
+    OIIO_CHECK_ASSERT(images[0] != images[1] && images[0] == images[2]);
+    print("HART spaces expected unknown\n");
+    OIIO_CHECK_ASSERT(ss.attribute("unknown_coordsys_error", 1));
+    OIIO_CHECK_ASSERT(!render(files.files[3]));
+    OIIO_CHECK_ASSERT(!OIIO::Filesystem::exists(files.files[3]));
+    OIIO_CHECK_ASSERT(ss.attribute("unknown_coordsys_error", 0));
+    if (!render(files.files[3]))
+        return false;
+    std::vector<float> recovered;
+    if (!read(files.files[3], recovered))
+        return false;
+    OIIO_CHECK_ASSERT(recovered == images[0]);
+    Matrix44 invalid(1);
+    invalid[0][0] = std::numeric_limits<float>::quiet_NaN();
+    renderer->name_transform("myspace", invalid);
+    print("HART spaces expected invalid\n");
+    OIIO_CHECK_ASSERT(!render(files.files[4]));
+    OIIO_CHECK_ASSERT(!OIIO::Filesystem::exists(files.files[4]));
+    bind(*renderer, false);
+    if (!render(files.files[4]) || !read(files.files[4], recovered))
+        return false;
+    OIIO_CHECK_ASSERT(recovered == images[0]);
+    std::string current;
+    const void* address = nullptr;
+    if (!artifact(ss, *group, current, address, diagnostics))
+        return false;
+    OIIO_CHECK_EQUAL(current, original);
+    OIIO_CHECK_EQUAL(address, original_address);
+    print("HART spaces error recovery passed\n");
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
+bool
 run_raytypes(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 {
     OutputFiles files;
@@ -1582,29 +1877,31 @@ main(int argc, char* argv[])
     const bool userdata    = argc == 4 && string_view(argv[3]) == "userdata";
     const bool raytypes    = argc == 4 && string_view(argv[3]) == "raytypes";
     const bool attributes  = argc == 4 && string_view(argv[3]) == "attributes";
+    const bool spaces      = argc == 4 && string_view(argv[3]) == "spaces";
     const bool library     = argc == 5 && string_view(argv[3]) == "library";
     const string_view mode(argc >= 3 ? argv[2] : "split");
     if ((argc != 2 && argc != 3 && !color && !outputs && !interactive
-         && !userdata && !raytypes && !library && !attributes)
+         && !userdata && !raytypes && !library && !attributes && !spaces)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
             && !((color || outputs || interactive || userdata || raytypes
-                  || library || attributes)
+                  || library || attributes || spaces)
                  && mode == "unoptimized"))) {
         print(
             stderr,
             "Usage: hart_transform_test stdosl.h "
             "[split|fused|fused-local|unoptimized] "
-            "[color|outputs|interactive|userdata|raytypes|attributes|library BITCODE_DIR]\n");
+            "[color|outputs|interactive|userdata|raytypes|attributes|spaces|library BITCODE_DIR]\n");
         return 1;
     }
     Diagnostics diagnostics;
     OIIO_CHECK_ASSERT(
-        attributes ? run_attributes(argv[1], mode, diagnostics)
-        : library  ? run_renderer_library(argv[1], mode, argv[4], diagnostics)
-        : raytypes ? run_raytypes(argv[1], mode, diagnostics)
-        : userdata ? run_userdata(argv[1], mode, diagnostics)
-        : outputs  ? run_outputs(argv[1], mode, diagnostics)
-                   : run(argv[1], mode, color, interactive, diagnostics));
+        spaces       ? run_spaces(argv[1], mode, diagnostics)
+        : attributes ? run_attributes(argv[1], mode, diagnostics)
+        : library    ? run_renderer_library(argv[1], mode, argv[4], diagnostics)
+        : raytypes   ? run_raytypes(argv[1], mode, diagnostics)
+        : userdata   ? run_userdata(argv[1], mode, diagnostics)
+        : outputs    ? run_outputs(argv[1], mode, diagnostics)
+                     : run(argv[1], mode, color, interactive, diagnostics));
     OIIO_CHECK_EQUAL(diagnostics.errors, 0);
     OIIO_CHECK_EQUAL(diagnostics.warnings, 0);
     return unit_test_failures;

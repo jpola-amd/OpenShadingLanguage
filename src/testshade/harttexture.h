@@ -24,6 +24,12 @@ struct HartUserdataBinding {
     cspan<uint8_t> present;
 };
 
+struct HartTransformBinding {
+    ustringhash name;
+    Matrix44 forward { 1 }, inverse { 1 };
+    bool has_forward = false, has_inverse = false;
+};
+
 // Test renderer resources, used only between synchronous HART launches.
 // Files are read as numeric data: first subimage, no color conversion,
 // existing mips followed by box-filtered levels down to 1x1. Missing channels
@@ -43,6 +49,8 @@ public:
     bool prepare_userdata(cspan<HartUserdataBinding> bindings, size_t points,
                           bool grid_defaults);
     bool prepare_attributes(const RenderContext& context);
+    bool prepare_transforms(cspan<HartTransformBinding> bindings,
+                            ustringhash commonspace, bool unknown_error);
     bool reset_errors();
     bool check_errors();
     bool clear();

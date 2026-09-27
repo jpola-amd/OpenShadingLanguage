@@ -1961,7 +1961,9 @@ DECLFOLDER(constfold_triple)
         Symbol& Space(*rop.inst()->argsymbol(op.firstarg() + 1));
         if (Space.is_constant()
             && (Space.get_string() == Strings::common
-                || Space.get_string() == rop.shadingsys().commonspace_synonym()))
+                || (!rop.shadingsys().use_hart()
+                    && Space.get_string()
+                           == rop.shadingsys().commonspace_synonym())))
             using_space = false;
     }
     if (A.is_constant() && A.typespec().is_float() && B.is_constant()
@@ -1999,23 +2001,28 @@ DECLFOLDER(constfold_matrix)
         // and the other is the designated common space synonym.
         Symbol& From(*rop.inst()->argsymbol(op.firstarg() + 1));
         Symbol& To(*rop.inst()->argsymbol(op.firstarg() + 2));
-        ustring from = From.is_constant() ? From.get_string()
-                                          : ustring("$unknown1$");
-        ustring to = To.is_constant() ? To.get_string() : ustring("$unknown2$");
+        const bool constant_names = From.is_constant() && To.is_constant();
+        ustring from      = From.is_constant() ? From.get_string() : ustring();
+        ustring to        = To.is_constant() ? To.get_string() : ustring();
         ustring commonsyn = rop.inst()->shadingsys().commonspace_synonym();
-        if (&From == &To || from == to
-            || ((from == Strings::common && to == commonsyn)
-                || (from == commonsyn && to == Strings::common))) {
+        if (&From == &To
+            || (constant_names
+                && (from == to
+                    || (!rop.shadingsys().use_hart()
+                        && ((from == Strings::common && to == commonsyn)
+                            || (from == commonsyn && to == Strings::common)))))) {
             static Matrix44 ident(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0,
                                   1);
             rop.turn_into_assign(op, rop.add_constant(ident),
                                  "matrix(spaceA,spaceA) => identity matrix");
             return 1;
         }
+        if (rop.shadingsys().use_hart())
+            return 0;  // Named matrices and the common alias are launch bindings.
         // Try to simplify R=matrix(from,to) in cases of an constant (but
         // different) names -- do the matrix retrieval now, if not time-
         // varying matrices.
-        if (!(From.is_constant() && To.is_constant()))
+        if (!constant_names)
             return 0;
         // Shader and object spaces will vary from execution to execution,
         // so we can't optimize those away.
@@ -2053,7 +2060,8 @@ DECLFOLDER(constfold_matrix)
             && Val.get_float() == 1.0f) {
             ustring from = From.get_string();
             if (from == Strings::common
-                || from == rop.inst()->shadingsys().commonspace_synonym()) {
+                || (!rop.shadingsys().use_hart()
+                    && from == rop.inst()->shadingsys().commonspace_synonym())) {
                 static Matrix44 ident(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0,
                                       0, 1);
                 rop.turn_into_assign(op, rop.add_constant(ident),
@@ -2109,6 +2117,8 @@ DECLFOLDER(constfold_getmatrix)
     ustring from      = From.get_string();
     ustring to        = To.get_string();
     ustring commonsyn = rop.inst()->shadingsys().commonspace_synonym();
+    if (rop.shadingsys().use_hart() && from != to)
+        return 0;
 
     // Shader and object spaces will vary from execution to execution,
     // so we can't optimize those away.
@@ -2173,11 +2183,13 @@ DECLFOLDER(constfold_transform)
             OSL_DASSERT(M.typespec().is_string() && T.typespec().is_string());
             ustring from = M.get_string();
             ustring to   = T.get_string();
-            ustring syn  = rop.shadingsys().commonspace_synonym();
-            if (from == syn)
-                from = Strings::common;
-            if (to == syn)
-                to = Strings::common;
+            if (!rop.shadingsys().use_hart()) {
+                ustring syn = rop.shadingsys().commonspace_synonym();
+                if (from == syn)
+                    from = Strings::common;
+                if (to == syn)
+                    to = Strings::common;
+            }
             if (from == to) {
                 rop.turn_into_assign(op, rop.inst()->arg(op.firstarg() + 3),
                                      "transform by identity");

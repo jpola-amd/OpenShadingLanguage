@@ -213,6 +213,7 @@ public:
                || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
                || feature == "HARTInteractive" || feature == "HARTUserdata"
                || feature == "HARTGeometry" || feature == "HARTAttributes"
+               || feature == "HARTNamedTransforms"
                || feature == "build_interpolated_getter"
                || (m_closures && feature == "HARTClosures");
     }
@@ -248,7 +249,8 @@ public:
                  InterpolatedSpecBuiltinArg::Derivatives);
     }
 
-    bool prepare_userdata(cspan<HartUserdataBinding> extra, size_t points)
+    bool prepare_bindings(ShadingSystem& shadingsys,
+                          cspan<HartUserdataBinding> extra, size_t points)
     {
         std::vector<HartUserdataBinding> bindings;
         for (const auto& value : userdata)
@@ -264,8 +266,35 @@ public:
         export_context(context);
         context.world_to_camera = m_world_to_camera;
         context.projection      = m_projection;
+        std::string commonspace;
+        int unknown_error = 0;
+        if (!shadingsys.getattribute("commonspace", commonspace)
+            || !shadingsys.getattribute("unknown_coordsys_error",
+                                        unknown_error)) {
+            errhandler().errorfmt(
+                "HART: cannot query coordinate-space settings");
+            return false;
+        }
+        std::vector<HartTransformBinding> transforms;
+        auto add = [&](ustringhash name) {
+            HartTransformBinding binding;
+            binding.name        = name;
+            binding.has_forward = get_matrix(nullptr, binding.forward, name, 0);
+            binding.has_inverse = get_inverse_matrix(nullptr, binding.inverse,
+                                                     name, 0);
+            transforms.push_back(binding);
+        };
+        for (const auto& entry : m_named_xforms)
+            add(entry.first);
+        for (const auto name : { Hashes::camera, Hashes::screen, Hashes::NDC,
+                                 ustringhash("raster") })
+            if (m_named_xforms.find(name) == m_named_xforms.end())
+                add(name);
         return m_textures.prepare_userdata(bindings, points, true)
-               && m_textures.prepare_attributes(context);
+               && m_textures.prepare_attributes(context)
+               && m_textures.prepare_transforms(transforms,
+                                                ustringhash(commonspace),
+                                                unknown_error != 0);
     }
 
 private:
@@ -925,7 +954,7 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!embedded_raygen(arch, modules[0], err))
         return false;
     auto& textures = generated->textures();
-    if (!generated->prepare_userdata(options.userdata_bindings,
+    if (!generated->prepare_bindings(shadingsys, options.userdata_bindings,
                                      size_t(width) * size_t(height))
         || !textures.prepare(shadingsys))
         return false;
@@ -1250,7 +1279,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         || !embedded_raygen(arch, modules[0], err))
         return false;
     auto& textures = generated->textures();
-    if (!generated->prepare_userdata(options.userdata_bindings, count)
+    if (!generated->prepare_bindings(shadingsys, options.userdata_bindings,
+                                     count)
         || !textures.prepare(shadingsys))
         return false;
     int entry_count = 0;

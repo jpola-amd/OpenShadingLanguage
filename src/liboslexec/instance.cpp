@@ -416,6 +416,82 @@ ShaderInstance::validate_hart() const
         }
         return true;
     };
+    auto validate_transform = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto type = [&](int arg) -> const TypeSpec& {
+            return symbol(arg).typespec();
+        };
+        const ustring name = op.opname();
+        const int nargs    = op.nargs();
+        bool valid         = nargs >= 2 && !symbol(0).is_constant();
+        int spaces = 0, first_float = nargs;
+        if (valid && name == ustring("matrix")) {
+            valid = type(0).is_matrix();
+            if (nargs == 2 || nargs == 17)
+                first_float = 1;
+            else if (nargs == 3 || nargs == 18) {
+                spaces      = nargs == 3 && type(2).is_string() ? 2 : 1;
+                first_float = 1 + spaces;
+            } else
+                valid = false;
+        } else if (valid && name == ustring("getmatrix")) {
+            valid  = nargs == 4 && type(0).is_int() && type(3).is_matrix()
+                     && !symbol(3).is_constant();
+            spaces = 2;
+        } else if (valid
+                   && (name == ustring("point") || name == ustring("vector")
+                       || name == ustring("normal"))) {
+            valid       = (nargs == 4 || nargs == 5) && type(0).is_triple();
+            spaces      = nargs == 5 ? 1 : 0;
+            first_float = 1 + spaces;
+        } else if (valid) {
+            valid  = (nargs == 3 || nargs == 4) && type(0).is_triple()
+                     && type(nargs - 1).is_triple();
+            spaces = nargs == 4 ? 2 : (type(1).is_matrix() ? 0 : 1);
+        }
+        if (valid) {
+            for (int a = 1; a <= spaces; ++a)
+                valid &= type(a).is_string();
+            for (int a = first_float; a < nargs; ++a)
+                valid &= type(a).is_float();
+        }
+        if (!valid) {
+            shadingsys().errorfmt(
+                "HART: invalid coordinate transform operands for '{}' in "
+                "shader '{}' ({}:{})",
+                name, shadername(), op.sourcefile(), op.sourceline());
+            return false;
+        }
+        if (spaces && !shadingsys().renderer()->supports("HARTTransforms")) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTTransforms in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+            return false;
+        }
+        if (!shadingsys().renderer()->supports("HARTNamedTransforms"))
+            for (int a = 1; a <= spaces; ++a) {
+                const Symbol& space = symbol(a);
+                if (!space.is_constant()) {
+                    shadingsys().errorfmt(
+                        "HART: coordinate spaces must be literal strings in "
+                        "shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+                const ustring value = space.get_string();
+                if (value != Strings::common && value != Strings::object
+                    && value != Strings::shader) {
+                    shadingsys().errorfmt(
+                        "HART: unsupported coordinate space '{}' in shader "
+                        "'{}' ({}:{})",
+                        value, shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+            }
+        return true;
+    };
     auto validate_attribute = [&](const Opcode& op) {
         if (!shadingsys().renderer()->supports("HARTAttributes")) {
             shadingsys().errorfmt(
@@ -1083,6 +1159,16 @@ ShaderInstance::validate_hart() const
         }
         if (op.opname() == ustring("getattribute") && !validate_attribute(op))
             return false;
+        const bool spatial = op.opname() == ustring("matrix")
+                             || op.opname() == ustring("getmatrix")
+                             || op.opname() == ustring("transform")
+                             || op.opname() == ustring("transformv")
+                             || op.opname() == ustring("transformn")
+                             || op.opname() == ustring("point")
+                             || op.opname() == ustring("vector")
+                             || op.opname() == ustring("normal");
+        if (spatial && !validate_transform(op))
+            return false;
         if (op.opname() == ustring("texture") && !validate_texture(op))
             return false;
         if (op.opname() == ustring("closure") && !validate_closure(op))
@@ -1173,37 +1259,8 @@ ShaderInstance::validate_hart() const
                 continue;  // Validated literal color spaces, not device strings.
             if (diagnostic && sym.typespec().is_string_based())
                 continue;  // Literal format and typed argument payload.
-            if (sym.typespec().is_string()
-                && (op.opname() == ustring("matrix")
-                    || op.opname() == ustring("getmatrix")
-                    || op.opname() == ustring("transform")
-                    || op.opname() == ustring("transformv")
-                    || op.opname() == ustring("transformn")
-                    || op.opname() == ustring("point")
-                    || op.opname() == ustring("vector")
-                    || op.opname() == ustring("normal"))) {
-                if (!sym.is_constant()) {
-                    shadingsys().errorfmt(
-                        "HART: coordinate spaces must be literal strings in shader '{}' ({}:{})",
-                        shadername(), op.sourcefile(), op.sourceline());
-                    return false;
-                }
-                const ustring space = sym.get_string();
-                if (space != ustring("common") && space != ustring("object")
-                    && space != ustring("shader")) {
-                    shadingsys().errorfmt(
-                        "HART: unsupported coordinate space '{}' in shader '{}' ({}:{})",
-                        space, shadername(), op.sourcefile(), op.sourceline());
-                    return false;
-                }
-                if (!shadingsys().renderer()->supports("HARTTransforms")) {
-                    shadingsys().errorfmt(
-                        "HART: renderer lacks HARTTransforms in shader '{}' ({}:{})",
-                        shadername(), op.sourcefile(), op.sourceline());
-                    return false;
-                }
+            if (spatial && sym.typespec().is_string())
                 continue;
-            }
             // Inlined function markers carry a name, not a device string.
             // The body remains subject to the same per-operation checks.
             if (op.opname() == ustring("functioncall") && op.nargs() == 1

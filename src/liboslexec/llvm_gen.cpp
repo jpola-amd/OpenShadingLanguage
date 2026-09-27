@@ -1943,7 +1943,8 @@ LLVMGEN(llvm_gen_construct_triple)
         if (Space.is_constant()) {
             from = Space.get_string();
             if (from == Strings::common
-                || from == rop.shadingsys().commonspace_synonym())
+                || (!rop.use_hart()
+                    && from == rop.shadingsys().commonspace_synonym()))
                 return true;  // no transformation necessary
         }
         TypeDesc::VECSEMANTICS vectype = TypeDesc::POINT;
@@ -1964,8 +1965,9 @@ LLVMGEN(llvm_gen_construct_triple)
                                 to_arg,
                                 rop.ll.constant((int)vectype) };
         RendererServices* rend(rop.shadingsys().renderer());
-        if (rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0,
-                                   vectype)) {
+        if (!rop.use_hart()
+            && rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0,
+                                      vectype)) {
             // renderer potentially knows about a nonlinear transformation.
             // Note that for the case of non-constant strings, passing empty
             // from & to will make transform_points just tell us if ANY
@@ -2089,11 +2091,13 @@ LLVMGEN(llvm_gen_transform)
         // We can know all the space names at this time
         from        = From ? From->get_string() : Strings::common;
         to          = To->get_string();
-        ustring syn = rop.shadingsys().commonspace_synonym();
-        if (from == syn)
-            from = Strings::common;
-        if (to == syn)
-            to = Strings::common;
+        if (!rop.use_hart()) {
+            ustring syn = rop.shadingsys().commonspace_synonym();
+            if (from == syn)
+                from = Strings::common;
+            if (to == syn)
+                to = Strings::common;
+        }
         if (from == to) {
             // An identity transformation, just copy
             if (Result != P)  // don't bother in-place copy
@@ -2111,11 +2115,14 @@ LLVMGEN(llvm_gen_transform)
                             rop.ll.constant(P->has_derivs()),
                             rop.llvm_void_ptr(*Result),
                             rop.ll.constant(Result->has_derivs()),
-                            rop.llvm_load_value(*From),
+                            From ? rop.llvm_load_value(*From)
+                                 : rop.llvm_const_hash(Strings::common),
                             rop.llvm_load_value(*To),
                             rop.ll.constant((int)vectype) };
     RendererServices* rend(rop.shadingsys().renderer());
-    if (rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0, vectype)) {
+    if (!rop.use_hart()
+        && rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0,
+                                  vectype)) {
         // renderer potentially knows about a nonlinear transformation.
         // Note that for the case of non-constant strings, passing empty
         // from & to will make transform_points just tell us if ANY

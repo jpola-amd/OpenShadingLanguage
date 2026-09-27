@@ -46,6 +46,18 @@ struct HartUserdataState {
     uint32_t grid_defaults, reserved;
 };
 
+struct HartTransformDesc {
+    uint64_t name;
+    uint32_t directions, reserved;
+    float forward[16], inverse[16];
+};
+
+struct HartTransformState {
+    const HartTransformDesc* entries;
+    uint64_t count, commonspace;
+    uint32_t unknown_error, reserved;
+};
+
 // Texture IDs are one-based indices into the launch-time descriptor table.
 struct HartTextureDesc {
     uint64_t object;
@@ -60,12 +72,14 @@ struct HartTextureState {
     OSL::HartDiagnosticBuffer* diagnostics;
     const HartUserdataState* userdata;
     const RenderContext* attributes;
+    const HartTransformState* transforms;
 };
 
 static_assert(
     sizeof(void*) == 8 && sizeof(HartTextureDesc) == 24
-        && sizeof(HartTextureState) == 56 && sizeof(HartUserdataDesc) == 48
-        && sizeof(HartUserdataState) == 48,
+        && sizeof(HartTextureState) == 64 && sizeof(HartUserdataDesc) == 48
+        && sizeof(HartUserdataState) == 48 && sizeof(HartTransformDesc) == 144
+        && sizeof(HartTransformState) == 32,
     "The HART texture ABI requires 64-bit pointers and fixed record sizes");
 static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureDesc, width) == 8
@@ -78,7 +92,18 @@ static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureState, colorsystem) == 24
                   && offsetof(HartTextureState, diagnostics) == 32
                   && offsetof(HartTextureState, userdata) == 40
-                  && offsetof(HartTextureState, attributes) == 48,
+                  && offsetof(HartTextureState, attributes) == 48
+                  && offsetof(HartTextureState, transforms) == 56
+                  && offsetof(HartTransformDesc, name) == 0
+                  && offsetof(HartTransformDesc, directions) == 8
+                  && offsetof(HartTransformDesc, reserved) == 12
+                  && offsetof(HartTransformDesc, forward) == 16
+                  && offsetof(HartTransformDesc, inverse) == 80
+                  && offsetof(HartTransformState, entries) == 0
+                  && offsetof(HartTransformState, count) == 8
+                  && offsetof(HartTransformState, commonspace) == 16
+                  && offsetof(HartTransformState, unknown_error) == 24
+                  && offsetof(HartTransformState, reserved) == 28,
               "Unexpected HART texture ABI offsets");
 static_assert(std::is_trivial<HartTextureDesc>::value
                   && std::is_standard_layout<HartTextureDesc>::value
@@ -87,7 +112,11 @@ static_assert(std::is_trivial<HartTextureDesc>::value
                   && std::is_trivial<HartUserdataDesc>::value
                   && std::is_standard_layout<HartUserdataDesc>::value
                   && std::is_trivial<HartUserdataState>::value
-                  && std::is_standard_layout<HartUserdataState>::value,
+                  && std::is_standard_layout<HartUserdataState>::value
+                  && std::is_trivial<HartTransformDesc>::value
+                  && std::is_standard_layout<HartTransformDesc>::value
+                  && std::is_trivial<HartTransformState>::value
+                  && std::is_standard_layout<HartTransformState>::value,
               "HART texture records must be POD");
 
 }  // namespace testshade
