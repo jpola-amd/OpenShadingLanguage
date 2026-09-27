@@ -11,7 +11,7 @@ parser.add_argument("unit")
 parser.add_argument("stdosl")
 parser.add_argument("--mode", choices=("split", "fused", "fused-local", "unoptimized"),
                     default="split")
-parser.add_argument("--kind", choices=("transform", "color", "outputs", "interactive", "userdata", "raytypes", "library"),
+parser.add_argument("--kind", choices=("transform", "color", "outputs", "interactive", "userdata", "raytypes", "library", "attributes"),
                     default="transform")
 parser.add_argument("--library-dir")
 args = parser.parse_args()
@@ -54,7 +54,7 @@ if args.kind == "outputs":
     assert all("does not match the existing output layout" in e for e in errors[:2]), output
     assert ("does not match the existing output layout" in errors[2]
             or errors[2] == "HART output 'out.Cout' has no resolved numeric storage"), output
-if args.kind in ("interactive", "raytypes", "library"):
+if args.kind in ("interactive", "raytypes", "library", "attributes"):
     assert output.count("Launching HART grid") == 3, output
     assert "ERROR:" not in output, output
 if args.kind == "userdata":

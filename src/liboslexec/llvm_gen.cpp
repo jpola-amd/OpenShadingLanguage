@@ -3432,6 +3432,23 @@ LLVMGEN(llvm_gen_getattribute)
                                                : rop.llvm_const_hash(ustring());
     llvm::Value* attr_name_arg = rop.llvm_load_value(Attribute);
 
+    if (rop.use_hart()) {
+        llvm::Value* args[] = {
+            rop.sg_void_ptr(),
+            rop.shadeindex(),
+            obj_name_arg,
+            attr_name_arg,
+            rop.ll.constant(dest_type),
+            rop.ll.constant_bool(Destination.has_derivs()),
+            array_lookup ? rop.llvm_load_value(Index) : rop.ll.constant(-1),
+            rop.llvm_void_ptr(Destination),
+        };
+        llvm::Value* result = rop.ll.call_function("osl_hart_get_attribute",
+                                                   args);
+        rop.llvm_store_value(rop.ll.op_bool_to_int(result), Result);
+        return true;
+    }
+
     ustring object_name      = (object_lookup && ObjectName.is_constant())
                                    ? ObjectName.get_string()
                                    : ustring();

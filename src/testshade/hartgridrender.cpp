@@ -29,6 +29,7 @@
 #include <OSL/oslquery.h>
 
 #include "hart_generated_bitcode.h"
+#include "render_state.h"
 #include "hartgeneratedparams.h"
 #include "hartgridparams.h"
 #include "hartgridrender.h"
@@ -211,7 +212,7 @@ public:
                || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
                || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
                || feature == "HARTInteractive" || feature == "HARTUserdata"
-               || feature == "HARTGeometry"
+               || feature == "HARTGeometry" || feature == "HARTAttributes"
                || feature == "build_interpolated_getter"
                || (m_closures && feature == "HARTClosures");
     }
@@ -259,7 +260,12 @@ public:
                                    value.type().size() },
                                  { } });
         bindings.insert(bindings.end(), extra.begin(), extra.end());
-        return m_textures.prepare_userdata(bindings, points, true);
+        RenderContext context { };
+        export_context(context);
+        context.world_to_camera = m_world_to_camera;
+        context.projection      = m_projection;
+        return m_textures.prepare_userdata(bindings, points, true)
+               && m_textures.prepare_attributes(context);
     }
 
 private:

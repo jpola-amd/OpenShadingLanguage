@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <type_traits>
 
+struct RenderContext;
+
 namespace testshade {
 
 enum HartDeviceError : unsigned int {
@@ -57,11 +59,12 @@ struct HartTextureState {
     const void* colorsystem;
     OSL::HartDiagnosticBuffer* diagnostics;
     const HartUserdataState* userdata;
+    const RenderContext* attributes;
 };
 
 static_assert(
     sizeof(void*) == 8 && sizeof(HartTextureDesc) == 24
-        && sizeof(HartTextureState) == 48 && sizeof(HartUserdataDesc) == 48
+        && sizeof(HartTextureState) == 56 && sizeof(HartUserdataDesc) == 48
         && sizeof(HartUserdataState) == 48,
     "The HART texture ABI requires 64-bit pointers and fixed record sizes");
 static_assert(offsetof(HartTextureDesc, object) == 0
@@ -74,7 +77,8 @@ static_assert(offsetof(HartTextureDesc, object) == 0
                   && offsetof(HartTextureState, errors) == 16
                   && offsetof(HartTextureState, colorsystem) == 24
                   && offsetof(HartTextureState, diagnostics) == 32
-                  && offsetof(HartTextureState, userdata) == 40,
+                  && offsetof(HartTextureState, userdata) == 40
+                  && offsetof(HartTextureState, attributes) == 48,
               "Unexpected HART texture ABI offsets");
 static_assert(std::is_trivial<HartTextureDesc>::value
                   && std::is_standard_layout<HartTextureDesc>::value

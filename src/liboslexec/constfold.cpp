@@ -2348,6 +2348,9 @@ DECLFOLDER(constfold_getattribute)
     }
 
     if (!found) {
+        // Mutable renderer attributes must come from launch-time device state.
+        if (rop.shadingsys().use_hart())
+            return 0;
         // If the object name is not supplied, it implies that we are
         // supposed to search the shaded object first, then if that fails,
         // the scene-wide namespace.  We can't do that yet, have to wait

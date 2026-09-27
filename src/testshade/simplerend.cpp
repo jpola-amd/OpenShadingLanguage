@@ -486,6 +486,8 @@ SimpleRenderer::get_array_attribute(ShaderGlobals* sg, bool derivatives,
     if (object == RS::Hashes::options && name == RS::Hashes::blahblah
         && type == TypeFloat) {
         *(float*)val = 3.14159;
+        if (derivatives)
+            ((float*)val)[1] = ((float*)val)[2] = 0;
         return true;
     }
 

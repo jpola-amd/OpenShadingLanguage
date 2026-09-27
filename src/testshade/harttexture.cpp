@@ -18,6 +18,7 @@
 #include <OpenImageIO/imagecache.h>
 #include <OpenImageIO/strutil.h>
 
+#include "render_state.h"
 #include "harttexture.h"
 
 OSL_NAMESPACE_BEGIN
@@ -150,6 +151,7 @@ struct HartTextureStore::Impl {
         , userdata_entries(handler)
         , userdata_data(handler)
         , userdata_state(handler)
+        , attributes(handler)
         , diagnostic_host(std::make_unique<HartDiagnosticBuffer>())
     {
     }
@@ -256,6 +258,7 @@ struct HartTextureStore::Impl {
 
     DeviceBuffer descriptors, state, errors, colorsystem, diagnostics;
     DeviceBuffer userdata_entries, userdata_data, userdata_state;
+    DeviceBuffer attributes;
     std::unique_ptr<HartDiagnosticBuffer> diagnostic_host;
     size_t colorsystem_bytes = 0;
     bool dirty               = true;
@@ -581,6 +584,26 @@ HartTextureStore::prepare_userdata(cspan<HartUserdataBinding> bindings,
 
 
 bool
+HartTextureStore::prepare_attributes(const RenderContext& context)
+{
+    auto& impl                    = *m_impl;
+    RenderContext device_context  = context;
+    device_context.journal_buffer = nullptr;
+    DeviceBuffer attributes(impl.err);
+    if (!attributes.allocate(sizeof(context))
+        || !hip_check(impl.err,
+                      hipMemcpy(attributes.data, &device_context,
+                                sizeof(device_context), hipMemcpyHostToDevice),
+                      "hipMemcpy attributes"))
+        return false;
+    std::swap(attributes.data, impl.attributes.data);
+    impl.dirty = true;
+    return attributes.clear();
+}
+
+
+
+bool
 HartTextureStore::prepare()
 {
     auto& impl = *m_impl;
@@ -616,7 +639,8 @@ HartTextureStore::prepare()
         impl.colorsystem.data,
         static_cast<HartDiagnosticBuffer*>(diagnostics.data),
         static_cast<const testshade::HartUserdataState*>(
-            impl.userdata_state.data)
+            impl.userdata_state.data),
+        static_cast<const RenderContext*>(impl.attributes.data)
     };
     if (!hip_check(impl.err,
                    hipMemcpy(state.data, &host_state, sizeof(host_state),
@@ -777,6 +801,7 @@ HartTextureStore::clear()
     ok                     = impl.userdata_state.clear() && ok;
     ok                     = impl.userdata_entries.clear() && ok;
     ok                     = impl.userdata_data.clear() && ok;
+    ok                     = impl.attributes.clear() && ok;
     impl.colorsystem_bytes = 0;
     for (auto& texture : impl.textures)
         ok = texture->clear() && ok;

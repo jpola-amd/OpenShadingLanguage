@@ -950,6 +950,37 @@ userdata are not yet enabled. The `hart-userdata-runtime` and four
 `hart-userdata-rebind-*` opt-in GPU tests cover typed/default values, gradients,
 per-point presence, A-B-A artifact/cache reuse and invalid host bindings.
 
+Generated HART testshade supports all object/index forms of `getattribute`.
+Its camera resolution, projection, pixel aspect, screen window, field of view,
+clipping planes and shutter come from the renderer's current camera settings,
+not constants baked into shader code. It also supplies `osl:version`,
+`shading:index`, the test `options`/`blahblah` value, and the same empty-object,
+index-minus-one userdata fallback as ordinary CPU `SimpleRenderer`.
+Registered camera getters ignore the supplied object and index, as on CPU.
+Missing names or mismatched types/extents return false without modifying the
+destination or its gradients. Uniform values have zero gradients; the CPU
+demo's `options` getter also clears them rather than retaining old gradients.
+
+Custom renderers opt in with `HARTAttributes` and implement the device callback
+`rs_hart_get_attribute`. Its arguments are execution context, int32 shade index,
+object hash, attribute hash, int64 encoded `TypeDesc`, bool derivative demand,
+int32 index (minus one when omitted), and destination; it returns bool.
+The corresponding shadeop is `osl_hart_get_attribute`. No host renderer callback
+is invoked during HART attribute lowering or mutable-attribute constant folding.
+Existing immutable `osl:version` and literal `shader:*name` folds remain;
+dynamic shader metadata and unoptimized shader-name queries are not invented
+as runtime services. The native path tracer does not yet opt into this service.
+
+The grid uploads a fresh camera `RenderContext` with no host journal pointer
+before each render. Its pointer extends `HartTextureState` to 56 bytes, at
+offset 48; the six-argument callable ABI is unchanged. Genuine HIP probes
+cross-check this record and camera layout for every configured architecture.
+The four `hart-attribute-rebind-*` tests check 33 query cases at three grid rows
+against exact numerical expectations and CPU execution, including return codes,
+typed arrays/strings/matrices, derivatives and preserved destinations on misses.
+They rebind camera and userdata A-B-A on one compiled group and verify unchanged
+artifact bytes/addresses, matching cache hits and actual launches.
+
 HART also accepts a device renderer library through the existing
 `ShadingSystem::attribute("lib_bitcode", TypeDesc(TypeDesc::UINT8, byte_count),
 bytes)` API. Supply raw HIP/AMDGPU bitcode for the selected `hart_arch`, before

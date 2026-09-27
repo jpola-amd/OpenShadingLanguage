@@ -3,6 +3,7 @@
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 #include "../testshade/harttextureparams.h"
+#include "../testshade/render_state.h"
 #include <OSL/hart_diagnostics.h>
 #include "opcolor.h"
 
@@ -15,6 +16,7 @@ extern OSL_DEVICE OSL::HartDiagnosticBuffer osl_hart_diagnostic_abi_probe;
 extern OSL_DEVICE testshade::HartTextureState osl_hart_texture_abi_probe;
 extern OSL_DEVICE testshade::HartUserdataState osl_hart_userdata_abi_probe;
 extern OSL_DEVICE testshade::HartUserdataDesc osl_hart_userdata_desc_abi_probe;
+extern OSL_DEVICE RenderContext osl_hart_attributes_abi_probe;
 
 OSL_DEVICE const void*
 osl_hart_color_abi_address()
@@ -38,5 +40,13 @@ osl_hart_userdata_abi_addresses(const void** addresses)
     addresses[0] = &osl_hart_texture_abi_probe;
     addresses[1] = &osl_hart_userdata_abi_probe;
     addresses[2] = &osl_hart_userdata_desc_abi_probe;
+}
+
+
+
+OSL_DEVICE const void*
+osl_hart_attributes_abi_address()
+{
+    return &osl_hart_attributes_abi_probe;
 }
 }

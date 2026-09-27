@@ -7,8 +7,8 @@
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
 // diagnostics, interactive uploads, userdata caching, geometry state, renderer
-// libraries, linked shadeops, control flow, HART provenance, and rejection of
-// unsupported operations.
+// attributes/libraries, linked shadeops, control flow, HART provenance, and
+// rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -28,6 +28,7 @@
 
 #include "../testshade/hartgeneratedparams.h"
 #include "../testshade/hartrenderstate.h"
+#include "../testshade/render_state.h"
 #include "hart_bitcode.h"
 #include "oslexec_pvt.h"
 #include "opcolor.h"
@@ -297,6 +298,46 @@ public:
 
 private:
     bool m_geometry;
+};
+
+
+
+class HartAttributeServices final : public RendererServices {
+public:
+    int supports(string_view feature) const override
+    {
+        return feature == "HART" || feature == "HARTArrayBounds"
+               || feature == "HARTClosures"
+               || feature == "build_attribute_getter"
+               || (attributes && feature == "HARTAttributes");
+    }
+    void build_attribute_getter(const ShaderGroup&, bool, const ustring*,
+                                const ustring*, bool, const int*, TypeDesc,
+                                bool, AttributeGetterSpec&) override
+    {
+        ++builders;
+    }
+    bool get_attribute(ShaderGlobals*, bool, ustringhash, TypeDesc type,
+                       ustringhash, void* data) override
+    {
+        ++host_queries;
+        const float value = 123.0f;
+        if (type == TypeFloat && data)
+            std::memcpy(data, &value, sizeof(value));
+        return type == TypeFloat && data;
+    }
+    bool get_array_attribute(ShaderGlobals*, bool, ustringhash, TypeDesc type,
+                             ustringhash, int, void* data) override
+    {
+        ++host_array_queries;
+        const float value = 456.0f;
+        if (type == TypeFloat && data)
+            std::memcpy(data, &value, sizeof(value));
+        return type == TypeFloat && data;
+    }
+
+    bool attributes  = true;
+    int host_queries = 0, host_array_queries = 0, builders = 0;
 };
 
 
@@ -1031,13 +1072,44 @@ check_color_layout(string_view arch, string_view filename)
     };
     renderer_record("osl_hart_texture_abi_probe",
                     sizeof(testshade::HartTextureState),
-                    { 0, 8, 16, 24, 32, 40 });
+                    { 0, 8, 16, 24, 32, 40, 48 });
     renderer_record("osl_hart_userdata_abi_probe",
                     sizeof(testshade::HartUserdataState),
                     { 0, 8, 16, 24, 32, 40, 44 });
     renderer_record("osl_hart_userdata_desc_abi_probe",
                     sizeof(testshade::HartUserdataDesc),
                     { 0, 8, 16, 24, 32, 40, 44 });
+    renderer_record("osl_hart_attributes_abi_probe", sizeof(RenderContext),
+                    { 0, 4, 8, 72, 80, 84, 100, 108, 112, 116, 120 });
+    const auto* attributes = module.getNamedGlobal(
+        "osl_hart_attributes_abi_probe");
+    if (attributes) {
+        auto* record = llvm::dyn_cast<llvm::StructType>(
+            attributes->getValueType());
+        if (record && record->getNumElements() == 11) {
+            OIIO_CHECK_ASSERT(record->getElementType(0)->isIntegerTy(32)
+                              && record->getElementType(1)->isIntegerTy(32));
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(record->getElementType(2))
+                                 .getFixedValue(),
+                             64);
+            OIIO_CHECK_EQUAL(layout.getTypeAllocSize(record->getElementType(3))
+                                 .getFixedValue(),
+                             8);
+            for (unsigned i : { 4, 7, 8, 9 })
+                OIIO_CHECK_ASSERT(record->getElementType(i)->isFloatTy());
+            for (unsigned i : { 5, 6 }) {
+                const auto* array = llvm::dyn_cast<llvm::ArrayType>(
+                    record->getElementType(i));
+                OIIO_CHECK_ASSERT(array
+                                  && array->getElementType()->isFloatTy());
+                if (array)
+                    OIIO_CHECK_EQUAL(array->getNumElements(), i == 5 ? 4 : 2);
+            }
+            OIIO_CHECK_ASSERT(
+                record->getElementType(10)->isPointerTy()
+                && record->getElementType(10)->getPointerAddressSpace() == 0);
+        }
+    }
     const uint64_t target_size  = layout.getTypeAllocSize(type).getFixedValue();
     const uint64_t target_align = layout.getABITypeAlign(type).value();
     const unsigned int last     = type->getNumElements() - 1;
@@ -1191,6 +1263,9 @@ check_color_layout(string_view arch, string_view filename)
     OIIO_CHECK_ASSERT(!shadeops.getNamedGlobal("osl_hart_userdata_abi_probe"));
     OIIO_CHECK_ASSERT(
         !shadeops.getNamedGlobal("osl_hart_userdata_desc_abi_probe"));
+    OIIO_CHECK_ASSERT(
+        !shadeops.getNamedGlobal("osl_hart_attributes_abi_probe"));
+    OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_attributes_abi_address"));
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_userdata_abi_addresses"));
     int setters = 0;
     for (const auto& setter : shadeops) {
@@ -4715,7 +4790,7 @@ void
 check_userdata_host_layout()
 {
     using namespace testshade;
-    OIIO_CHECK_EQUAL(sizeof(HartTextureState), 48);
+    OIIO_CHECK_EQUAL(sizeof(HartTextureState), 56);
     OIIO_CHECK_EQUAL(alignof(HartTextureState), 8);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, textures), 0);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, count), 8);
@@ -4723,6 +4798,26 @@ check_userdata_host_layout()
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, colorsystem), 24);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, diagnostics), 32);
     OIIO_CHECK_EQUAL(offsetof(HartTextureState, userdata), 40);
+    OIIO_CHECK_EQUAL(offsetof(HartTextureState, attributes), 48);
+    OIIO_CHECK_ASSERT((std::is_same<decltype(HartTextureState::attributes),
+                                    const RenderContext*>::value));
+    OIIO_CHECK_EQUAL(sizeof(RenderContext), 128);
+    OIIO_CHECK_EQUAL(alignof(RenderContext), 8);
+    OIIO_CHECK_ASSERT((
+        std::is_same<decltype(RenderContext::projection), ustringhash>::value));
+    OIIO_CHECK_ASSERT((std::is_same<decltype(RenderContext::world_to_camera),
+                                    Matrix44>::value));
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, xres), 0);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, yres), 4);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, world_to_camera), 8);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, projection), 72);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, pixelaspect), 80);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, screen_window), 84);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, shutter), 100);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, fov), 108);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, hither), 112);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, yon), 116);
+    OIIO_CHECK_EQUAL(offsetof(RenderContext, journal_buffer), 120);
     OIIO_CHECK_ASSERT((std::is_same<decltype(HartTextureState::userdata),
                                     const HartUserdataState*>::value));
     OIIO_CHECK_EQUAL(sizeof(HartUserdataDesc), 48);
@@ -5577,6 +5672,432 @@ check_userdata_modules(string_view arch, string_view stdosl)
                 OIIO::Strutil::contains(errors.last_error, "closure"));
         OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
         OIIO_CHECK_ASSERT(renderer.requests.empty());
+    }
+    return true;
+}
+
+
+
+struct AttributeExpectation {
+    const char* object;
+    const char* name;
+    TypeDesc type;
+    bool derivatives;
+    int index          = -1;
+    bool dynamic_index = false;
+};
+
+
+
+bool
+check_attribute_ir(ShadingSystem& ss, ShaderGroup& group,
+                   cspan<AttributeExpectation> expected, int optimize)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_attributes"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module       = **parsed;
+    const auto& layout = module.getDataLayout();
+    for (const char* name : { "osl_get_attribute", "rs_get_attribute" }) {
+        const auto* legacy = module.getFunction(name);
+        OIIO_CHECK_ASSERT(!legacy || legacy->use_empty());
+    }
+    const auto* wrapper  = module.getFunction("osl_hart_get_attribute");
+    const auto* callback = module.getFunction("rs_hart_get_attribute");
+    if (expected.empty()) {
+        OIIO_CHECK_ASSERT(!wrapper || wrapper->use_empty());
+        OIIO_CHECK_ASSERT(!callback || callback->use_empty());
+        return true;
+    }
+    OIIO_CHECK_ASSERT(callback && !callback->use_empty()
+                      && callback->isDeclaration());
+    if (optimize != 10)
+        return true;
+    for (const auto* function : { wrapper, callback }) {
+        OIIO_CHECK_ASSERT(function && !function->use_empty());
+        if (!function)
+            return false;
+        OIIO_CHECK_EQUAL(function->isDeclaration(), function == callback);
+        OIIO_CHECK_ASSERT(!function->isVarArg()
+                          && function->getReturnType()->isIntegerTy(1));
+        OIIO_CHECK_EQUAL(function->arg_size(), 8);
+        if (function->arg_size() != 8)
+            return false;
+        for (const auto& arg : function->args()) {
+            const unsigned i = arg.getArgNo();
+            OIIO_CHECK_ASSERT(
+                i == 0 || i == 7
+                    ? arg.getType()->isPointerTy()
+                          && arg.getType()->getPointerAddressSpace() == 0
+                    : arg.getType()->isIntegerTy(i == 1 || i == 6 ? 32
+                                                 : i == 5         ? 1
+                                                                  : 64));
+        }
+    }
+    int forwards = 0;
+    for (const auto& block : *wrapper)
+        for (const auto& inst : block)
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                if (call->getCalledFunction() == callback) {
+                    ++forwards;
+                    OIIO_CHECK_EQUAL(call->arg_size(), 8);
+                    OIIO_CHECK_EQUAL(call->getCallingConv(),
+                                     callback->getCallingConv());
+                    for (unsigned i = 0; i < call->arg_size() && i < 8; ++i)
+                        OIIO_CHECK_EQUAL(call->getArgOperand(i),
+                                         wrapper->getArg(i));
+                    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(
+                        block.getTerminator());
+                    OIIO_CHECK_ASSERT(ret && ret->getReturnValue() == call);
+                }
+    OIIO_CHECK_EQUAL(forwards, 1);
+    auto hash_matches = [](const llvm::Value* value, const char* text) {
+        const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+        return text
+                   ? constant
+                         && constant->getZExtValue() == ustringhash(text).hash()
+                   : !llvm::isa<llvm::Constant>(value);
+    };
+    std::vector<int> seen(expected.size(), 0);
+    int calls = 0;
+    for (const auto* user : wrapper->users()) {
+        const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+        if (!call || call->getCalledFunction() != wrapper)
+            continue;
+        const auto* function = call->getFunction();
+        if (function->getName().find("osl_layer_group_") != 0)
+            continue;
+        ++calls;
+        OIIO_CHECK_EQUAL(function->arg_size(), 6);
+        OIIO_CHECK_EQUAL(call->arg_size(), 8);
+        if (function->arg_size() != 6 || call->arg_size() != 8)
+            continue;
+        OIIO_CHECK_EQUAL(call->getCallingConv(), wrapper->getCallingConv());
+        OIIO_CHECK_EQUAL(call->getArgOperand(0)->stripPointerCasts(),
+                         function->getArg(0));
+        OIIO_CHECK_EQUAL(call->getArgOperand(1), function->getArg(4));
+        const auto* type = llvm::dyn_cast<llvm::ConstantInt>(
+            call->getArgOperand(4));
+        const auto* derivatives = llvm::dyn_cast<llvm::ConstantInt>(
+            call->getArgOperand(5));
+        const auto* index = llvm::dyn_cast<llvm::ConstantInt>(
+            call->getArgOperand(6));
+        OIIO_CHECK_ASSERT(type && derivatives);
+        if (!type || !derivatives)
+            continue;
+        int matches = 0;
+        for (size_t i = 0; i < expected.size(); ++i) {
+            const auto& test      = expected[i];
+            uint64_t encoded_type = 0;
+            static_assert(sizeof(TypeDesc) == sizeof(encoded_type));
+            std::memcpy(&encoded_type, &test.type, sizeof(encoded_type));
+            if (type->getZExtValue() != encoded_type
+                || !hash_matches(call->getArgOperand(2), test.object)
+                || !hash_matches(call->getArgOperand(3), test.name)
+                || (test.dynamic_index
+                        ? index != nullptr
+                        : !index || index->getSExtValue() != test.index))
+                continue;
+            ++matches;
+            ++seen[i];
+            OIIO_CHECK_EQUAL(derivatives->getZExtValue(),
+                             uint64_t(test.derivatives));
+            int64_t offset         = 0;
+            const auto* allocation = llvm::dyn_cast<llvm::AllocaInst>(
+                llvm::GetPointerBaseWithConstantOffset(call->getArgOperand(7),
+                                                       offset, layout));
+            OIIO_CHECK_ASSERT(allocation && offset >= 0);
+            if (!allocation || offset < 0)
+                continue;
+            OIIO_CHECK_EQUAL(allocation->getAddressSpace(), 5);
+            const auto* count = llvm::dyn_cast<llvm::ConstantInt>(
+                allocation->getArraySize());
+            OIIO_CHECK_ASSERT(count);
+            if (count) {
+                const uint64_t available
+                    = layout.getTypeAllocSize(allocation->getAllocatedType())
+                          .getFixedValue()
+                      * count->getZExtValue();
+                const uint64_t required = test.type.size()
+                                          * (test.derivatives ? 3 : 1);
+                OIIO_CHECK_ASSERT(uint64_t(offset) <= available
+                                  && required <= available - uint64_t(offset));
+            }
+            auto typed = [&](const auto& self, llvm::Type* storage) -> bool {
+                if (auto* array = llvm::dyn_cast<llvm::ArrayType>(storage))
+                    return self(self, array->getElementType());
+                if (auto* record = llvm::dyn_cast<llvm::StructType>(storage)) {
+                    if (record->isOpaque())
+                        return false;
+                    for (auto* field : record->elements())
+                        if (!self(self, field))
+                            return false;
+                    return true;
+                }
+                return test.type.basetype == TypeDesc::FLOAT
+                           ? storage->isFloatTy()
+                           : storage->isIntegerTy(
+                                 test.type.basetype == TypeDesc::STRING ? 64
+                                                                        : 32);
+            };
+            OIIO_CHECK_ASSERT(typed(typed, allocation->getAllocatedType()));
+        }
+        OIIO_CHECK_EQUAL(matches, 1);
+        bool integer_status = false;
+        for (const auto* user : call->users())
+            if (const auto* extend = llvm::dyn_cast<llvm::ZExtInst>(user))
+                integer_status |= extend->getType()->isIntegerTy(32)
+                                  && !extend->use_empty();
+        OIIO_CHECK_ASSERT(integer_status);
+    }
+    OIIO_CHECK_EQUAL(calls, expected.size());
+    for (int count : seen)
+        OIIO_CHECK_EQUAL(count, 1);
+    return true;
+}
+
+
+
+bool
+check_attribute_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_attribute_types(output color Cout=0) { "
+        "float f=1, fa[2]={2,3}; int i=4, ia[3]={5,6,7}; "
+        "color c=color(8); string s=\"old\", sa[2]={\"left\",\"right\"}; "
+        "matrix m=1; vector va[2]={vector(9),vector(10)}; "
+        "int ok=getattribute(\"attr:f\",f); "
+        "ok+=getattribute(\"attr:fa\",fa); "
+        "ok+=getattribute(\"attr:i\",2,i); "
+        "ok+=getattribute(\"attr:ia\",3,ia); "
+        "ok+=getattribute(\"camera\",\"attr:c\",c); "
+        "ok+=getattribute(\"scene\",\"attr:sa\",sa); "
+        "ok+=getattribute(\"camera\",\"attr:m\",4,m); "
+        "ok+=getattribute(\"scene\",\"attr:va\",5,va); "
+        "ok+=getattribute(\"attr:s\",s); "
+        "Cout=c+color(f+fa[0]+fa[1]+i+ia[0]+ia[1]+ia[2]+ok,"
+        "m[0][0]+m[3][3]+(s==\"new\")+(sa[0]==sa[1]),"
+        "va[0][0]+va[1][2]); "
+        "Cout+=Dx(c)+Dy(c)+color(Dx(f)+Dy(f)+Dx(fa[0])+Dy(fa[1]))"
+        "+color(Dx(va[0])+Dy(va[1])); }",
+        "shader hart_attribute_dynamic(output color Cout=0) { "
+        "string name=u>v?\"attr:left\":\"attr:right\"; "
+        "string object=u>0.5?\"camera\":\"scene\"; int index=int(3*u)-1; "
+        "float a=1,b=2,c=3; int ok=getattribute(name,a); "
+        "ok+=getattribute(name,index,b); "
+        "ok+=getattribute(object,name,index,c); "
+        "Cout=color(a+b+c+ok,Dx(a)+Dx(b)+Dx(c),Dy(a)+Dy(b)+Dy(c)); }",
+        "shader hart_test(output color Cout=0) { "
+        "int version=0; string shader_name=\"\",layer_name=\"\",group_name=\"\"; "
+        "int ok=getattribute(\"osl:version\",version); "
+        "ok+=getattribute(\"shader:shadername\",shader_name); "
+        "ok+=getattribute(\"shader:layername\",layer_name); "
+        "ok+=getattribute(\"shader:groupname\",group_name); "
+        "Cout=color(version,(shader_name==\"hart_test\")+(layer_name==\"layer0\"),"
+        "(group_name==\"hart_test_group\")+ok); }",
+        "shader hart_attribute_mutable(output color Cout=0) { "
+        "float a=1,b=2; int ok=getattribute(\"camera\",\"mutable:value\",a); "
+        "ok+=getattribute(\"camera\",\"mutable:array\",-2,b); "
+        "Cout=color(a,b,ok)+color(Dx(a),Dy(b),0); }",
+        "struct HartAttributeBad { float member; }; "
+        "shader hart_attribute_bad(string object=\"camera\", string name=\"attr\", "
+        "string names[2]={\"a\",\"b\"}, int index=1, float bad_index=0, "
+        "HartAttributeBad structure={0}, closure color closure_value=0, "
+        "output float value=0, output int ok=0, output color Cout=0) { "
+        "ok=getattribute(object,name,1,value); "
+        "Cout=color(value+bad_index+index+structure.member+ok); }",
+        "shader hart_attribute_clean(output color Cout=0) { Cout=color(u,v,1); }",
+    };
+    std::string oso[std::size(sources)];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], oso[i], {}, stdosl))
+            return false;
+    }
+    const AttributeExpectation typed[] = {
+        { "", "attr:f", TypeFloat, true },
+        { "", "attr:fa", TypeDesc(TypeDesc::FLOAT, 2), true },
+        { "", "attr:i", TypeInt, false, 2 },
+        { "", "attr:ia", TypeDesc(TypeDesc::INT, 3), false, 3 },
+        { "camera", "attr:c", TypeColor, true },
+        { "scene", "attr:sa", TypeDesc(TypeDesc::STRING, 2), false },
+        { "camera", "attr:m", TypeMatrix, false, 4 },
+        { "scene", "attr:va",
+          TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::VECTOR, 2), true,
+          5 },
+        { "", "attr:s", TypeString, false },
+    };
+    const AttributeExpectation dynamic[] = {
+        { "", nullptr, TypeFloat, true },
+        { "", nullptr, TypeFloat, true, 0, true },
+        { nullptr, nullptr, TypeFloat, true, 0, true },
+    };
+    const AttributeExpectation metadata[] = {
+        { "", "osl:version", TypeInt, false },
+        { "", "shader:shadername", TypeString, false },
+        { "", "shader:layername", TypeString, false },
+        { "", "shader:groupname", TypeString, false },
+    };
+    const AttributeExpectation mutable_attributes[] = {
+        { "camera", "mutable:value", TypeFloat, true },
+        { "camera", "mutable:array", TypeFloat, true, -2 },
+    };
+    const cspan<AttributeExpectation> expectations[]
+        = { typed, dynamic, metadata, mutable_attributes };
+    const struct {
+        int source, osl, llvm;
+        bool local;
+    } variants[] = {
+        { 0, 0, 10, false }, { 0, 2, 10, true }, { 0, 2, 3, true },
+        { 1, 0, 10, false }, { 1, 2, 10, true }, { 1, 2, 3, false },
+        { 2, 0, 10, false }, { 2, 2, 10, true }, { 2, 2, 3, false },
+        { 3, 2, 10, false },
+    };
+    for (const auto& variant : variants) {
+        HartAttributeServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", variant.osl);
+        ss.attribute("llvm_optimize", variant.llvm);
+        OIIO_CHECK_ASSERT(ss.attribute("max_hart_groupdata_alloc",
+                                       variant.local ? 4096 : 0));
+        auto group = make_group(ss, oso[variant.source]);
+        ss.optimize_group(group.get(), nullptr);
+        if (errors.errors)
+            print(stderr, "HART getattribute source {} OSL{} LLVM{}: {}\n",
+                  variant.source, variant.osl, variant.llvm, errors.messages);
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        const bool folded = variant.source == 2 && variant.osl == 2;
+        check_module(
+            ss, *group, arch,
+            folded
+                ? std::initializer_list<string_view> {}
+                : std::initializer_list<string_view> { "osl_hart_get_attribute",
+                                                       "rs_hart_get_attribute" },
+            variant.llvm, false, variant.source == 1, false, 0, false, true);
+        if (!check_attribute_ir(ss, *group,
+                                folded ? cspan<AttributeExpectation> {}
+                                       : expectations[variant.source],
+                                variant.llvm))
+            return false;
+        int allocated = -1, group_size = 0;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "hart_groupdata_alloc", allocated));
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "llvm_groupdata_size", group_size));
+        OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+        OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+        OIIO_CHECK_EQUAL(renderer.host_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.host_array_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.builders, 0);
+    }
+    for (bool unused : { false, true }) {
+        HartAttributeServices renderer;
+        renderer.attributes = false;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        auto group = make_group(ss, oso[3]);
+        if (unused) {
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("attribute_clean", oso[5]));
+            group = ss.ShaderGroupBegin("hart_test_group");
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "unused"));
+            OIIO_CHECK_ASSERT(
+                ss.Shader("surface", "attribute_clean", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("layer0.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+        }
+        check_rejected_group(ss, *group, errors,
+                             "renderer lacks HARTAttributes");
+        OIIO_CHECK_EQUAL(renderer.host_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.host_array_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.builders, 0);
+    }
+    const auto op    = oso[4].find("\tgetattribute\t");
+    const auto end   = oso[4].find('\n', op);
+    const auto hints = oso[4].find('%', op);
+    OIIO_CHECK_ASSERT(op != std::string::npos && end != std::string::npos
+                      && hints < end);
+    if (op == std::string::npos || end == std::string::npos || hints >= end)
+        return false;
+    std::vector<std::string> original;
+    OIIO::Strutil::split(string_view(oso[4]).substr(op, hints - op), original,
+                         "", -1);
+    OIIO_CHECK_EQUAL(original.size(), 6);
+    if (original.size() != 6)
+        return false;
+    const std::string original_hints = oso[4].substr(hints, end - hints);
+    const std::string rw_prefix      = "%argrw{\"";
+    const auto rw                    = original_hints.find(rw_prefix);
+    const auto rw_end                = rw == std::string::npos
+                                           ? std::string::npos
+                                           : original_hints.find('"', rw + rw_prefix.size());
+    OIIO_CHECK_ASSERT(rw != std::string::npos && rw_end != std::string::npos);
+    if (rw == std::string::npos || rw_end == std::string::npos)
+        return false;
+    const struct {
+        unsigned operand;
+        const char* replacement;
+    } replacements[] = {
+        { 1, "value" },     { 2, "bad_index" }, { 2, "names" },
+        { 3, "bad_index" }, { 4, "bad_index" }, { 5, "closure_value" },
+        { 5, "structure" },
+    };
+    std::vector<std::vector<std::string>> malformed;
+    for (const auto& test : replacements) {
+        malformed.push_back(original);
+        malformed.back()[test.operand] = test.replacement;
+    }
+    malformed.push_back({ original[0], original[1], original[2] });
+    malformed.push_back(original);
+    malformed.back().push_back("value");
+    malformed.push_back({ original[0], "ok", "bad_index", "value" });
+    for (unsigned operand : { 1, 5 }) {
+        malformed.push_back(original);
+        malformed.back()[operand] = original[4];  // The literal integer index.
+    }
+    for (const auto& words : malformed) {
+        auto bytecode = oso[4];
+        auto op_hints = original_hints;
+        // Keep valid reader metadata so arity failures reach HART validation.
+        std::string access(words.size() - 1, 'r');
+        access.front() = access.back() = 'w';
+        op_hints.replace(rw + rw_prefix.size(), rw_end - rw - rw_prefix.size(),
+                         access);
+        bytecode.replace(op, end - op,
+                         fmtformat("\t{}\t{}", OIIO::Strutil::join(words, "\t"),
+                                   op_hints));
+        HartAttributeServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        ss.attribute("optimize", 2);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors,
+                             "invalid getattribute operands");
+        OIIO_CHECK_EQUAL(renderer.host_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.host_array_queries, 0);
+        OIIO_CHECK_EQUAL(renderer.builders, 0);
     }
     return true;
 }
@@ -10906,6 +11427,7 @@ main(int argc, char* argv[])
         || !check_explicit_entry_modules(arch, argv[2], oso[0], oso[5])
         || !check_interactive_modules(arch, argv[2])
         || !check_userdata_modules(arch, argv[2])
+        || !check_attribute_modules(arch, argv[2])
         || !check_renderer_library_modules(arch, argv[2], argv[4], argv[5],
                                            oso[0])
         || !check_diagnostic_modules(arch, argv[2])

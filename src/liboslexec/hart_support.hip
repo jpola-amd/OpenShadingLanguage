@@ -18,6 +18,22 @@ osl_hart_get_userdata(void* ec, int shade_index, OSL::ustringhash_pod name,
 
 
 
+extern "C" __device__ bool
+rs_hart_get_attribute(void* ec, int shade_index, OSL::ustringhash_pod object,
+                      OSL::ustringhash_pod name, long long type,
+                      bool derivatives, int index, void* result);
+
+extern "C" __device__ bool
+osl_hart_get_attribute(void* ec, int shade_index, OSL::ustringhash_pod object,
+                       OSL::ustringhash_pod name, long long type,
+                       bool derivatives, int index, void* result)
+{
+    return rs_hart_get_attribute(ec, shade_index, object, name, type,
+                                 derivatives, index, result);
+}
+
+
+
 extern "C" __device__ void
 rs_hart_diagnostic(void* ec, OSL::ustringhash_pod format, int count,
                    const unsigned char* types, int bytes,

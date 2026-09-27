@@ -742,7 +742,7 @@ run_outputs(string_view stdosl, string_view mode, Diagnostics& diagnostics)
         || !ss.ShaderGroupEnd())
         return false;
     HartOptions options;
-    options.fused = mode == "fused" || mode == "fused-local";
+    options.fused          = mode == "fused" || mode == "fused-local";
     options.shader_entries = { "out" };
     const Matrix44 identity(1);
     std::string original_bitcode;
@@ -1093,6 +1093,377 @@ run_renderer_library(string_view stdosl, string_view mode,
 
 
 bool
+run_attributes(string_view stdosl, string_view mode, Diagnostics& diagnostics)
+{
+    constexpr int columns = 33, rows = 3;
+    OutputFiles files;
+    if (!files.create(diagnostics))
+        return false;
+    std::string arch;
+    auto renderer = testshade_hart_renderer(0, arch);
+    if (!renderer)
+        return false;
+    renderer->errhandler().verbosity(ErrorHandler::VERBOSE);
+    ShadingSystem ss(renderer.get(), nullptr, &diagnostics);
+    renderer->init_shadingsys(&ss);
+    const int optimize = mode == "unoptimized" ? 0 : 2;
+    if (!ss.attribute("hart_arch", arch)
+        || !ss.attribute("llvm_debugging_symbols", 0)
+        || !ss.attribute("llvm_profiling_events", 0)
+        || !ss.attribute("max_hart_groupdata_alloc",
+                         mode == "fused-local" ? 1048576 : 0)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+        || !ss.attribute("optimize", optimize))
+        return false;
+    OSLCompiler compiler(&diagnostics);
+    std::string oso;
+    if (!compiler.compile_buffer(R"OSL(
+shader hart_attributes(output color Cout=-1000)
+{
+    int column = int(32*u + .5);
+    float q = u + 2*v;
+    int ok = 0;
+    if (column == 0) {
+        ok = getattribute("camera", "camera:fov", q);
+    } else if (column == 1) {
+        string obj = v < .25 ? "" : "my_camera";
+        string name = v < .25 ? "camera:clip_near" : "camera:clip_far";
+        ok = getattribute(obj, name, int(2*v)-1, q);
+    } else if (column == 2) {
+        int resolution[2] = {-1,-2};
+        if (getattribute("camera:resolution", resolution))
+            Cout = color(resolution[0],resolution[1],1);
+    } else if (column == 3) {
+        string projection = "initial";
+        if (getattribute("camera:projection", projection))
+            Cout = color(projection=="perspective",projection=="orthographic",1);
+    } else if (column == 4) {
+        ok = getattribute("camera:pixelaspect", q);
+    } else if (column == 5) {
+        float window[4] = {u,v,u+v,u+2*v};
+        if (getattribute("camera:screen_window", window)) {
+            if (v < .25) Cout = color(window[0],window[1],window[2]);
+            else if (v < .75) Cout = color(window[3],Dx(window[0]),Dy(window[3]));
+            else Cout = color(Dx(window[1])+Dx(window[2])+Dx(window[3]),
+                              Dy(window[0])+Dy(window[1])+Dy(window[2]),1);
+        }
+    } else if (column == 6 || column == 7 || column == 19) {
+        float values[2] = {u+v,u+2*v};
+        string name = column == 6 ? "camera:clip" :
+                      column == 7 ? "camera:shutter" : "array_values";
+        if (getattribute(name, -1, values))
+            Cout = v < .25 ? color(values[0],values[1],1) :
+                   v < .75 ? color(Dx(values[0]),Dx(values[1]),1) :
+                             color(Dy(values[0]),Dy(values[1]),1);
+    } else if (column == 8) {
+        ok = getattribute("camera:shutter_open", q);
+    } else if (column == 9) {
+        ok = getattribute("camera:shutter_close", q);
+    } else if (column == 10) {
+        ok = getattribute("camera:clip_near", 3, q);
+    } else if (column == 11) {
+        ok = getattribute("camera:clip_far", q);
+    } else if (column == 12) {
+        string name = v < .25 ? "osl:version" : "missing";
+        int version = -99;
+        int found = getattribute(name, version);
+        Cout = color(found,version,0);
+    } else if (column == 13) {
+        int index = -1;
+        if (getattribute("", "shading:index", 0, index))
+            Cout = color(index,1,0);
+    } else if (column == 14 || column == 21) {
+        int found = column == 14 ? getattribute("missing", q) :
+                                  getattribute("object", "s", q);
+        ok = !found;
+    } else if (column == 15 || column == 31) {
+        int value = 7;
+        int found = column == 15 ? getattribute("camera:fov", value) :
+                                  getattribute("object", "shading:index", value);
+        Cout = color(value,found,0);
+    } else if (column == 16) {
+        float values[3] = {q,7,9};
+        if (!getattribute("camera:clip", values))
+            Cout = v < .25 ? color(values[0],values[1],values[2]) :
+                   v < .75 ? color(Dx(values[0]),Dx(values[1]),Dx(values[2])) :
+                             color(Dy(values[0]),Dy(values[1]),Dy(values[2]));
+    } else if (column == 17) {
+        ok = getattribute("s", q);
+    } else if (column == 18) {
+        ok = getattribute("renderer_weight", q);
+    } else if (column == 20) {
+        string label = "initial";
+        if (getattribute("label", label))
+            Cout = color(label=="hello",label=="world",1);
+    } else if (column == 22) {
+        int found = getattribute("s", int(2*v)-1, q);
+        ok = found == (v < .25);
+    } else if (column == 23) {
+        string a="initial", b="initial", c="initial";
+        int aa=getattribute("shader:shadername",a);
+        int bb=getattribute("shader:layername",b);
+        int cc=getattribute("shader:groupname",c);
+        Cout=color(aa ? (a=="hart_attributes" ? 1 : -1000) :
+                       (a=="initial" ? 0 : -1000),
+                   bb ? (b=="out" ? 1 : -1000) : (b=="initial" ? 0 : -1000),
+                   cc ? (c=="hart_attributes" ? 1 : -1000) :
+                       (c=="initial" ? 0 : -1000));
+    } else if (column == 24) {
+        string name=v < .25 ? "shader:shadername" :
+                    v < .75 ? "shader:layername" : "shader:groupname";
+        string value="initial";
+        int found=getattribute(name,value);
+        Cout=color(found,value=="initial",0);
+    } else if (column == 25) {
+        matrix M=1;
+        if (getattribute("matrix_value",M)) {
+            float sum=0, diagonal=0;
+            for (int i=0; i<4; ++i)
+                for (int j=0; j<4; ++j) {
+                    sum += M[i][j];
+                    if (i==j) diagonal += M[i][j];
+                }
+            Cout=color(sum,diagonal,1);
+        }
+    } else if (column == 26) {
+        color tint=0;
+        if (getattribute("tint",tint)) Cout=tint;
+    } else if (column == 27) {
+        normal n=normal(q,7,9);
+        if (!getattribute("tint",n))
+            Cout = color(v < .25 ? n : v < .75 ? Dx(n) : Dy(n));
+    } else if (column == 28 || column == 30) {
+        string labels[2]={"sentinel",""};
+        if (column == 28) {
+            if (getattribute("labels",labels))
+                Cout=color(labels[0]=="hello",labels[1]=="world",1);
+        } else {
+            int found=getattribute("never",int(v),labels);
+            Cout=color(found,labels[0]=="sentinel",labels[1]=="");
+        }
+    } else if (column == 29) {
+        ok=getattribute("options","blahblah",q);
+    } else if (column == 32) {
+        string object=v < .25 ? "" : "scene";
+        int found=getattribute(object,"renderer_weight",-1,q);
+        ok=found==(v < .25);
+    }
+    if (ok) Cout=color(q,Dx(q),Dy(q));
+}
+)OSL",
+                                 oso, { }, stdosl)
+        || !ss.LoadMemoryCompiledShader("hart_attributes", oso))
+        return false;
+    auto group = ss.ShaderGroupBegin("hart_attributes");
+    if (!group || !ss.Shader("surface", "hart_attributes", "out")
+        || !ss.ShaderGroupEnd())
+        return false;
+    const SymLocationDesc output("out.Cout", TypeColor, false,
+                                 SymArena::Outputs, 0, 12);
+    ss.add_symlocs(group.get(), { &output, 1 });
+    HartOptions options;
+    options.fused = mode == "fused" || mode == "fused-local";
+    const Matrix44 identity(1);
+    std::string original;
+    const void* original_address = nullptr;
+    std::array<std::vector<float>, 3> images;
+    for (int pass = 0; pass < 3; ++pass) {
+        const bool b = pass == 1;
+        auto bind    = [&](SimpleRenderer& r) {
+            r.camera_params(identity,
+                            ustringhash(b ? "orthographic" : "perspective"),
+                            b ? 72 : 45, b ? .5f : .125f, b ? 128 : 64,
+                            b ? 300 : 640, b ? 600 : 320);
+            r.userdata.clear();
+            auto add = [&](const char* name, TypeDesc type, const void* data) {
+                r.userdata.emplace_back(ustring(name), type, 1, data);
+            };
+            const float weight   = b ? -1.5f : 2.5f;
+            const float values[] = { b ? -2.0f : 3.0f, b ? 7.0f : -4.0f };
+            const float tint[]   = { b ? .5f : .125f, b ? 1.0f : .25f,
+                                     b ? 2.0f : .5f };
+            const ustring label(b ? "world" : "hello");
+            const ustring labels[] = { ustring(b ? "" : "hello"),
+                                       ustring(b ? "world" : "") };
+            Matrix44 matrix;
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    matrix[i][j] = (4 * i + j + 1) * (b ? -.125f : .0625f);
+            add("renderer_weight", TypeFloat, &weight);
+            add("array_values", TypeDesc(TypeDesc::FLOAT, 2), values);
+            add("label", TypeString, &label);
+            add("labels", TypeDesc(TypeDesc::STRING, 2), labels);
+            add("matrix_value", TypeMatrix, &matrix);
+            add("tint", TypeColor, tint);
+        };
+        bind(*renderer);
+        print("HART attributes pass {}\n", pass);
+        std::fflush(stdout);
+        if (!testshade_hart_generated(*renderer, ss, *group, options, arch,
+                                      columns, rows, 1, false, true, 0, false,
+                                      files.files[pass], "float", identity,
+                                      identity))
+            return false;
+        OIIO::ImageBuf image(files.files[pass]);
+        if (!image.read(0, 0, true, TypeFloat) || image.nchannels() != 3
+            || image.spec().width != columns || image.spec().height != rows) {
+            diagnostics.errorfmt("Invalid attribute output: {}",
+                                 image.geterror());
+            return false;
+        }
+        images[pass].resize(columns * rows * 3);
+        if (!image.get_pixels(image.roi(), TypeFloat, images[pass].data())) {
+            diagnostics.errorfmt("Cannot read attribute output: {}",
+                                 image.geterror());
+            return false;
+        }
+        SimpleRenderer cpu_renderer;
+        bind(cpu_renderer);
+        ShadingSystem cpu(&cpu_renderer, nullptr, &diagnostics);
+        cpu_renderer.init_shadingsys(&cpu);
+        if (!cpu.attribute("optimize", optimize)
+            || !cpu.attribute("llvm_debugging_symbols", 0)
+            || !cpu.LoadMemoryCompiledShader("hart_attributes", oso))
+            return false;
+        auto cpu_group = cpu.ShaderGroupBegin("hart_attributes");
+        if (!cpu_group || !cpu.Shader("surface", "hart_attributes", "out")
+            || !cpu.ShaderGroupEnd())
+            return false;
+        cpu.add_symlocs(cpu_group.get(), { &output, 1 });
+        auto free_thread = [&](PerThreadInfo* p) {
+            cpu.destroy_thread_info(p);
+        };
+        std::unique_ptr<PerThreadInfo, decltype(free_thread)> thread(
+            cpu.create_thread_info(), free_thread);
+        auto free_context = [&](ShadingContext* p) { cpu.release_context(p); };
+        std::unique_ptr<ShadingContext, decltype(free_context)> context(
+            cpu.get_context(thread.get()), free_context);
+        std::vector<float> reference(columns * rows * 3, -1000);
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < columns; ++x) {
+                const int index = y * columns + x;
+                ShaderGlobals sg { };
+                sg.u    = float(x) / (columns - 1);
+                sg.v    = float(y) / (rows - 1);
+                sg.dudx = 1.0f / (columns - 1);
+                sg.dvdy = 1.0f / (rows - 1);
+                if (!cpu.execute(*context, *cpu_group, 0, index, sg, nullptr,
+                                 reference.data()))
+                    return false;
+                const float q         = sg.u + 2 * sg.v;
+                const float clip_near = b ? .5f : .125f;
+                const float clip_far  = b ? 128 : 64;
+                const float weight    = b ? -1.5f : 2.5f;
+                std::array<float, 3> expected { };
+                switch (x) {
+                case 0: expected = { b ? 72.0f : 45.0f, 0, 0 }; break;
+                case 1:
+                    expected = { y == 0 ? clip_near : clip_far, 0, 0 };
+                    break;
+                case 2:
+                    expected = { b ? 300.0f : 640.0f, b ? 600.0f : 320.0f, 1 };
+                    break;
+                case 3:
+                case 20:
+                case 28:
+                    expected = { b ? 0.0f : 1.0f, b ? 1.0f : 0.0f, 1 };
+                    break;
+                case 4:
+                case 9: expected = { 1, 0, 0 }; break;
+                case 5:
+                    expected = y == 0 ? std::array<float, 3> { b ? -.5f : -2,
+                                                               -1, b ? .5f : 2 }
+                               : y == 1 ? std::array<float, 3> { 1, 0, 0 }
+                                        : std::array<float, 3> { 0, 0, 1 };
+                    break;
+                case 6:
+                case 7:
+                case 19:
+                    expected = { 0, 0, 1 };
+                    if (y == 0) {
+                        expected[0] = x == 6   ? clip_near
+                                      : x == 7 ? 0
+                                      : b      ? -2
+                                               : 3;
+                        expected[1] = x == 6   ? clip_far
+                                      : x == 7 ? 1
+                                      : b      ? 7
+                                               : -4;
+                    }
+                    break;
+                case 8: break;
+                case 10: expected = { clip_near, 0, 0 }; break;
+                case 11: expected = { clip_far, 0, 0 }; break;
+                case 12:
+                    expected = { y == 0 ? 1.0f : 0.0f,
+                                 y == 0 ? float(OSL_VERSION) : -99, 0 };
+                    break;
+                case 13: expected = { float(index), 1, 0 }; break;
+                case 14:
+                case 21: expected = { q, sg.dudx, 1 }; break;
+                case 15:
+                case 31: expected = { 7, 0, 0 }; break;
+                case 16:
+                case 27:
+                    expected = y == 0 ? std::array<float, 3> { q, 7, 9 }
+                                      : std::array<float, 3> { y == 1 ? sg.dudx
+                                                                      : 1,
+                                                               0, 0 };
+                    break;
+                case 17: expected = { sg.u, sg.dudx, 0 }; break;
+                case 18: expected = { weight, 0, 0 }; break;
+                case 22:
+                    expected = { y == 0 ? sg.u : q, sg.dudx,
+                                 y == 0 ? 0.0f : 1.0f };
+                    break;
+                case 23: expected.fill(optimize ? 1.0f : 0.0f); break;
+                case 24: expected = { 0, 1, 0 }; break;
+                case 25:
+                    expected = { b ? -17.0f : 8.5f, b ? -4.25f : 2.125f, 1 };
+                    break;
+                case 26:
+                    expected = { b ? .5f : .125f, b ? 1.0f : .25f,
+                                 b ? 2.0f : .5f };
+                    break;
+                case 29: expected = { 3.14159f, 0, 0 }; break;
+                case 30: expected = { 0, 1, 1 }; break;
+                case 32:
+                    expected = { y == 0 ? weight : q, y == 0 ? 0.0f : sg.dudx,
+                                 y == 0 ? 0.0f : 1.0f };
+                    break;
+                }
+                for (int c = 0; c < 3; ++c) {
+                    const float actual    = images[pass][3 * index + c];
+                    const float cpu_value = reference[3 * index + c];
+                    if (actual != expected[c] || cpu_value != expected[c]) {
+                        diagnostics.errorfmt(
+                            "Attribute pass {} pixel ({},{}) channel {}: "
+                            "expected {}, GPU {}, CPU {}",
+                            pass, x, y, c, expected[c], actual, cpu_value);
+                        return false;
+                    }
+                }
+            }
+        }
+        std::string current;
+        const void* address = nullptr;
+        if (!artifact(ss, *group, current, address, diagnostics))
+            return false;
+        if (pass == 0) {
+            original         = current;
+            original_address = address;
+        } else {
+            OIIO_CHECK_EQUAL(current, original);
+            OIIO_CHECK_EQUAL(address, original_address);
+        }
+    }
+    OIIO_CHECK_ASSERT(images[0] != images[1] && images[0] == images[2]);
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
+bool
 run_raytypes(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 {
     OutputFiles files;
@@ -1210,24 +1581,26 @@ main(int argc, char* argv[])
     const bool interactive = argc == 4 && string_view(argv[3]) == "interactive";
     const bool userdata    = argc == 4 && string_view(argv[3]) == "userdata";
     const bool raytypes    = argc == 4 && string_view(argv[3]) == "raytypes";
+    const bool attributes  = argc == 4 && string_view(argv[3]) == "attributes";
     const bool library     = argc == 5 && string_view(argv[3]) == "library";
     const string_view mode(argc >= 3 ? argv[2] : "split");
     if ((argc != 2 && argc != 3 && !color && !outputs && !interactive
-         && !userdata && !raytypes && !library)
+         && !userdata && !raytypes && !library && !attributes)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
             && !((color || outputs || interactive || userdata || raytypes
-                  || library)
+                  || library || attributes)
                  && mode == "unoptimized"))) {
         print(
             stderr,
             "Usage: hart_transform_test stdosl.h "
             "[split|fused|fused-local|unoptimized] "
-            "[color|outputs|interactive|userdata|raytypes|library BITCODE_DIR]\n");
+            "[color|outputs|interactive|userdata|raytypes|attributes|library BITCODE_DIR]\n");
         return 1;
     }
     Diagnostics diagnostics;
     OIIO_CHECK_ASSERT(
-        library    ? run_renderer_library(argv[1], mode, argv[4], diagnostics)
+        attributes ? run_attributes(argv[1], mode, diagnostics)
+        : library  ? run_renderer_library(argv[1], mode, argv[4], diagnostics)
         : raytypes ? run_raytypes(argv[1], mode, diagnostics)
         : userdata ? run_userdata(argv[1], mode, diagnostics)
         : outputs  ? run_outputs(argv[1], mode, diagnostics)

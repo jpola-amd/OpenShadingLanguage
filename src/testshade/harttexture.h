@@ -42,6 +42,7 @@ public:
     bool prepare(ShadingSystem& shadingsys);
     bool prepare_userdata(cspan<HartUserdataBinding> bindings, size_t points,
                           bool grid_defaults);
+    bool prepare_attributes(const RenderContext& context);
     bool reset_errors();
     bool check_errors();
     bool clear();

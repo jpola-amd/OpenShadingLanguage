@@ -5,6 +5,7 @@
 #include <amd/hart/hart_optix_compat.h>
 
 #include "array.h"
+#include "attribute.h"
 #include "closure.h"
 #include "color.h"
 #include "diagnostic.h"
@@ -49,7 +50,7 @@ testshade_generated(testshade::HartClosurePool* closure_pool = nullptr)
     // Imath's default vector constructor does not initialize its components.
     sg.I = sg.dIdx = sg.dIdy = OSL::Vec3(0.0f);
     sg.dPdz = sg.dPdtime = sg.Ps = sg.dPsdx = sg.dPsdy = OSL::Vec3(0.0f);
-    sg.time                  = 0.0f;
+    sg.time                                            = 0.0f;
     sg.N = sg.Ng   = OSL::Vec3(0.0f, 0.0f, 1.0f);
     sg.surfacearea = 1.0f;
     sg.raytype     = params.raytype;

@@ -7,6 +7,8 @@
 #include <OSL/hashes.h>
 #include <OSL/oslconfig.h>
 
+#include <OpenImageIO/fmath.h>
+
 // All the the state free functions in rs_simplerend.cpp will need to do their job
 // NOTE:  Additional data is here that will be used by rs_simplerend.cpp in future PR's
 //        procedurally generating ShaderGlobals.

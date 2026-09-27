@@ -416,6 +416,42 @@ ShaderInstance::validate_hart() const
         }
         return true;
     };
+    auto validate_attribute = [&](const Opcode& op) {
+        if (!shadingsys().renderer()->supports("HARTAttributes")) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTAttributes in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+            return false;
+        }
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto type = [&](int arg) -> const TypeSpec& {
+            return symbol(arg).typespec();
+        };
+        bool valid = op.nargs() >= 3 && op.nargs() <= 5;
+        if (valid) {
+            const bool object       = op.nargs() >= 4 && type(2).is_string();
+            const int attribute     = object ? 2 : 1;
+            const bool indexed      = op.nargs() == attribute + 3;
+            const auto& destination = type(op.nargs() - 1);
+            valid                   = !symbol(0).is_constant()
+                    && !symbol(op.nargs() - 1).is_constant() && type(0).is_int()
+                    && type(1).is_string() && type(attribute).is_string()
+                    && (op.nargs() == attribute + 2 || indexed)
+                    && (!indexed || type(attribute + 1).is_int())
+                    && !destination.is_structure_based()
+                    && !destination.is_closure_based()
+                    && (destination.is_float_based()
+                        || destination.is_int_based()
+                        || destination.is_string_based());
+        }
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: invalid getattribute operands in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+        return valid;
+    };
     auto validate_string_operands = [&](const Opcode& op) {
         auto type = [&](int arg) -> const TypeSpec& {
             return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
@@ -444,6 +480,8 @@ ShaderInstance::validate_hart() const
         } else if (op.nargs() == 2
                    && (name == ustring("hash") || name == ustring("raytype"))) {
             valid = type(0).is_int() && type(1).is_string();
+        } else if (name == ustring("getattribute")) {
+            valid = true;  // The complete operation is validated first.
         }
         if (!valid)
             shadingsys().errorfmt(
@@ -1018,6 +1056,7 @@ ShaderInstance::validate_hart() const
         ustring("raytype"),
         ustring("backfacing"),
         ustring("surfacearea"),
+        ustring("getattribute"),
     };
     static const ustring readable_globals[] = {
         ustring("u"),    ustring("v"),  ustring("P"),
@@ -1042,6 +1081,8 @@ ShaderInstance::validate_hart() const
                 op.opname(), shadername());
             return false;
         }
+        if (op.opname() == ustring("getattribute") && !validate_attribute(op))
+            return false;
         if (op.opname() == ustring("texture") && !validate_texture(op))
             return false;
         if (op.opname() == ustring("closure") && !validate_closure(op))
