@@ -13,6 +13,9 @@ OSL_NAMESPACE_BEGIN
 
 /// Native HART renderer. Initialize before constructing its ShadingSystem.
 /// Check failed() after the inherited void lifecycle operations.
+/// Background values are shaded on HART in bounded batches each render; only
+/// their importance CDFs are prepared on the host. Surface and light calls
+/// retain independent closure pools. Volumes and displacement are unsupported.
 class HartRaytracer final : public SimpleRaytracer {
 public:
     HartRaytracer();

@@ -126,6 +126,11 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}" "-DBITCODE_FILE=${path_bc}"
                     "-DARCH=${arch}" "-DRAYGEN=__raygen__osl_hart_path"
                     -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-raytracer-bitcode.cmake")
+            add_test (NAME hart-background-codegen-${arch}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}" "-DBITCODE_FILE=${path_bc}"
+                    "-DARCH=${arch}" "-DRAYGEN=__raygen__osl_hart_background"
+                    -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-raytracer-bitcode.cmake")
         endif ()
     endforeach ()
     file (WRITE "${CMAKE_CURRENT_BINARY_DIR}/hart_pathtracer_bitcode.h"
@@ -194,6 +199,13 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testrender>" "$<TARGET_FILE:oslc>"
                     "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}" --materials)
             set_tests_properties (hart-material-render-${mode} PROPERTIES
+                                  LABELS "gpu;hart" RUN_SERIAL TRUE)
+            add_test (NAME hart-lighting-render-${mode}
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-pathtracer.py"
+                    "$<TARGET_FILE:testrender>" "$<TARGET_FILE:oslc>"
+                    "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}" --lighting)
+            set_tests_properties (hart-lighting-render-${mode} PROPERTIES
                                   LABELS "gpu;hart" RUN_SERIAL TRUE)
         endforeach ()
     endif ()

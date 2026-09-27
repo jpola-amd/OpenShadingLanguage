@@ -35,6 +35,18 @@ struct HartPathParams {
     unsigned aa;
     unsigned no_jitter;
     unsigned fused;
+    const int* shader_ids;
+    const unsigned* light_primitives;
+    const unsigned* material_is_light;
+    Vec3* background_values;
+    float* background_rows;
+    float* background_cols;
+    unsigned triangle_count;
+    unsigned light_count;
+    int background_material;
+    unsigned background_resolution;
+    unsigned background_offset;
+    int rr_depth;
 };
 
 OSL_NAMESPACE_END

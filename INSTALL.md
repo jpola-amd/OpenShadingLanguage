@@ -1325,8 +1325,9 @@ ctest --test-dir build\hart-validation -C Release `
   -R "^hart-(codegen-.*|texture-(resources|runtime))$" --output-on-failure
 ```
 
-Use an OptiX-disabled build for runtime checks on a machine without an
-NVIDIA driver. A mixed HART/OptiX build can be validated by compilation only.
+Prefer an OptiX-disabled build on an AMD-only machine. A mixed HART/OptiX build
+needs the CUDA runtime dependencies even when executing HART; such a run is
+not validation of the NVIDIA backend.
 
 ### Inspecting generated HART closures
 
@@ -1418,25 +1419,42 @@ and keywords, nested closures, connected textured/procedural weights and
 modified shading normals use the same generated callable path.
 MaterialX subsurface uses the reference's diffuse approximation, not a BSSRDF.
 
-The integrator samples BSDF mixtures and accumulates emission along the
-resulting paths, maintaining medium boundary state for dielectric surfaces.
-Misses return black. Background shaders, volume integration, displacement and
-diagnostic visualization modes remain explicitly unsupported. It has no
-next-event light sampling, MIS or Russian roulette yet.
+The integrator uses the reference renderer's BSDF mixtures, explicit triangle
+light sampling, power-heuristic MIS and Russian roulette, maintaining medium
+boundary state for dielectric surfaces. Mark emissive shader groups with
+`is_light="yes"` to include their triangles in direct-light sampling.
+Background shaders illuminate misses and can participate in importance
+sampling. Volume integration, displacement and diagnostic visualization modes
+remain explicitly unsupported.
 `--hart-bounces N` limits surface bounces to 0..64 (default 4);
 `-aa N` uses N squared samples per pixel, with N in 1..64. A limit of zero
-shows directly visible emission only. `--no-jitter` fixes primary rays at
-pixel centers while retaining deterministic BSDF sampling.
+shows directly visible emission and background only. `--no-jitter` fixes primary
+rays at pixel centers while retaining deterministic BSDF and light sampling.
+The scene's `rr_depth` option controls when roulette starts (default 5).
+
+A positive `<Background resolution="N"/>` uses at least 32 samples per axis.
+OSL background values are evaluated on HART in batches of at most 65,536 texels;
+the shared host CDF builder prepares importance tables from those values, not
+from CPU shader execution. Tables refresh after interactive parameter uploads.
+Nonpositive resolution disables importance sampling but preserves direct
+background shader evaluation on misses. Importance sampling requires finite,
+nonnegative radiance. Black maps and zero-energy rows remain black and use
+valid sampling distributions, without divisions by zero. The scene parser
+still requires geometry, even if every camera ray misses it.
 
 Hit-point ShaderGlobals use real incident rays, interpolated normals/UVs,
-mesh surface areas, camera/ray-cone differentials and camera/diffuse ray
+mesh surface areas, camera/ray-cone differentials and camera/diffuse/shadow ray
 flags. Secondary ray origins use triangle-scaled offsets to avoid shared-edge
 self-intersections. The bounded 1024-byte closure pool belongs to the raygen
 caller and is reset only after consuming each material. Closure trees are
 checked for valid records, bounded depth and cycles before reference traversal.
 A separate aligned 1024-byte BSDF arena holds up to 32 lobes, subject to their
 sizes. Invalid closure records, distributions, PDFs and exhausted arenas
-produce device errors rather than partial images. `--hart-fused` selects fused
+produce device errors rather than partial images. Light evaluation has a
+separate closure pool so it cannot overwrite an active surface's closures.
+Background preparation and image rendering use distinct raygen records in
+one pipeline; stack-overflow, trace-depth and stack-size validation remain
+enabled for both. `--hart-fused` selects fused
 callables; `--hart-local-groupdata BYTES` additionally permits bounded
 callable-local storage. Otherwise Groupdata uses per-pixel caller storage.
 Allocation, compilation, launch and device errors fail without writing an
@@ -1446,7 +1464,7 @@ image. This traversal does not implement the OSL `trace()` renderer service.
 cmake --build build\hart-validation --config Release `
   --target testrender oslc hart_trace_test hart_material_test --parallel 8
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(pathtracer|raytracer|material)-" --output-on-failure
+  -R "^hart-(pathtracer|raytracer|material|background|lighting)-" --output-on-failure
 ```
 
 The path tests compare connected textured emissive materials and geometry
@@ -1475,6 +1493,15 @@ Weighted layer records preserve the scaling of explicit closure multiplication,
 including base lobes and opacity. The layered scene also compares CPU OSL 0
 and OSL 2 to catch optimizer-dependent energy changes. Host-only medium scaling
 checks do not imply HART volume-rendering support.
+
+Lighting tests compare 17 CPU/HART render pairs per execution mode, including
+direct and importance-sampled backgrounds, black/partially black maps,
+delta-BSDF MIS, designated area lights, visibility, multiple lights, combined
+environment/area lighting and multibounce paths. A 257-by-257 textured
+background crosses the prepass batch boundary; forced early roulette and
+repeated renders exercise their respective paths. Invalid background closure
+types must fail without publishing an image. Codegen checks verify both raygen
+entries for every configured architecture.
 
 ### Testing external HART device code
 

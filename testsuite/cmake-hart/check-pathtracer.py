@@ -14,12 +14,12 @@ import xml.etree.ElementTree as ET
 
 
 if len(sys.argv) not in (5, 6) or (len(sys.argv) == 6
-                                 and sys.argv[5] != "--materials"):
+                                 and sys.argv[5] not in ("--materials", "--lighting")):
     raise SystemExit("Usage: check-pathtracer.py renderer compiler stdosl "
-                     "{split|fused|fused-local|unoptimized} [--materials]")
+                     "{split|fused|fused-local|unoptimized} [--materials|--lighting]")
 renderer, compiler, stdosl, mode = sys.argv[1:5]
-# Select the material suite instead of the ordinary path/diagnostic regressions.
-materials = len(sys.argv) == 6
+materials = len(sys.argv) == 6 and sys.argv[5] == "--materials"
+lighting = len(sys.argv) == 6 and sys.argv[5] == "--lighting"
 env = os.environ.copy()
 for key in ("TESTSHADE_OPTIX", "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
     env.pop(key, None)
@@ -96,7 +96,7 @@ def render(name, gpu, bounces=1, aa=1, repeat=False, material_count=None,
             entries = 1 if mode in ("fused", "fused-local") else 2
             assert compiled and int(compiled[1]) == material_count, output
             assert int(compiled[2]) == material_count * entries, output
-    if material_count is not None:
+    if material_count is not None and not lighting:
         assert "triangles to be treated as lights" not in output, output
     return pixels(image)
 
@@ -236,11 +236,168 @@ def check_materials():
     assert "HART path tracer rendered" not in out and not image.exists(), out
 
 
+def check_lighting():
+    shaders = {
+        "path_lighting_surface": """shader path_lighting_surface(
+            int glossy=0) {
+            normal n=normalize(N+vector(0.03,-0.02,0));
+            vector t=normalize(vector(1,0,0)-n[0]*vector(n));
+            Ci=color(0.25+0.1*u,0.3+0.1*v,0.4)*diffuse(n);
+            if (glossy)
+                Ci += color(0.15)*microfacet("ggx",n,t,0.25,0.25,1.5,0);
+        }""",
+        "path_lighting_emitter": """shader path_lighting_emitter(
+            color power=color(8,4,2)) {
+            Ci=power*(0.8+0.2*u)*emission();
+        }""",
+        "path_lighting_background": """shader path_lighting_background(
+            color radiance=color(0.5,1,2), int gradient=0, int dark_cap=0,
+            int textured=0) {
+            color value=radiance;
+            if (gradient)
+                value *= color(0.4+0.2*abs(I[0]),0.3+0.1*abs(I[1]),
+                               0.2+0.05*abs(I[2]));
+            if (dark_cap && min(I[0],min(I[1],I[2])) < -0.75)
+                value=0;
+            if (textured)
+                value *= texture("lighting_background.pfm",
+                                 0.5+0.25*I[0],0.5+0.25*I[1],
+                                 "wrap","clamp","interp","linear");
+            Ci=value*background();
+        }""",
+        "path_lighting_black": "shader path_lighting_black() { Ci=0; }",
+        "path_lighting_reflect": """shader path_lighting_reflect() {
+            Ci=color(0.25,0.5,0.75)*reflection(N);
+        }""",
+        "path_lighting_transmit": """shader path_lighting_transmit() {
+            Ci=color(0.25,0.5,0.75)*transparent();
+        }""",
+        "path_lighting_bad": "shader path_lighting_bad() { Ci=diffuse(N); }",
+    }
+    for name, source in shaders.items():
+        (root / (name + ".osl")).write_text(source, encoding="ascii")
+        run([compiler, "-I" + str(Path(stdosl).parent), name + ".osl"], root)
+    texels = [v for y in range(4) for x in range(4)
+              for v in (0.5+0.125*x, 0.5+0.125*y, 0.75)]
+    (root / "lighting_background.pfm").write_bytes(
+        b"PF\n4 4\n-1.0\n" + struct.pack("<48f", *texels))
+
+    camera = '<Camera eye="0.13,0.07,4" dir="0,0,-1" fov="90"/>'
+    floor = """<ShaderGroup name="floor">
+        shader path_lighting_surface m;</ShaderGroup>
+        <Quad corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"/>"""
+    area = """<ShaderGroup name="area" is_light="yes">
+        shader path_lighting_emitter e;</ShaderGroup>
+        <Quad corner="4,-0.5,3" edge_x="0,1,0" edge_y="1,0,0"/>"""
+    second_area = """<ShaderGroup name="second_area" is_light="yes">
+        param color power 2 4 8; shader path_lighting_emitter e;</ShaderGroup>
+        <Quad corner="-4,-0.5,2.75" edge_x="0,1,0" edge_y="1,0,0"/>"""
+    occluder = """<ShaderGroup name="occluder">
+        shader path_lighting_black m;</ShaderGroup>
+        <Quad corner="3.5,-1,2.5" edge_x="1.5,0,0" edge_y="0,2,0"/>"""
+    behind_camera = """<ShaderGroup name="behind_camera">
+        shader path_lighting_black m;</ShaderGroup>
+        <Quad corner="-1,-1,6" edge_x="2,0,0" edge_y="0,2,0"/>"""
+    walls = """
+        <Quad corner="-6,-6,0" edge_x="0,12,0" edge_y="0,0,6"/>
+        <Quad corner="6,-6,0" edge_x="0,0,6" edge_y="0,12,0"/>
+        <Quad corner="-6,-6,0" edge_x="0,0,6" edge_y="12,0,0"/>
+        <Quad corner="-6,6,0" edge_x="12,0,0" edge_y="0,0,6"/>"""
+
+    def background(varying=0, resolution=32, radiance="0.5 1 2", dark_cap=0,
+                   textured=0):
+        return f"""<ShaderGroup name="background">
+            param color radiance {radiance}; param int gradient {varying};
+            param int dark_cap {dark_cap};
+            param int textured {textured};
+            shader path_lighting_background b;</ShaderGroup>
+            <Background resolution="{resolution}"/>"""
+
+    scenes = {
+        "lighting_background": background() + behind_camera,
+        "lighting_background_varying": background(varying=1) + behind_camera,
+        "lighting_background_unsampled": background(varying=1, resolution=0)
+                                         + behind_camera,
+        "lighting_background_black": background(radiance="0 0 0") + floor,
+        "lighting_background_partial": background(dark_cap=1) + floor,
+        "lighting_background_texture": background(varying=1, resolution=257,
+                                                   textured=1) + floor,
+        "lighting_diffuse_background": background() + floor,
+        "lighting_reflect_background": background() + floor.replace(
+            "path_lighting_surface", "path_lighting_reflect"),
+        "lighting_transmit_background": background() + floor.replace(
+            "path_lighting_surface", "path_lighting_transmit"),
+        "lighting_area": floor + area,
+        "lighting_blocked": floor + area + occluder,
+        "lighting_two_lights": floor + area + second_area,
+        "lighting_mixed": background(varying=1) + floor + area,
+        "lighting_bounces": floor.replace("shader path_lighting_surface",
+                                          "param int glossy 1; shader path_lighting_surface")
+                            + walls + area,
+        "lighting_bad_background": """<ShaderGroup name="background">
+            shader path_lighting_bad b;</ShaderGroup><Background resolution="8"/>"""
+                                   + behind_camera,
+    }
+    scenes["lighting_roulette"] = '<Option rr_depth="int 0"/>' + scenes["lighting_bounces"]
+    for name, scene in scenes.items():
+        (root / (name + ".xml")).write_text(
+            "<World>" + camera + scene + "</World>", encoding="ascii")
+
+    def paired(name, count, bounces=1, aa=4, repeat=False):
+        print("Checking HART lighting: " + name + " (" + mode + ")", flush=True)
+        cpu = render(name, False, bounces=bounces, aa=aa, material_count=count)
+        gpu = render(name, True, bounces=bounces, aa=aa, repeat=repeat,
+                     material_count=count)
+        compare(gpu, cpu, half_output=True)
+        assert min(cpu) >= 0 and min(gpu) >= 0, name
+        return gpu
+
+    compare(paired("lighting_background", 2, bounces=0, aa=1),
+            [0.5, 1.0, 2.0] * (width * height), 0)
+    compare(paired("lighting_background_black", 2, bounces=2),
+            [0.0] * (width * height * 3), 0)
+    for name in ("lighting_background_varying", "lighting_background_unsampled"):
+        values = paired(name, 2, bounces=0, aa=1)
+        colors = {tuple(round(v, 4) for v in values[i:i+3])
+                  for i in range(0, len(values), 3)}
+        assert len(colors) > 8 and min(values) > 0, (name, len(colors))
+    for name in ("lighting_reflect_background", "lighting_transmit_background"):
+        compare(paired(name, 2), [0.125, 0.5, 1.5] * (width * height), 0)
+
+    compare(paired("lighting_area", 2, bounces=0, aa=1),
+            [0.0] * (width * height * 3), 0)
+    plain = paired("lighting_area", 2)
+    assert min(plain) > 0, "Direct sampling must illuminate every unoccluded pixel"
+    blocked = paired("lighting_blocked", 3)
+    assert sum(blocked) < sum(plain) - 0.1, (sum(blocked), sum(plain))
+    two_lights = paired("lighting_two_lights", 3)
+    assert sum(two_lights) > sum(plain) + 0.1, (sum(two_lights), sum(plain))
+    for name, count in (("lighting_diffuse_background", 2),
+                        ("lighting_background_partial", 2),
+                        ("lighting_background_texture", 2), ("lighting_mixed", 3)):
+        values = paired(name, count, repeat=name == "lighting_mixed")
+        assert min(values) > 0, name
+    low = paired("lighting_bounces", 2)
+    high = paired("lighting_bounces", 2, bounces=3)
+    assert sum(high) > sum(low) + 0.1, (sum(high), sum(low))
+    assert max(paired("lighting_roulette", 2, bounces=7)) > 0
+
+    image = root / "lighting-rejected.pfm"
+    out = run([renderer, "--hart", "-v"] + flags + common
+              + ["lighting_bad_background.xml", str(image)], root, 1)
+    assert "error bits 32" in out and "invalid closure tree" in out, out
+    assert "HART path tracer rendered" not in out and not image.exists(), out
+
+
 with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     root = Path(temporary)
     if materials:
         check_materials()
         print("HART material path tracer verified: " + mode)
+        sys.exit(0)
+    if lighting:
+        check_lighting()
+        print("HART lighting path tracer verified: " + mode)
         sys.exit(0)
 
     shaders = {

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -76,8 +77,17 @@ struct HartRaytracer::Impl {
         if (renderer.options.get_int("show_globals") != 0
             || renderer.options.get_float("show_albedo_scale") != 0.0f)
             return fail("HART does not support show_globals or albedo display");
-        if (renderer.getBackgroundShaderID() >= 0)
-            return fail("HART does not support background shaders");
+        const int background = renderer.getBackgroundShaderID();
+        if (background < -1
+            || (background >= 0
+                && size_t(background) >= renderer.shaders().size()))
+            return fail("Invalid HART background material");
+        int resolution = background >= 0 ? renderer.getBackgroundResolution()
+                                         : 0;
+        resolution     = resolution > 0 ? std::max(32, resolution) : 0;
+        if (resolution
+            && resolution > std::numeric_limits<int>::max() / resolution)
+            return fail("HART background table exceeds INT_MAX texels");
         for (const auto& material : renderer.shaders())
             if (material.disp)
                 return fail("HART does not support displacement shaders");
@@ -85,6 +95,10 @@ struct HartRaytracer::Impl {
         m_params.max_bounces = unsigned(bounces);
         m_params.no_jitter   = renderer.options.get_int("no_jitter") != 0;
         m_params.fused       = m_fused;
+        m_params.rr_depth            = renderer.options.get_int("rr_depth", 5);
+        m_params.background_material = background;
+        m_params.background_resolution = unsigned(resolution);
+        m_params.background_offset     = 0;
         return true;
     }
 
@@ -275,6 +289,25 @@ struct HartRaytracer::Impl {
         return true;
     }
 
+    bool prepare_lights(HartRaytracer& renderer)
+    {
+        if (renderer.shader_is_light().size() != renderer.shaders().size())
+            return fail("Invalid HART light material metadata");
+        renderer.prepare_lights();
+        std::vector<unsigned> is_light;
+        is_light.reserve(renderer.shader_is_light().size());
+        for (bool light : renderer.shader_is_light())
+            is_light.push_back(unsigned(light));
+        for (unsigned primitive : renderer.lightprims())
+            if (primitive >= renderer.scene.triangles.size()
+                || !(renderer.scene.primitivearea(int(primitive)) > 0))
+                return fail("HART light triangles must have positive area");
+        m_params.material_is_light = upload<unsigned>(is_light);
+        m_params.light_primitives  = upload<unsigned>(renderer.lightprims());
+        m_params.light_count       = unsigned(renderer.lightprims().size());
+        return !m_failed;
+    }
+
     template<typename T> const T* upload(cspan<T> values)
     {
         if (m_failed || values.empty())
@@ -346,22 +379,103 @@ struct HartRaytracer::Impl {
         return true;
     }
 
+    bool prepare_background()
+    {
+        const size_t res = m_params.background_resolution;
+        if (!res)
+            return true;
+        const size_t count = res * res;
+        if (count > m_background_values.max_size()
+            || count > m_background_cols.max_size()
+            || res > m_background_rows.max_size())
+            return fail("HART background table allocation size overflows");
+        try {
+            m_background_values.resize(count);
+            m_background_rows.resize(res);
+            m_background_cols.resize(count);
+        } catch (const std::bad_alloc&) {
+            return fail("Cannot allocate HART background importance tables");
+        }
+        // Bound callable scratch while shading whole rows, never one launch
+        // per texel. Table values are refreshed after interactive uploads.
+        const size_t rows_per_batch = std::max(size_t(1), size_t(65536) / res);
+        for (size_t y = 0; y < res; y += rows_per_batch) {
+            const size_t rows = std::min(rows_per_batch, res - y);
+            if (!frame_storage(res * rows) || !m_textures.reset_errors())
+                return false;
+            auto params              = m_params;
+            params.background_offset = unsigned(y * res);
+            if (!m_context.launch(&params, sizeof(params), unsigned(res),
+                                  unsigned(rows), 1)
+                || !m_textures.check_errors()
+                || !m_context.download({ reinterpret_cast<unsigned char*>(
+                                             m_pixels.data()),
+                                         res * rows * sizeof(Color3) },
+                                       params.output))
+                return false;
+            std::copy(m_pixels.begin(), m_pixels.end(),
+                      m_background_values.begin() + y * res);
+        }
+        for (const auto& value : m_background_values)
+            if (!finite_vec(value) || value.x < 0 || value.y < 0 || value.z < 0)
+                return fail("HART background importance sampling requires "
+                            "finite nonnegative radiance");
+        Background::prepare_cdf(int(res), m_background_values,
+                                m_background_rows, m_background_cols);
+        for (const auto& value : m_background_values)
+            if (!finite_vec(value))
+                return fail(
+                    "HART background importance weights are not finite");
+        for (const auto& cdf : { cspan<float>(m_background_rows),
+                                 cspan<float>(m_background_cols) })
+            for (float value : cdf)
+                if (!std::isfinite(value) || value < 0 || value > 1)
+                    return fail("Invalid HART background importance CDF");
+        if (count > m_background_capacity) {
+            auto* values = static_cast<Vec3*>(
+                m_context.alloc(count * sizeof(Vec3)));
+            if (!values)
+                return false;
+            auto* rows = static_cast<float*>(
+                m_context.alloc(res * sizeof(float)));
+            if (!rows)
+                return false;
+            auto* cols = static_cast<float*>(
+                m_context.alloc(count * sizeof(float)));
+            if (!cols)
+                return false;
+            m_params.background_values = values;
+            m_params.background_rows   = rows;
+            m_params.background_cols   = cols;
+            m_background_capacity      = count;
+        }
+        return m_context.upload(m_params.background_values,
+                                as_bytes(cspan<Vec3>(m_background_values)))
+               && m_context.upload(m_params.background_rows,
+                                   as_bytes(cspan<float>(m_background_rows)))
+               && m_context.upload(m_params.background_cols,
+                                   as_bytes(cspan<float>(m_background_cols)));
+    }
+
     OIIO::ErrorHandler& m_err;
     HartTextureStore m_textures;
     HartContext m_context;
     std::string m_arch;
-    int m_device               = 0;
-    bool m_initialized         = false;
-    bool m_prepared            = false;
-    bool m_published           = false;
-    bool m_failed              = false;
-    bool m_fused               = false;
-    size_t m_local_budget      = 0;
-    size_t m_scratch_alignment = 1;
-    size_t m_scratch_capacity  = 0;
-    size_t m_output_capacity   = 0;
+    int m_device                 = 0;
+    bool m_initialized           = false;
+    bool m_prepared              = false;
+    bool m_published             = false;
+    bool m_failed                = false;
+    bool m_fused                 = false;
+    size_t m_local_budget        = 0;
+    size_t m_scratch_alignment   = 1;
+    size_t m_scratch_capacity    = 0;
+    size_t m_output_capacity     = 0;
+    size_t m_background_capacity = 0;
     HartPathParams m_params { };
     std::vector<Color3> m_pixels;
+    std::vector<Vec3> m_background_values;
+    std::vector<float> m_background_rows, m_background_cols;
 };
 
 
@@ -507,7 +621,8 @@ HartRaytracer::prepare_render()
     if (!impl.m_context.build_accel(scene.verts, triangles, material_ids,
                                     material_count)
         || !impl.m_context.create_pipeline(raygen, "__raygen__osl_hart_path",
-                                           material_count, callables)
+                                           material_count, callables,
+                                           "__raygen__osl_hart_background")
         || !impl.m_textures.prepare(*shadingsys)) {
         impl.m_failed = true;
         return;
@@ -517,11 +632,13 @@ HartRaytracer::prepare_render()
     params.normals        = impl.upload<Vec3>(scene.normals);
     params.uvs            = impl.upload<Vec2>(scene.uvs);
     params.triangles      = impl.upload<TriangleIndices>(scene.triangles);
+    params.shader_ids     = impl.upload<int>(scene.shaderids);
     params.normal_indices = impl.upload<TriangleIndices>(scene.n_triangles);
     params.uv_indices     = impl.upload<TriangleIndices>(scene.uv_triangles);
     params.surfaceareas   = impl.upload<float>(surfaceareas);
     params.materials      = impl.upload<HartMaterialBinding>(bindings);
     params.material_count = material_count;
+    params.triangle_count = unsigned(scene.triangles.size());
     params.traversable    = impl.m_context.traversable();
     params.textures       = impl.m_textures.device_state();
     if (impl.m_failed)
@@ -530,6 +647,8 @@ HartRaytracer::prepare_render()
         impl.fail("HART device service state is missing");
         return;
     }
+    if (!impl.prepare_lights(*this))
+        return;
     impl.m_prepared = true;
 }
 
@@ -561,20 +680,21 @@ HartRaytracer::render(int xres, int yres)
         }
     }
     if (!impl.render_options(*this)
-        || !impl.configure_camera(camera, xres, yres)
-        || !impl.frame_storage(size_t(xres) * size_t(yres))) {
+        || !impl.configure_camera(camera, xres, yres)) {
         pixelbuf.clear();
         return;
     }
-    if (!impl.m_textures.prepare(*shadingsys)
-        || !impl.m_textures.reset_errors()) {
+    if (!impl.m_textures.prepare(*shadingsys)) {
         impl.m_failed = true;
         pixelbuf.clear();
         return;
     }
     impl.m_params.textures = impl.m_textures.device_state();
-    if (!impl.m_context.launch(&impl.m_params, sizeof(impl.m_params),
-                               unsigned(xres), unsigned(yres))
+    if (!impl.prepare_background()
+        || !impl.frame_storage(size_t(xres) * size_t(yres))
+        || !impl.m_textures.reset_errors()
+        || !impl.m_context.launch(&impl.m_params, sizeof(impl.m_params),
+                                  unsigned(xres), unsigned(yres))
         || !impl.m_textures.check_errors()
         || !impl.m_context.download({ reinterpret_cast<unsigned char*>(
                                           impl.m_pixels.data()),
@@ -641,12 +761,19 @@ HartRaytracer::clear()
     const bool context_cleared  = impl.m_context.clear();
     const bool textures_cleared = context_cleared && impl.m_textures.clear();
     impl.m_failed |= !context_cleared || !textures_cleared;
-    impl.m_initialized      = false;
-    impl.m_prepared         = false;
-    impl.m_published        = false;
-    impl.m_output_capacity  = 0;
-    impl.m_scratch_capacity = 0;
+    impl.m_initialized              = false;
+    impl.m_prepared                 = false;
+    impl.m_published                = false;
+    impl.m_output_capacity          = 0;
+    impl.m_scratch_capacity         = 0;
+    impl.m_background_capacity      = 0;
+    impl.m_params.background_values = nullptr;
+    impl.m_params.background_rows   = nullptr;
+    impl.m_params.background_cols   = nullptr;
     impl.m_pixels.clear();
+    impl.m_background_values.clear();
+    impl.m_background_rows.clear();
+    impl.m_background_cols.clear();
     if (impl.m_failed)
         pixelbuf.clear();
     SimpleRaytracer::clear();

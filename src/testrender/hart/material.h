@@ -17,6 +17,7 @@ OSL_HOSTDEVICE size_t
 hart_closure_size(int id)
 {
     switch (id) {
+    case BACKGROUND_ID:
     case EMISSION_ID: return sizeof(EmptyParams);
     case DIFFUSE_ID:
     case TRANSLUCENT_ID: return sizeof(DiffuseParams);
@@ -62,7 +63,8 @@ hart_closure_contains(const testshade::HartClosurePool& pool, const void* ptr,
 
 OSL_HOSTDEVICE bool
 hart_valid_closure(const ClosureColor* root,
-                   const testshade::HartClosurePool& pool)
+                   const testshade::HartClosurePool& pool,
+                   bool background = false)
 {
     if (pool.failed || pool.used > pool.capacity || (pool.used && !pool.data))
         return false;
@@ -92,6 +94,9 @@ hart_valid_closure(const ClosureColor* root,
                 return false;
             pending[count++] = mul->closure;
         } else {
+            if (background ? node->id != BACKGROUND_ID
+                           : node->id == BACKGROUND_ID)
+                return false;
             const size_t bytes = hart_closure_size(node->id);
             if (!bytes
                 || !hart_closure_contains<ClosureComponent>(pool, node, bytes))

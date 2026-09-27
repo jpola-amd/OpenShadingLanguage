@@ -44,10 +44,11 @@ public:
     /// Callable SBT indices follow module order, then each module's entries.
     bool create_pipeline(cspan<unsigned char> bitcode, string_view raygen_entry,
                          unsigned material_count,
-                         cspan<HartCallable> callables = { });
-    /// Copy host parameters, launch, and wait for completion.
+                         cspan<HartCallable> callables      = { },
+                         string_view secondary_raygen_entry = { });
+    /// Copy host parameters, launch raygen 0 (primary) or 1, and wait.
     bool launch(const void* params, size_t param_bytes, unsigned width,
-                unsigned height);
+                unsigned height, unsigned raygen_index = 0);
     /// Synchronize and release resources; failed releases remain owned for retry.
     bool clear();
 

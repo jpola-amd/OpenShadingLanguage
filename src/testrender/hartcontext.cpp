@@ -172,6 +172,7 @@ struct HartContext::Impl {
     std::vector<HartProgramGroup> m_groups;
     HartPipeline m_pipeline = nullptr;
     HartShaderBindingTable m_sbt { };
+    void* m_secondary_raygen            = nullptr;
     HartTraversableHandle m_traversable = 0;
     void* m_params                      = nullptr;
     size_t m_param_capacity             = 0;
@@ -471,7 +472,8 @@ HartContext::traversable() const
 bool
 HartContext::create_pipeline(cspan<unsigned char> bitcode,
                              string_view raygen_entry, unsigned material_count,
-                             cspan<HartCallable> callables)
+                             cspan<HartCallable> callables,
+                             string_view secondary_raygen_entry)
 {
     auto& ctx = *m_impl;
     if (!ctx.ready())
@@ -481,10 +483,17 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                            "a pipeline");
         return false;
     }
-    if (!is_bitcode(bitcode) || !raygen_entry.data()
-        || raygen_entry.size() <= 10
-        || raygen_entry.find('\0') != string_view::npos
-        || raygen_entry.substr(0, 10) != "__raygen__"
+    auto valid_entry = [](string_view entry) {
+        return entry.data() && entry.size() > 10
+               && entry.find('\0') == string_view::npos
+               && entry.substr(0, 10) == "__raygen__";
+    };
+    const bool secondary      = !secondary_raygen_entry.empty();
+    const size_t fixed_groups = secondary ? 4 : 3;
+    if (!is_bitcode(bitcode) || !valid_entry(raygen_entry)
+        || (secondary
+            && (!valid_entry(secondary_raygen_entry)
+                || secondary_raygen_entry == raygen_entry))
         || material_count > ctx.m_max_sbt_records
         || (!callables.empty() && !callables.data())) {
         ctx.m_err.errorfmt("HART pipeline requires LLVM bitcode, a raygen "
@@ -502,7 +511,7 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
     for (const auto& callable : callables) {
         if (!is_bitcode(callable.bitcode) || callable.entries.empty()
             || callable.entries.size() > std::numeric_limits<unsigned>::max()
-                                             - 3 - callable_count) {
+                                             - fixed_groups - callable_count) {
             ctx.m_err.errorfmt("Invalid HART callable module or export count");
             return false;
         }
@@ -519,9 +528,13 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
     }
     if (!ctx.buffer_size(callable_count, sizeof(EmptyRecord)))
         return false;
-    ctx.m_groups.resize(3 + callable_count, nullptr);
+    ctx.m_groups.resize(fixed_groups + callable_count, nullptr);
     ctx.m_callable_modules.resize(callables.size(), nullptr);
     const std::string entry(raygen_entry.data(), raygen_entry.size());
+    const std::string secondary_entry
+        = secondary ? std::string(secondary_raygen_entry.data(),
+                                  secondary_raygen_entry.size())
+                    : std::string();
     HartPipelineCompileOptions options { };
     options.traversableGraphFlags = HART_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     options.numPayloadValues   = 5;
@@ -542,7 +555,7 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                            &ctx.m_module);
     if (!ctx.compile_check(result, "hartModuleCreate", log, log_size))
         return false;
-    std::array<HartProgramGroupDesc, 3> descriptions { };
+    std::array<HartProgramGroupDesc, 4> descriptions { };
     descriptions[0].kind                     = HART_PROGRAM_GROUP_KIND_RAYGEN;
     descriptions[0].raygen.module            = ctx.m_module;
     descriptions[0].raygen.entryFunctionName = entry.c_str();
@@ -552,7 +565,12 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
     descriptions[2].kind                     = HART_PROGRAM_GROUP_KIND_HITGROUP;
     descriptions[2].hitgroup.moduleCH        = ctx.m_module;
     descriptions[2].hitgroup.entryFunctionNameCH = "__closesthit__osl_hart";
-    for (size_t i = 0; i < descriptions.size(); ++i) {
+    if (secondary) {
+        descriptions[3].kind          = HART_PROGRAM_GROUP_KIND_RAYGEN;
+        descriptions[3].raygen.module = ctx.m_module;
+        descriptions[3].raygen.entryFunctionName = secondary_entry.c_str();
+    }
+    for (size_t i = 0; i < fixed_groups; ++i) {
         log.fill(0);
         log_size = log.size();
         result   = hartProgramGroupCreate(ctx.m_context, &descriptions[i], 1,
@@ -561,7 +579,7 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
         if (!ctx.compile_check(result, "hartProgramGroupCreate", log, log_size))
             return false;
     }
-    size_t group_index = descriptions.size();
+    size_t group_index = fixed_groups;
     for (size_t i = 0; i < callables.size(); ++i) {
         const auto& callable = callables[i];
         log.fill(0);
@@ -618,9 +636,9 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                                                     continuation_stack, 1),
                            "hartPipelineSetStackSize"))
         return false;
-    std::array<EmptyRecord, 2> records { };
+    std::vector<EmptyRecord> records(secondary ? 3 : 2);
     for (size_t i = 0; i < records.size(); ++i)
-        if (!ctx.hart_check(hartSbtRecordPackHeader(ctx.m_groups[i],
+        if (!ctx.hart_check(hartSbtRecordPackHeader(ctx.m_groups[i == 2 ? 3 : i],
                                                     records[i].header.data()),
                             "hartSbtRecordPackHeader"))
             return false;
@@ -632,7 +650,8 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                             "hartSbtRecordPackHeader hit"))
             return false;
     }
-    auto* device_records = static_cast<unsigned char*>(alloc(sizeof(records)));
+    auto* device_records = static_cast<unsigned char*>(
+        alloc(records.size() * sizeof(EmptyRecord)));
     if (!device_records
         || !upload(device_records, as_bytes(cspan<EmptyRecord>(records))))
         return false;
@@ -648,7 +667,7 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
         std::vector<EmptyRecord> callable_records(callable_count);
         for (size_t i = 0; i < callable_count; ++i)
             if (!ctx.hart_check(
-                    hartSbtRecordPackHeader(ctx.m_groups[3 + i],
+                    hartSbtRecordPackHeader(ctx.m_groups[fixed_groups + i],
                                             callable_records[i].header.data()),
                     "hartSbtRecordPackHeader callable"))
                 return false;
@@ -659,6 +678,9 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
             return false;
     }
     ctx.m_sbt.raygenRecord            = device_records;
+    ctx.m_secondary_raygen = secondary
+                                 ? device_records + 2 * sizeof(EmptyRecord)
+                                 : nullptr;
     ctx.m_sbt.missRecordBase          = device_records + sizeof(EmptyRecord);
     ctx.m_sbt.missRecordStrideInBytes = sizeof(EmptyRecord);
     ctx.m_sbt.missRecordCount         = 1;
@@ -680,13 +702,17 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
 
 bool
 HartContext::launch(const void* params, size_t param_bytes, unsigned width,
-                    unsigned height)
+                    unsigned height, unsigned raygen_index)
 {
     auto& ctx = *m_impl;
     if (!ctx.ready())
         return false;
     if (!ctx.m_pipeline_ready || !ctx.m_scene_ready) {
         ctx.m_err.errorfmt("HART launch requires a pipeline and built scene");
+        return false;
+    }
+    if (raygen_index > 1 || (raygen_index == 1 && !ctx.m_secondary_raygen)) {
+        ctx.m_err.errorfmt("Invalid HART raygen index {}", raygen_index);
         return false;
     }
     if (!params || !param_bytes || !width || !height
@@ -707,9 +733,12 @@ HartContext::launch(const void* params, size_t param_bytes, unsigned width,
     if (!upload(ctx.m_params,
                 { static_cast<const unsigned char*>(params), param_bytes }))
         return false;
+    auto sbt = ctx.m_sbt;
+    if (raygen_index == 1)
+        sbt.raygenRecord = ctx.m_secondary_raygen;
     const bool launched
         = ctx.hart_check(hartLaunch(ctx.m_pipeline, ctx.m_stream, ctx.m_params,
-                                    param_bytes, &ctx.m_sbt, width, height, 1),
+                                    param_bytes, &sbt, width, height, 1),
                          "hartLaunch");
     const bool synchronized = ctx.hip_check(hipStreamSynchronize(ctx.m_stream),
                                             "hipStreamSynchronize after launch");
@@ -794,6 +823,7 @@ HartContext::clear()
         ctx.m_stream = nullptr;
     }
     ctx.m_sbt                     = { };
+    ctx.m_secondary_raygen        = nullptr;
     ctx.m_params                  = nullptr;
     ctx.m_param_capacity          = 0;
     ctx.m_scene_material_count    = 0;

@@ -21,12 +21,16 @@ class MaterialDiagnostics final : public ErrorHandler {
 public:
     void operator()(int code, const std::string& message) override
     {
-        if ((code & 0xffff0000) == EH_ERROR || (code & 0xffff0000) == EH_SEVERE)
+        if ((code & 0xffff0000) == EH_ERROR
+            || (code & 0xffff0000) == EH_SEVERE) {
             ++errors;
+            last_error = message;
+        }
         ErrorHandler::operator()(code, message);
     }
 
     int errors = 0;
+    std::string last_error;
 };
 
 
@@ -112,7 +116,7 @@ check_layer_weights()
 
 
 bool
-run_cases(ErrorHandler& errors)
+run_cases(MaterialDiagnostics& errors)
 {
     HartContext context(errors);
     std::string arch;
@@ -133,9 +137,17 @@ run_cases(ErrorHandler& errors)
     std::array<HartMaterialResult, HartMaterialCases * HartMaterialRows> output;
     HartMaterialTestParams params { static_cast<HartMaterialResult*>(
         context.alloc(sizeof(output))) };
-    if (!params.results
-        || !context.launch(&params, sizeof(params), HartMaterialCases,
-                           HartMaterialRows)
+    if (!params.results)
+        return false;
+    for (unsigned index : { 1u, 2u }) {
+        OIIO_CHECK_ASSERT(!context.launch(&params, sizeof(params),
+                                          HartMaterialCases, HartMaterialRows,
+                                          index));
+        OIIO_CHECK_EQUAL(errors.last_error,
+                         fmtformat("Invalid HART raygen index {}", index));
+    }
+    if (!context.launch(&params, sizeof(params), HartMaterialCases,
+                        HartMaterialRows)
         || !context.download({ reinterpret_cast<unsigned char*>(output.data()),
                                sizeof(output) },
                              params.results))
@@ -189,7 +201,7 @@ main()
     MaterialDiagnostics errors;
     check_layer_weights();
     OIIO_CHECK_ASSERT(run_cases(errors));
-    OIIO_CHECK_EQUAL(errors.errors, 0);
+    OIIO_CHECK_EQUAL(errors.errors, 2);
     print(
         "HART material probe: 14 value cases and 7 rejection cases, 3 rows\n");
     return unit_test_failures ? EXIT_FAILURE : EXIT_SUCCESS;
