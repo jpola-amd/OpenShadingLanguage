@@ -199,8 +199,8 @@ read_module(HartModuleInput& input, ErrorHandler& err)
 
 class GeneratedRenderer final : public SimpleRenderer {
 public:
-    explicit GeneratedRenderer(bool closures)
-        : m_textures(errhandler()), m_closures(closures)
+    GeneratedRenderer(int device, bool closures)
+        : m_textures(errhandler()), m_device(device), m_closures(closures)
     {
     }
 
@@ -210,6 +210,7 @@ public:
                || feature == "HARTTransforms" || feature == "HARTArrayBounds"
                || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
                || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
+               || feature == "HARTInteractive"
                || (m_closures && feature == "HARTClosures");
     }
 
@@ -221,10 +222,21 @@ public:
     }
     bool good(TextureHandle* handle) override { return handle != nullptr; }
 
+    void* device_alloc(size_t size) override
+    { return m_textures.device_alloc(m_device, size); }
+
+    void device_free(void* ptr) override
+    { m_textures.device_free(m_device, ptr); }
+
+    void* copy_to_device(void* dst, const void* src, size_t size) override
+    { return m_textures.copy_to_device(m_device, dst, src, size); }
+
     HartTextureStore& textures() { return m_textures; }
+    int device() const { return m_device; }
 
 private:
     HartTextureStore m_textures;
+    int m_device;
     bool m_closures;
 };
 
@@ -406,7 +418,9 @@ public:
                 size_t group_alignment = 0, int raytype = 0,
                 HartTextureStore* textures = nullptr,
                 cspan<Matrix44> transforms = { }, size_t local_groupdata = 0,
-                size_t closure_capacity = 0, bool zero_outputs = false)
+                size_t closure_capacity = 0, bool zero_outputs = false,
+                void* interactive                   = nullptr,
+                const std::function<bool()>& update = { })
     {
         const size_t bytes       = pixels.size();
         const size_t params_size = group_alignment
@@ -471,7 +485,8 @@ public:
                           raytype,
                           textures ? textures->device_state() : nullptr,
                           static_cast<const Matrix44*>(m_transforms),
-                          closure_capacity };
+                          closure_capacity,
+                          interactive };
             if (m_verbose)
                 m_err.infofmt(
                     "HART group storage: {} bytes, alignment {}, local {} bytes, scratch {} bytes",
@@ -499,8 +514,8 @@ public:
         auto launch = [&](bool measure) {
             if (textures && !textures->reset_errors())
                 return false;
-            // Explicit entries may leave outputs untouched, as in CPU
-            // testshade's black images. Other modes retain the unwritten marker.
+            // Explicit entries may leave outputs untouched. Other modes
+            // retain the unwritten-output marker.
             if (!hip_check(hipMemsetAsync(m_output, zero_outputs ? 0 : 0xff,
                                           bytes, m_stream),
                            "hipMemsetAsync output"))
@@ -528,9 +543,14 @@ public:
         };
         if (warmup && !launch(false))
             return false;
-        for (int i = 0; i < iterations; ++i)
+        for (int i = 0; i < iterations; ++i) {
             if (!launch(m_runstats))
                 return false;
+            if (i + 1 < iterations && update && !update()) {
+                m_err.errorfmt("HART interactive parameter update failed");
+                return false;
+            }
+        }
         if (m_runstats)
             print(
                 "HART synchronized launches: {} iterations, {:.6f} ms total, {:.6f} ms mean\n",
@@ -736,14 +756,14 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--layer %s:NAME");
     ap.arg("--entry %s:LAYERNAME");
     ap.arg("--entryoutput %s:NAME");
+    ap.arg("--reparam %s:LAYERNAME %s:PARAMNAME %s:VALUE");
     ap.arg("--shader %s:SHADER %s:LAYER")
       .action([&](cspan<const char*>) { has_shader = true; });
     ap.arg("--connect %s:FROMLAYER %s:FROMOUTPUT %s:TOLAYER %s:TOINPUT");
     ap.arg("--param %s:NAME %s:VALUE")
       .action([&](cspan<const char*> args) {
           const string_view option(args[0]);
-          parameter_hints |= option.find("interpolated=") != string_view::npos
-                             || option.find("interactive=") != string_view::npos;
+          parameter_hints |= option.find("interpolated=") != string_view::npos;
       });
     ap.arg("-O0");
     ap.arg("-O1");
@@ -779,8 +799,8 @@ testshade_hart_validate_generated(int argc, const char* argv[],
         return false;
     }
     if (parameter_hints) {
-        err.errorfmt("Generated HART mode does not support interpolated or "
-                     "interactive parameters");
+        err.errorfmt("Generated HART mode does not support interpolated "
+                     "parameters");
         return false;
     }
     if (!has_shader) {
@@ -822,7 +842,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
 std::unique_ptr<SimpleRenderer>
 testshade_hart_renderer(int device, std::string& arch, bool closures)
 {
-    auto renderer = std::make_unique<GeneratedRenderer>(closures);
+    auto renderer = std::make_unique<GeneratedRenderer>(device, closures);
     hipDeviceProp_t properties { };
     hipError_t status = hipSetDevice(device);
     if (status == hipSuccess)
@@ -855,8 +875,8 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
 {
     auto& err       = renderer.errhandler();
     auto* generated = dynamic_cast<GeneratedRenderer*>(&renderer);
-    if (!generated || !renderer.supports("HARTClosures") || width <= 0
-        || height <= 0
+    if (!generated || generated->device() != options.device
+        || !renderer.supports("HARTClosures") || width <= 0 || height <= 0
         || size_t(width) > size_t(std::numeric_limits<int>::max()) / height
         || summaries.size() != size_t(width) * size_t(height)
         || capacity > testshade::HartClosureCapacity) {
@@ -866,10 +886,13 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     std::vector<HartModuleInput> modules(group ? 2 : 1);
     std::vector<std::string> callables;
     int group_size = 0, group_alignment = 1, local_groupdata = 0;
+    void* interactive = nullptr;
     if (group) {
         shadingsys.optimize_group(group, nullptr);
         if (!compiled_group(shadingsys, *group, options, modules[1], callables,
-                            group_size, group_alignment, local_groupdata, err))
+                            group_size, group_alignment, local_groupdata, err)
+            || !shadingsys.getattribute(group, "device_interactive_params",
+                                        TypeDesc::PTR, &interactive))
             return false;
     }
     if (!embedded_raygen(arch, modules[0], err))
@@ -892,7 +915,8 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                            summaries.size_bytes() },
                          size_t(group_size), size_t(group_alignment), 0,
                          &textures, transforms,
-                         options.fused ? size_t(local_groupdata) : 0, capacity);
+                         options.fused ? size_t(local_groupdata) : 0, capacity,
+                         false, interactive);
     const bool cleared = runtime.clear();
     return rendered && cleared;
 }
@@ -909,10 +933,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          const Matrix44& shader2common,
                          cspan<HartOutputRequest> requests)
 {
-    auto& err  = renderer.errhandler();
+    auto& err       = renderer.errhandler();
     auto* generated = dynamic_cast<GeneratedRenderer*>(&renderer);
-    if (!generated) {
-        err.errorfmt("Generated HART mode requires its HART renderer");
+    if (!generated || generated->device() != options.device) {
+        err.errorfmt("Generated HART mode requires its HART renderer and "
+                     "matching device");
         return false;
     }
     if (width <= 0 || height <= 0 || iterations <= 0
@@ -1199,8 +1224,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     if (!textures.prepare(shadingsys))
         return false;
     int entry_count = 0;
-    if (!shadingsys.getattribute(&group, "num_entry_layers", entry_count)) {
-        err.errorfmt("Cannot retrieve compiled HART entry declarations");
+    void* interactive = nullptr;
+    if (!shadingsys.getattribute(&group, "num_entry_layers", entry_count)
+        || !shadingsys.getattribute(&group, "device_interactive_params",
+                                    TypeDesc::PTR, &interactive)) {
+        err.errorfmt("Cannot retrieve compiled HART runtime bindings");
         return false;
     }
     HartGridRenderer runtime(err);
@@ -1218,7 +1246,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     const bool rendered         = runtime.render(
         width, height, iterations, warmup, pixels, size_t(group_size),
         size_t(group_alignment), raytype, &textures, transforms,
-        options.fused ? size_t(local_groupdata) : 0, 0, entry_count > 0);
+        options.fused ? size_t(local_groupdata) : 0, 0, entry_count > 0,
+        interactive, options.update_parameters);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

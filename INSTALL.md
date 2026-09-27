@@ -856,15 +856,39 @@ shader code or filenames.
 `Dz`, unlisted noise forms, closures,
 tracing, shader printing, writes to shader globals, other globals such as
 `Ps` and `dtime`, unlisted coordinate spaces and transforms,
-string allocation and character operations, interpolated or interactive
+string allocation and character operations, interpolated
 parameters, other renderer-service callbacks, batched execution, instrumentation,
-explicit entry layers, multiple final outputs, and unlisted frontend
+and unlisted frontend
 options are unsupported.
 They fail explicitly; there is **no CPU fallback**.
 `--hart-entry` and `--hart-callable-module` belong only to external-module
 mode and cannot override generated callables.
 The selected architecture is fixed for the lifetime of a `ShadingSystem`;
 its `hart_arch` attribute may be set again only to the same architecture.
+
+Generated HART testshade and the native path tracer support interactive numeric
+and string parameters, including fixed/resolved arrays. Declare them with
+`[[int interactive=1]]` or `--param:interactive=1`. Testshade applies `--reparam`
+updates between measured iterations, after each completed launch; warmup does
+not update parameters. The API can update A-B-A values on the same compiled
+group, without changing shader bitcode or pipeline-cache identity.
+Parameter overrides must repeat the interactive hint; an ordinary static
+override replaces the shader default's interactive setting.
+
+Custom renderers opt in with `HARTInteractive` and implement the existing
+`device_alloc`, `device_free`, and `copy_to_device` hooks. The group allocates and
+owns its arena; the sixth callable argument borrows `device_interactive_params`.
+The parameter layout, including array lengths, is fixed by optimization. Strings
+in both host and device arenas are hashes, not host pointers. Finish GPU work
+before calling `ReParameter` or destroying the group; keep its renderer alive
+until group destruction. Allocation/copy failures report errors and invalidate
+the device binding (the query returns false/null), preventing test-renderer
+launches and image publication. A successful update restores the full arena
+from the last committed host values before accepting new values.
+`hart-interactive-runtime` and the four `hart-interactive-rebind-*` GPU tests
+cover CLI updates, derivatives, scalar/array/string values, warmup, errors,
+immutable artifacts and A-B-A cache reuse. Interpolated userdata remains a
+separate, unsupported renderer service.
 
 Numeric and string arrays and flattened structs support initialization, copying,
 length queries, runtime indexing, nested members and whole-aggregate connections.

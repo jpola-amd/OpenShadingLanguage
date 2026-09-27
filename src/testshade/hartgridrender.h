@@ -6,6 +6,7 @@
 
 #include <OSL/oslconfig.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,7 @@ struct HartOptions {
     bool has_module = false, has_callables = false, has_entry = false;
     std::vector<std::string> shader_entries;
     std::vector<std::string> entry_outputs;
+    std::function<bool()> update_parameters;
 };
 
 struct HartOutputRequest {

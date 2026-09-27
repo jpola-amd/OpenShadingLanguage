@@ -171,11 +171,11 @@ radiance(const Scene& scene, Ray ray, Sampler& sampler, uint64_t pixel)
                           : params.scratch + pixel * params.scratch_stride;
         hartDirectCall<void, ShaderGlobals*, void*, void*, void*, int, void*>(
             material.callable, &sg, group, nullptr, nullptr, int(pixel),
-            nullptr);
+            material.interactive);
         if (!params.fused)
             hartDirectCall<void, ShaderGlobals*, void*, void*, void*, int,
                            void*>(material.callable + 1, &sg, group, nullptr,
-                                  nullptr, int(pixel), nullptr);
+                                  nullptr, int(pixel), material.interactive);
         DiffuseLobe lobes[32];
         unsigned num_lobes = 0;
         Color3 emission(0);

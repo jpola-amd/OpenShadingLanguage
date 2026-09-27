@@ -85,6 +85,23 @@ shader hart_color_rebind(output color Cout = 0)
 }
 )OSL";
 
+const char* interactive_source = R"OSL(
+shader hart_interactive_rebind(
+    float gain = 2 [[int interactive=1]],
+    float weights[2] = {3,5} [[int interactive=1]],
+    int code = 16777219 [[int interactive=1]],
+    matrix M = 1 [[int interactive=1]],
+    string label = "red" [[int interactive=1]],
+    string names[2] = {"red",""} [[int interactive=1]],
+    output color Cout = 0)
+{
+    int i = int(u + 0.5);
+    float q = gain * weights[i] * (u + 2*v) + M[0][0] + code % 97;
+    Cout = color(q + (label == names[i] ? 10 : 0)
+                   + (names[1] == "" ? 100 : 0), Dx(q), Dy(q));
+}
+)OSL";
+
 
 
 class Diagnostics final : public ErrorHandler {
@@ -470,11 +487,54 @@ shader color_rebound_error(output color Cout=0)
 
 
 bool
-run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
+check_interactive_image(string_view filename, bool changed,
+                        std::vector<float>& pixels, Diagnostics& diagnostics)
 {
-    const char* kind        = color ? "color" : "transform";
-    const char* shader_name = color ? "hart_color_rebind"
-                                    : "hart_transform_rebind";
+    OIIO::ImageBuf image(filename);
+    if (!image.read(0, 0, true, TypeFloat) || image.spec().width != width
+        || image.spec().height != height || image.nchannels() != 3) {
+        diagnostics.errorfmt("Invalid interactive output '{}': {}", filename,
+                             image.geterror());
+        return false;
+    }
+    pixels.resize(width * height * 3);
+    if (!image.get_pixels(image.roi(), TypeFloat, pixels.data())) {
+        diagnostics.errorfmt("Cannot read interactive pixels: {}",
+                             image.geterror());
+        return false;
+    }
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            const float u      = float(x) / (width - 1);
+            const float v      = float(y) / (height - 1);
+            const int i        = int(u + .5f);
+            const float gain   = changed ? 4 : 2;
+            const float weight = changed ? (i ? -2 : 7) : (i ? 5 : 3);
+            const float q      = gain * weight * (u + 2 * v) + (changed ? 3 : 1)
+                                 + (changed ? 16777223 : 16777219) % 97;
+            const float expected[] = {
+                q + ((changed ? i == 1 : i == 0) ? 10 : 0)
+                    + (changed ? 0 : 100),
+                gain * weight / (width - 1), 2 * gain * weight / (height - 1)
+            };
+            for (int c = 0; c < 3; ++c)
+                OIIO_CHECK_EQUAL(pixels[(y * width + x) * 3 + c], expected[c]);
+        }
+    return true;
+}
+
+
+
+bool
+run(string_view stdosl, string_view mode, bool color, bool interactive,
+    Diagnostics& diagnostics)
+{
+    const char* kind        = interactive ? "interactive"
+                              : color     ? "color"
+                                          : "transform";
+    const char* shader_name = interactive ? "hart_interactive_rebind"
+                              : color     ? "hart_color_rebind"
+                                          : "hart_transform_rebind";
     OutputFiles outputs;
     if (!outputs.create(diagnostics))
         return false;
@@ -514,7 +574,10 @@ run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
     }
     OSLCompiler compiler(&diagnostics);
     std::string oso;
-    if (!compiler.compile_buffer(color ? color_source : source, oso, { }, stdosl)
+    if (!compiler.compile_buffer(interactive ? interactive_source
+                                 : color     ? color_source
+                                             : source,
+                                 oso, { }, stdosl)
         || !ss.LoadMemoryCompiledShader(shader_name, oso)) {
         diagnostics.errorfmt("Cannot compile/load the HART transform shader");
         return false;
@@ -534,6 +597,14 @@ run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
     const void* original_address = nullptr;
     if (!artifact(ss, *group, original_bitcode, original_address, diagnostics))
         return false;
+    void* original_interactive = nullptr;
+    if (interactive
+        && (!ss.getattribute(group.get(), "device_interactive_params",
+                             TypeDesc::PTR, &original_interactive)
+            || !original_interactive)) {
+        diagnostics.errorfmt("Missing interactive device allocation");
+        return false;
+    }
     int local_bytes = 0;
     if (!ss.getattribute(group.get(), "hart_groupdata_alloc", local_bytes)
         || (local_bytes > 0) != (mode == "fused-local")) {
@@ -552,6 +623,27 @@ run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
     for (int pass = 0; pass < 3; ++pass) {
         const Affine& object = pass == 1 ? object_b : object_a;
         const Affine& shader = pass == 1 ? shader_b : shader_a;
+        if (interactive && pass) {
+            const bool changed    = pass == 1;
+            const float weights[] = { changed ? 7.0f : 3.0f,
+                                      changed ? -2.0f : 5.0f };
+            const ustring names[] = { ustring(changed ? "green" : "red"),
+                                      ustring(changed ? "blue" : "") };
+            const Matrix44 matrix(changed ? 3.0f : 1.0f);
+            if (!ss.ReParameter(*group, kind, "gain", changed ? 4.0f : 2.0f)
+                || !ss.ReParameter(*group, kind, "weights",
+                                   TypeDesc(TypeDesc::FLOAT, 2), weights)
+                || !ss.ReParameter(*group, kind, "code",
+                                   changed ? 16777223 : 16777219)
+                || !ss.ReParameter(*group, kind, "M", TypeMatrix, &matrix)
+                || !ss.ReParameter(*group, kind, "label",
+                                   std::string(changed ? "blue" : "red"))
+                || !ss.ReParameter(*group, kind, "names",
+                                   TypeDesc(TypeDesc::STRING, 2), names)) {
+                diagnostics.errorfmt("Cannot update interactive values");
+                return false;
+            }
+        }
         if (color
             && !ss.attribute("colorspace", pass == 1 ? "XYZ" : "Rec709")) {
             diagnostics.errorfmt("Cannot rebind HART color system");
@@ -567,12 +659,15 @@ run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
             diagnostics.errorfmt("HART transform launch {} failed", pass);
             return false;
         }
-        if (!(color ? check_color_image(outputs.files[pass], pass == 1,
-                                        pass ? cspan<float>(images[0])
-                                             : cspan<float>(),
-                                        images[pass], diagnostics)
-                    : check_image(outputs.files[pass], object, shader,
-                                  images[pass], diagnostics)))
+        if (!(interactive
+                  ? check_interactive_image(outputs.files[pass], pass == 1,
+                                            images[pass], diagnostics)
+              : color ? check_color_image(outputs.files[pass], pass == 1,
+                                          pass ? cspan<float>(images[0])
+                                               : cspan<float>(),
+                                          images[pass], diagnostics)
+                      : check_image(outputs.files[pass], object, shader,
+                                    images[pass], diagnostics)))
             return false;
         std::string current_bitcode;
         const void* current_address = nullptr;
@@ -583,6 +678,13 @@ run(string_view stdosl, string_view mode, bool color, Diagnostics& diagnostics)
             diagnostics.errorfmt("HART transform artifact changed on launch {}",
                                  pass);
             return false;
+        }
+        if (interactive) {
+            void* current = nullptr;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "device_interactive_params",
+                                              TypeDesc::PTR, &current));
+            OIIO_CHECK_EQUAL(current, original_interactive);
         }
     }
     if (images[0] == images[1] || images[0] != images[2]) {
@@ -735,18 +837,21 @@ main(int argc, char* argv[])
 {
     const bool color = argc == 4 && string_view(argv[3]) == "color";
     const bool outputs = argc == 4 && string_view(argv[3]) == "outputs";
+    const bool interactive = argc == 4 && string_view(argv[3]) == "interactive";
     const string_view mode(argc >= 3 ? argv[2] : "split");
-    if ((argc != 2 && argc != 3 && !color && !outputs)
+    if ((argc != 2 && argc != 3 && !color && !outputs && !interactive)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
-            && !((color || outputs) && mode == "unoptimized"))) {
-        print(stderr,
-              "Usage: hart_transform_test stdosl.h "
-              "[split|fused|fused-local|unoptimized] [color|outputs]\n");
+            && !((color || outputs || interactive) && mode == "unoptimized"))) {
+        print(
+            stderr,
+            "Usage: hart_transform_test stdosl.h "
+            "[split|fused|fused-local|unoptimized] [color|outputs|interactive]\n");
         return 1;
     }
     Diagnostics diagnostics;
-    OIIO_CHECK_ASSERT(outputs ? run_outputs(argv[1], mode, diagnostics)
-                              : run(argv[1], mode, color, diagnostics));
+    OIIO_CHECK_ASSERT(
+        outputs ? run_outputs(argv[1], mode, diagnostics)
+                : run(argv[1], mode, color, interactive, diagnostics));
     OIIO_CHECK_EQUAL(diagnostics.errors, 0);
     OIIO_CHECK_EQUAL(diagnostics.warnings, 0);
     return unit_test_failures;

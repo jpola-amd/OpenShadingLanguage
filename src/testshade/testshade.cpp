@@ -2169,6 +2169,16 @@ test_shade(int argc, const char* argv[])
         setup_transformations(*rend, Mshad, Mobj);
         hart.shader_entries = entrylayers;
         hart.entry_outputs  = entryoutputs;
+        if (!reparams.empty()) {
+            hart.update_parameters = [&]() {
+                for (const auto& value : reparams)
+                    if (!shadingsys->ReParameter(*shadergroup, reparam_layer,
+                                                 value.name(), value.type(),
+                                                 value.data()))
+                        return false;
+                return true;
+            };
+        }
         std::vector<HartOutputRequest> hart_outputs;
         for (size_t i = 0; i < outputvars.size(); ++i)
             hart_outputs.push_back({ outputvars[i], outputfiles[i] });

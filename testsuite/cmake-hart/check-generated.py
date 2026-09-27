@@ -3792,7 +3792,6 @@ try:
         ["--no-output-placement"], ["--shadeimage"], ["--raytype", "shadow"],
         ["--scaleuv", "2", "2"], ["--offsetuv", "1", "1"],
         ["--options", "optimize=0"], ["--saveptx"],
-        ["--reparam", "layer", "value", "2"],
     ):
         run(base + option, "unsupported option")
     for option in (["--hart-entry", "__raygen__other"],
@@ -3820,7 +3819,6 @@ try:
     run(base + ["--hart-device", "-1"], "must be nonnegative")
     run(base + ["--hart-device", "not-an-integer"], "error")
     run(base + ["--param:interpolated=1", "value", "2"], "interpolated")
-    run(base + ["--param:interactive=1", "value", "2"], "interactive")
     run(base + ["-d", "invalid"], "output format")
     run(["--hart", "--param", "scale", "2"], "requires an OSL shader")
     for option in ("TESTSHADE_BATCHED", "TESTSHADE_RS_BITCODE"):

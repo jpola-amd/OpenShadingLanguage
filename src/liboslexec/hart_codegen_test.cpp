@@ -6,8 +6,8 @@
 // OSL shaders and inspect their AMDGPU bitcode before and after optimization,
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
-// diagnostics, linked shadeops, control flow, HART provenance, and rejection of
-// unsupported operations.
+// diagnostics, interactive uploads, linked shadeops, control flow, HART
+// provenance, and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -26,11 +26,13 @@
 #include <OSL/shaderglobals.h>
 
 #include "hart_bitcode.h"
+#include "oslexec_pvt.h"
 #include "opcolor.h"
 
 #include <OpenImageIO/unittest.h>
 
 #include <algorithm>
+#include <cstring>
 #include <initializer_list>
 #include <limits>
 #include <utility>
@@ -163,6 +165,70 @@ public:
     int errors = 0;
     std::string last_error;
     std::string messages;
+};
+
+
+
+class HartInteractiveServices final : public RendererServices {
+public:
+    int supports(string_view feature) const override
+    {
+        return feature == "HART" || feature == "HARTArrayBounds"
+               || (interactive && feature == "HARTInteractive");
+    }
+    void* device_alloc(size_t size) override
+    {
+        ++allocations;
+        requested_size = size;
+        OIIO_CHECK_ASSERT(!storage);
+        if (fail_allocation || storage)
+            return nullptr;
+        storage = std::make_unique<uint8_t[]>(size);
+        std::memset(storage.get(), 0xa5, size);
+        ++successful_allocations;
+        return storage.get();
+    }
+    void device_free(void* pointer) override
+    {
+        OIIO_CHECK_ASSERT(storage && pointer == storage.get());
+        if (storage && pointer == storage.get()) {
+            ++frees;
+            storage.reset();
+        }
+    }
+    void* copy_to_device(void* destination, const void* source,
+                         size_t size) override
+    {
+        const auto address = reinterpret_cast<uintptr_t>(destination);
+        const auto base    = reinterpret_cast<uintptr_t>(storage.get());
+        const bool valid   = storage && source && size && address >= base
+                             && address - base <= requested_size
+                             && size <= requested_size - (address - base);
+        OIIO_CHECK_ASSERT(valid);
+        if (!valid)
+            return nullptr;
+        copies.push_back({ size_t(address - base), size });
+        if (fail_copy) {
+            // Deliberately damage only a prefix; rollback must repair the rest
+            // of this allocation even when the next update targets elsewhere.
+            std::memcpy(destination, source, std::max(size_t(1), size / 2));
+            return nullptr;
+        }
+        std::memcpy(destination, source, size);
+        return destination;
+    }
+
+    struct Copy {
+        size_t offset;
+        size_t size;
+    };
+    bool interactive     = true;
+    bool fail_allocation = false;
+    bool fail_copy       = false;
+    int allocations = 0, successful_allocations = 0, frees = 0;
+    size_t requested_size = 0;
+    std::unique_ptr<uint8_t[]> storage;
+    std::vector<Copy> copies;
 };
 
 
@@ -3933,6 +3999,599 @@ check_explicit_entry_modules(string_view arch, string_view stdosl,
 
 
 bool
+interactive_address(const llvm::Value* value, const llvm::Argument* arena,
+                    const llvm::DataLayout& layout, int64_t& offset,
+                    unsigned depth = 0)
+{
+    if (depth > 16)
+        return false;
+    if (value == arena) {
+        offset = 0;
+        return true;
+    }
+    if (const auto* cast = llvm::dyn_cast<llvm::CastInst>(value))
+        if (cast->getOpcode() == llvm::Instruction::BitCast
+            || cast->getOpcode() == llvm::Instruction::AddrSpaceCast
+            || cast->getOpcode() == llvm::Instruction::PtrToInt
+            || cast->getOpcode() == llvm::Instruction::IntToPtr)
+            return interactive_address(cast->getOperand(0), arena, layout,
+                                       offset, depth + 1);
+    if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(value)) {
+        llvm::APInt delta(layout.getIndexTypeSizeInBits(gep->getType()), 0);
+        if (gep->accumulateConstantOffset(layout, delta)
+            && interactive_address(gep->getPointerOperand(), arena, layout,
+                                   offset, depth + 1)) {
+            offset += delta.getSExtValue();
+            return true;
+        }
+    }
+    if (const auto* sum = llvm::dyn_cast<llvm::BinaryOperator>(value))
+        if (sum->getOpcode() == llvm::Instruction::Add)
+            for (unsigned i = 0; i < 2; ++i)
+                if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(
+                        sum->getOperand(i)))
+                    if (interactive_address(sum->getOperand(1 - i), arena,
+                                            layout, offset, depth + 1)) {
+                        offset += constant->getSExtValue();
+                        return true;
+                    }
+    return false;
+}
+
+
+
+struct InteractiveField {
+    const char* name;
+    TypeDesc type;
+    size_t offset = 0, extent = 0;
+};
+
+
+
+std::vector<uint8_t>
+interactive_payload(TypeDesc type, const void* value)
+{
+    std::vector<uint8_t> bytes(type.size());
+    if (type.basetype == TypeDesc::STRING) {
+        const auto* strings = static_cast<const ustring*>(value);
+        OIIO_CHECK_EQUAL(type.size(), 8 * type.numelements());
+        for (int i = 0; i < type.numelements(); ++i) {
+            const uint64_t hash = strings[i].hash();
+            std::memcpy(bytes.data() + 8 * i, &hash, 8);
+        }
+    } else {
+        std::memcpy(bytes.data(), value, bytes.size());
+    }
+    return bytes;
+}
+
+
+
+bool
+check_interactive_ir(ShadingSystem& ss, ShaderGroup& group,
+                     cspan<InteractiveField> fields)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_interactive"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module       = **parsed;
+    const auto& layout = module.getDataLayout();
+    OIIO_CHECK_ASSERT(layout.isLittleEndian());
+    OIIO_CHECK_EQUAL(layout.getPointerSize(0), 8);
+    std::vector<unsigned> planes(fields.size(), 0);
+    std::vector<unsigned> string_elements(fields.size(), 0);
+    for (const auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0)
+            continue;
+        OIIO_CHECK_EQUAL(function.arg_size(), 6);
+        if (function.arg_size() != 6)
+            continue;
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                int64_t offset = -1;
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+                    OIIO_CHECK_ASSERT(
+                        !interactive_address(store->getPointerOperand(),
+                                             function.getArg(5), layout,
+                                             offset));
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+                if (!load
+                    || !interactive_address(load->getPointerOperand(),
+                                            function.getArg(5), layout, offset))
+                    continue;
+                bool matched = false;
+                for (size_t i = 0; i < fields.size(); ++i) {
+                    const auto& field = fields[i];
+                    if (offset < 0 || size_t(offset) < field.offset
+                        || size_t(offset) >= field.offset + field.extent)
+                        continue;
+                    matched               = true;
+                    const size_t relative = size_t(offset) - field.offset;
+                    const bool string = field.type.basetype == TypeDesc::STRING;
+                    const size_t scalar_size = string ? 8 : 4;
+                    OIIO_CHECK_EQUAL(relative % scalar_size, 0);
+                    OIIO_CHECK_EQUAL(size_t(offset) % scalar_size, 0);
+                    OIIO_CHECK_EQUAL(layout.getTypeStoreSize(load->getType())
+                                         .getFixedValue(),
+                                     scalar_size);
+                    OIIO_CHECK_ASSERT(string ? load->getType()->isIntegerTy(64)
+                                      : field.type.basetype == TypeDesc::INT
+                                          ? load->getType()->isIntegerTy(32)
+                                          : load->getType()->isFloatTy());
+                    OIIO_CHECK_ASSERT(relative + scalar_size <= field.extent);
+                    planes[i] |= 1u << (relative / field.type.size());
+                    if (string)
+                        string_elements[i] |= 1u << (relative / 8);
+                }
+                OIIO_CHECK_ASSERT(matched);
+            }
+    }
+    for (size_t i = 0; i < fields.size(); ++i) {
+        OIIO_CHECK_ASSERT(planes[i] & 1u);
+        if (fields[i].type.basetype == TypeDesc::STRING)
+            OIIO_CHECK_EQUAL(string_elements[i],
+                             (1u << fields[i].type.numelements()) - 1);
+        // The fixture directly demands both gradients of gain and tint. Any
+        // retained derivative planes must also be read through argument 5.
+        if (fields[i].extent > fields[i].type.size()
+            && (string_view(fields[i].name) == "gain"
+                || string_view(fields[i].name) == "tint"))
+            OIIO_CHECK_EQUAL(planes[i], 7u);
+    }
+    return true;
+}
+
+
+
+bool
+check_interactive_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_interactive("
+        "int count=7 [[int interactive=1]], float gain=1.25, "
+        "color tint=color(0.25,0.5,0.75) [[int interactive=1]], "
+        "matrix basis=1 [[int interactive=1]], "
+        "int indices[3]={7,11,13} [[int interactive=1]], "
+        "float weights[]={0.125,0.25} [[int interactive=1]], "
+        "string label=\"alpha\" [[int interactive=1]], "
+        "string tags[2]={\"beta\",\"\"} [[int interactive=1]], "
+        "output float value=0, output color Cout=0) { "
+        "color dx=Dx(tint), dy=Dy(tint); "
+        "value=count+gain*(1+u)+tint[0]+tint[1]+tint[2]"
+        "+basis[0][1]+basis[3][2]+indices[0]+indices[1]+indices[2]"
+        "+weights[0]+weights[1]+arraylength(weights)"
+        "+(label==\"alpha\")+2*(tags[0]==label)+4*(tags[1]==\"\")"
+        "+Dx(gain)+Dy(gain)+dx[0]+dy[1]; "
+        "Cout=color(value,Dx(gain)+dx[0],Dy(gain)+dy[1]); }",
+        "shader hart_interactive_consumer(float value=0, output color Cout=0) "
+        "{ Cout=color(value,Dx(value),Dy(value)); }",
+        "shader hart_interpolated(float gain=1 [[int interpolated=1]], "
+        "output color Cout=0) { Cout=color(gain*u); }",
+    };
+    std::string oso[3];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], oso[i], { }, stdosl))
+            return false;
+    }
+    const struct {
+        int osl, llvm, length;
+        bool local, connected;
+        int failure;  // 1: allocation; 2: copy/recover; 3: copy/abandon.
+    } variants[] = {
+        { 0, 10, 2, false, false, 0 }, { 2, 10, 5, true, false, 0 },
+        { 2, 3, 3, true, false, 0 },   { 0, 10, 3, false, true, 0 },
+        { 2, 3, 5, true, true, 0 },    { 2, 10, 3, false, false, 1 },
+        { 2, 10, 3, false, false, 2 }, { 2, 10, 3, false, false, 3 },
+    };
+    for (const auto& variant : variants) {
+        HartInteractiveServices renderer;
+        auto run = [&]() {
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", variant.osl);
+            ss.attribute("llvm_optimize", variant.llvm);
+            ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+            OIIO_CHECK_ASSERT(ss.attribute("error_repeats", 1));
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_producer", oso[0]));
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_consumer", oso[1]));
+            const char* layer = variant.connected ? "producer" : "layer0";
+            const int count = 7, indices[] = { 7, 11, 13 };
+            const float gain = 1.25f, tint[] = { .25f, .5f, .75f };
+            const float basis[]   = { 1, 0, 0, 0, 0, 1, 0, 0,
+                                      0, 0, 1, 0, 0, 0, 0, 1 };
+            const float weights[] = { .125f, .25f, .5f, .75f, 1 };
+            const ustring label("alpha"),
+                tags[] = { ustring("beta"), ustring("") };
+            std::vector<InteractiveField> fields = {
+                { "count", TypeInt },
+                { "gain", TypeFloat },
+                { "tint", TypeColor },
+                { "basis", TypeMatrix },
+                { "indices", TypeDesc(TypeDesc::INT, 3) },
+                { "weights", TypeDesc(TypeDesc::FLOAT, variant.length) },
+                { "label", TypeString },
+                { "tags", TypeDesc(TypeDesc::STRING, 2) },
+            };
+            const void* initial[] = { &count,  &gain,   tint,   basis,
+                                      indices, weights, &label, tags };
+            auto group            = ss.ShaderGroupBegin("hart_test_group");
+            OIIO_CHECK_ASSERT(ss.Parameter("gain", TypeFloat, &gain,
+                                           ParamHints::interactive));
+            if (variant.length != 2)
+                OIIO_CHECK_ASSERT(ss.Parameter("weights", fields[5].type,
+                                               weights,
+                                               ParamHints::interactive));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_producer", layer));
+            if (variant.connected) {
+                OIIO_CHECK_ASSERT(
+                    ss.Shader("surface", "hart_consumer", "consumer"));
+                OIIO_CHECK_ASSERT(ss.ConnectShaders("producer", "value",
+                                                    "consumer", "value"));
+            }
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output(variant.connected ? "consumer.Cout"
+                                                           : "layer0.Cout",
+                                         TypeColor, false, SymArena::Outputs, 0,
+                                         12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+            auto no_artifact = [&]() {
+                const void* bytes = nullptr;
+                uint64_t size     = 0;
+                OIIO_CHECK_ASSERT(!ss.getattribute(group.get(), "hart_bitcode",
+                                                   TypeDesc::PTR, &bytes));
+                OIIO_CHECK_ASSERT(!ss.getattribute(group.get(),
+                                                   "hart_bitcode_size",
+                                                   TypeUInt64, &size));
+                OIIO_CHECK_ASSERT(!bytes && !size);
+            };
+            auto invalid_binding = [&]() {
+                void* pointer    = &renderer;
+                const int before = errors.errors;
+                OIIO_CHECK_ASSERT(!ss.getattribute(group.get(),
+                                                   "device_interactive_params",
+                                                   TypeDesc::PTR, &pointer));
+                OIIO_CHECK_ASSERT(!pointer);
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+                    errors.last_error,
+                    "interactive parameter device storage is invalid"));
+            };
+            int optimized = -1;
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "is_optimized", optimized));
+            OIIO_CHECK_EQUAL(optimized, 0);
+            renderer.fail_allocation = variant.failure == 1;
+            renderer.fail_copy       = variant.failure >= 2;
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors != (variant.failure ? 1 : 0)
+                || renderer.allocations != 1)
+                print(stderr, "Interactive compilation:\n{}", errors.messages);
+            OIIO_CHECK_EQUAL(errors.errors, variant.failure ? 1 : 0);
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "is_optimized", optimized));
+            OIIO_CHECK_EQUAL(optimized, 1);
+            OIIO_CHECK_EQUAL(renderer.allocations, 1);
+            OIIO_CHECK_EQUAL(renderer.successful_allocations,
+                             variant.failure == 1 ? 0 : 1);
+            OIIO_CHECK_EQUAL(renderer.copies.size(),
+                             variant.failure == 1 ? 0 : 1);
+
+            // Read actual optimized symbol extents and arena offsets. Do not
+            // guess a host C++ struct layout or mutate private group state.
+            size_t extent = 0;
+            for (auto& field : fields) {
+                const int offset
+                    = group->interactive_param_offset(0, ustring(field.name));
+                OIIO_CHECK_ASSERT(offset >= 0);
+                if (offset < 0)
+                    return false;
+                field.offset = size_t(offset);
+                for (const auto& symbol : group->layer(0)->symbols())
+                    if (symbol.name() == field.name) {
+                        OIIO_CHECK_ASSERT(symbol.interactive());
+                        OIIO_CHECK_ASSERT(symbol.typespec().simpletype()
+                                          == field.type);
+                        field.extent = field.type.size()
+                                       * (symbol.has_derivs() ? 3 : 1);
+                    }
+                OIIO_CHECK_ASSERT(field.extent > 0);
+                if (!field.extent)
+                    return false;
+                extent = std::max(extent, field.offset + field.extent);
+            }
+            for (size_t i = 0; i < fields.size(); ++i)
+                for (size_t j = i + 1; j < fields.size(); ++j)
+                    OIIO_CHECK_ASSERT(fields[i].offset + fields[i].extent
+                                          <= fields[j].offset
+                                      || fields[j].offset + fields[j].extent
+                                             <= fields[i].offset);
+            OIIO_CHECK_EQUAL(renderer.requested_size, extent);
+            if (renderer.requested_size != extent || !extent || extent > 4096)
+                return false;
+            std::vector<uint8_t> expected(extent, 0);
+            for (size_t i = 0; i < fields.size(); ++i) {
+                auto payload = interactive_payload(fields[i].type, initial[i]);
+                std::memcpy(expected.data() + fields[i].offset, payload.data(),
+                            payload.size());
+            }
+            auto host_matches = [&]() {
+                void* host = nullptr;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "interactive_params",
+                                                  TypeDesc::PTR, &host));
+                OIIO_CHECK_ASSERT(host);
+                if (host)
+                    OIIO_CHECK_EQUAL(std::memcmp(host, expected.data(), extent),
+                                     0);
+            };
+            auto device_matches = [&]() {
+                void* device = nullptr;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "device_interactive_params",
+                                                  TypeDesc::PTR, &device));
+                OIIO_CHECK_ASSERT(device && device == renderer.storage.get());
+                if (device && device == renderer.storage.get())
+                    OIIO_CHECK_EQUAL(std::memcmp(device, expected.data(),
+                                                 extent),
+                                     0);
+                host_matches();
+            };
+            host_matches();
+            if (variant.failure) {
+                OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+                    errors.last_error, variant.failure == 1
+                                           ? "failed to allocate interactive"
+                                           : "failed to upload interactive"));
+                no_artifact();
+                invalid_binding();
+                invalid_binding();
+                if (renderer.storage)
+                    OIIO_CHECK_ASSERT(std::memcmp(renderer.storage.get(),
+                                                  expected.data(), extent)
+                                      != 0);
+                if (variant.failure == 3)
+                    return true;
+                const size_t copies = renderer.copies.size();
+                const int before    = errors.errors;
+                ss.optimize_group(group.get(), nullptr);
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_EQUAL(renderer.copies.size(), copies);
+                no_artifact();
+                renderer.fail_allocation = renderer.fail_copy = false;
+                OIIO_CHECK_ASSERT(ss.ReParameter(*group, layer, "gain", gain));
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_EQUAL(renderer.allocations,
+                                 variant.failure == 1 ? 2 : 1);
+                OIIO_CHECK_EQUAL(renderer.successful_allocations, 1);
+                OIIO_CHECK_EQUAL(renderer.copies.size(), copies + 1);
+                OIIO_CHECK_EQUAL(renderer.copies.back().offset, 0);
+                OIIO_CHECK_EQUAL(renderer.copies.back().size, extent);
+                device_matches();
+                ss.optimize_group(group.get(), nullptr);
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_EQUAL(renderer.copies.size(), copies + 1);
+            }
+            device_matches();
+            check_module(ss, *group, arch, { }, variant.llvm, variant.connected,
+                         false, false, 0, false, true);
+            if (variant.llvm == 10)
+                OIIO_CHECK_ASSERT(check_interactive_ir(ss, *group, fields));
+            int allocated = -1, group_size = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "llvm_groupdata_size",
+                                              group_size));
+            OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+            OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+            const void* artifact_pointer = nullptr;
+            uint64_t size                = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                              TypeDesc::PTR,
+                                              &artifact_pointer));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                              TypeUInt64, &size));
+            if (!artifact_pointer || !size)
+                return false;
+            const std::string artifact(static_cast<const char*>(
+                                           artifact_pointer),
+                                       size);
+            auto unchanged = [&]() {
+                const void* current = nullptr;
+                uint64_t length     = 0;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                                  TypeDesc::PTR, &current));
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "hart_bitcode_size",
+                                                  TypeUInt64, &length));
+                OIIO_CHECK_EQUAL(current, artifact_pointer);
+                OIIO_CHECK_EQUAL(length, artifact.size());
+                if (current && length == artifact.size())
+                    OIIO_CHECK_ASSERT(
+                        string_view(static_cast<const char*>(current), length)
+                        == string_view(artifact));
+                OIIO_CHECK_EQUAL(renderer.successful_allocations, 1);
+                OIIO_CHECK_EQUAL(renderer.frees, 0);
+                host_matches();
+            };
+            bool valid  = true;
+            auto update = [&](size_t index, const void* data, bool success) {
+                const auto& field = fields[index];
+                auto payload      = interactive_payload(field.type, data);
+                const bool upload
+                    = !valid
+                      || std::memcmp(expected.data() + field.offset,
+                                     payload.data(), payload.size());
+                const size_t copies = renderer.copies.size();
+                const int before    = errors.errors;
+                OIIO_CHECK_EQUAL(ss.ReParameter(*group, layer, field.name,
+                                                field.type, data),
+                                 success);
+                OIIO_CHECK_EQUAL(errors.errors, before + (success ? 0 : 1));
+                OIIO_CHECK_EQUAL(renderer.copies.size(),
+                                 copies + (upload ? 1 : 0));
+                if (upload && renderer.copies.size() > copies) {
+                    OIIO_CHECK_EQUAL(renderer.copies.back().offset,
+                                     valid ? field.offset : 0);
+                    OIIO_CHECK_EQUAL(renderer.copies.back().size,
+                                     valid ? payload.size() : extent);
+                }
+                if (success) {
+                    std::memcpy(expected.data() + field.offset, payload.data(),
+                                payload.size());
+                    device_matches();
+                } else {
+                    OIIO_CHECK_ASSERT(OIIO::Strutil::contains(
+                        errors.last_error, "failed to upload interactive"));
+                    invalid_binding();
+                }
+                valid = success;
+                unchanged();
+            };
+            for (size_t i = 0; i < fields.size(); ++i)
+                update(i, initial[i], true);
+            const int new_count = 17, new_indices[] = { 101, 202, 303 };
+            const float new_gain = 2.75f, new_tint[] = { 3, 4, 5 };
+            const float new_basis[]   = { 2,  3,  4,  5,  6,  7,  8,  9,
+                                          10, 11, 12, 13, 14, 15, 16, 17 };
+            const float new_weights[] = { 5, 4, 3, 2, 1 };
+            const ustring empty, new_tags[] = { ustring(""), ustring("alpha") };
+            const void* changed[] = { &new_count, &new_gain,   new_tint,
+                                      new_basis,  new_indices, new_weights,
+                                      &empty,     new_tags };
+            for (size_t i = 0; i < fields.size(); ++i)
+                update(i, changed[i], true);
+            renderer.fail_copy = true;
+            update(4, indices, false);
+            if (renderer.storage)
+                OIIO_CHECK_ASSERT(
+                    std::memcmp(renderer.storage.get(), expected.data(), extent)
+                    != 0);
+            // Repeating an equal-valued, different field still repairs every
+            // byte. A second partial repair failure must remain recoverable.
+            update(1, &new_gain, false);
+            renderer.fail_copy = false;
+            update(1, &new_gain, true);
+            renderer.fail_copy = true;
+            update(7, tags, false);
+            if (renderer.storage)
+                OIIO_CHECK_ASSERT(
+                    std::memcmp(renderer.storage.get(), expected.data(), extent)
+                    != 0);
+            renderer.fail_copy = false;
+            update(7, new_tags, true);
+            update(7, new_tags, true);
+            renderer.fail_copy = true;
+            update(0, &count, false);
+            renderer.fail_copy       = false;
+            const int repaired_count = -19;
+            update(0, &repaired_count, true);
+            auto reject = [&](string_view target_layer, string_view name,
+                              TypeDesc type, const void* data,
+                              string_view diagnostic) {
+                const size_t copies = renderer.copies.size();
+                const int before    = errors.errors;
+                OIIO_CHECK_ASSERT(
+                    !ss.ReParameter(*group, target_layer, name, type, data));
+                OIIO_CHECK_EQUAL(errors.errors, before + 1);
+                OIIO_CHECK_ASSERT(
+                    OIIO::Strutil::contains(errors.last_error, diagnostic));
+                OIIO_CHECK_EQUAL(renderer.copies.size(), copies);
+                device_matches();
+                unchanged();
+            };
+            reject("missing", "gain", TypeFloat, &new_gain, "unknown layer");
+            reject(layer, "missing", TypeFloat, &new_gain, "unknown parameter");
+            reject(variant.connected ? "consumer" : layer, "Cout", TypeColor,
+                   new_tint, "was not declared interactive");
+            reject(layer, "gain", TypeInt, &new_count, "type mismatch");
+            reject(layer, "indices", TypeDesc(TypeDesc::INT, 2), indices,
+                   "type mismatch");
+            const ustring oversized_tags[] = { ustring("a"), ustring("b"),
+                                               ustring("c") };
+            reject(layer, "tags", TypeDesc(TypeDesc::STRING, 3), oversized_tags,
+                   "type mismatch");
+            reject(layer, "weights", TypeDesc(TypeDesc::FLOAT, -1), weights,
+                   "type mismatch");
+            reject(layer, "tint", TypeFloat, &new_gain, "invalid data or size");
+            reject(layer, "gain", TypeFloat, nullptr, "invalid data or size");
+            reject(layer, "tags", fields[7].type, nullptr,
+                   "invalid data or size");
+            OIIO_CHECK_EQUAL(renderer.allocations,
+                             variant.failure == 1 ? 2 : 1);
+            OIIO_CHECK_EQUAL(renderer.copies.size(),
+                             variant.failure == 2 ? 17 : 16);
+            for (const std::string& text :
+                 { std::string(128, 'x'), std::string() }) {
+                const size_t copies = renderer.copies.size();
+                const int before    = errors.errors;
+                OIIO_CHECK_ASSERT(ss.ReParameter(*group, layer, "label", text));
+                OIIO_CHECK_EQUAL(errors.errors, before);
+                OIIO_CHECK_EQUAL(renderer.copies.size(), copies + 1);
+                const ustring value(text);
+                const auto payload = interactive_payload(TypeString, &value);
+                std::memcpy(expected.data() + fields[6].offset, payload.data(),
+                            payload.size());
+                device_matches();
+                unchanged();
+            }
+            return true;
+        };
+        const int before = unit_test_failures;
+        OIIO_CHECK_ASSERT(run());
+        OIIO_CHECK_EQUAL(renderer.frees, renderer.successful_allocations);
+        OIIO_CHECK_ASSERT(!renderer.storage);
+        if (unit_test_failures != before)
+            print(stderr,
+                  "Interactive checks failed (OSL {}, LLVM {}, length {}, "
+                  "local {}, connected {}, failure {})\n",
+                  variant.osl, variant.llvm, variant.length, variant.local,
+                  variant.connected, variant.failure);
+    }
+    for (bool interpolated : { false, true }) {
+        HartInteractiveServices renderer;
+        renderer.interactive = interpolated;
+        {
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", 2);
+            auto group = make_group(ss, oso[interpolated ? 2 : 0]);
+            check_rejected_group(ss, *group, errors,
+                                 interpolated ? "interpolated parameter"
+                                              : "interactive parameter");
+        }
+        OIIO_CHECK_EQUAL(renderer.allocations, 0);
+        OIIO_CHECK_EQUAL(renderer.copies.size(), 0);
+        OIIO_CHECK_EQUAL(renderer.frees, 0);
+        OIIO_CHECK_ASSERT(!renderer.storage);
+    }
+    return true;
+}
+
+
+
+bool
 check_diagnostic_modules(string_view arch, string_view stdosl)
 {
     const string_view filename = "hart_diagnostic_fixture.osl";
@@ -6762,16 +7421,16 @@ check_string_modules(string_view arch, string_view stdosl)
     } rejected[] = {
         { "shader bad(string s=\"alpha\" [[int interpolated=1]], "
           "output color Cout=0) { Cout=color(s==\"alpha\"); }",
-          "interpolated or interactive" },
+          "interpolated parameter" },
         { "shader bad(string s=\"alpha\" [[int interactive=1]], "
           "output color Cout=0) { Cout=color(s==\"alpha\"); }",
-          "interpolated or interactive" },
+          "interactive parameter" },
         { "shader bad(string s[2]={\"alpha\",\"beta\"} [[int interpolated=1]], "
           "output color Cout=0) { Cout=color(s[int(u)]==\"alpha\"); }",
-          "interpolated or interactive" },
+          "interpolated parameter" },
         { "shader bad(string s[2]={\"alpha\",\"beta\"} [[int interactive=1]], "
           "output color Cout=0) { Cout=color(s[int(u)]==\"alpha\"); }",
-          "interpolated or interactive" },
+          "interactive parameter" },
         { "shader bad [[int range_checking=0]] (output color Cout=0) { "
           "string s[2]={\"alpha\",\"beta\"}; Cout=color(s[int(u)]==\"alpha\"); }",
           "range_checking" },
@@ -7769,7 +8428,7 @@ main(int argc, char* argv[])
                 ss, oso[unsupported_layer == 0 ? (userdata ? 9 : 7) : 5],
                 oso[unsupported_layer == 1 ? (userdata ? 10 : 8) : 6]);
             check_rejected_group(ss, *group, errors,
-                                 userdata ? "interpolated or interactive"
+                                 userdata ? "interpolated parameter"
                                           : "renderer lacks HARTDiagnostics");
         }
     }
@@ -7777,6 +8436,7 @@ main(int argc, char* argv[])
         || !check_string_modules(arch, argv[2])
         || !check_output_placement_modules(arch, argv[2], oso[0], oso[5], oso[6])
         || !check_explicit_entry_modules(arch, argv[2], oso[0], oso[5])
+        || !check_interactive_modules(arch, argv[2])
         || !check_diagnostic_modules(arch, argv[2])
         || !check_control_flow_modules(arch, argv[2], { oso.data() + 18, 3 })
         || !check_chain_modules(arch, argv[2])

@@ -2390,6 +2390,11 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         return true;
     }
     if (name == "device_interactive_params" && type.basetype == TypeDesc::PTR) {
+        if (use_hart() && !group->m_device_interactive_arena_valid) {
+            *(void**)val = nullptr;
+            errorfmt("HART: interactive parameter device storage is invalid");
+            return false;
+        }
         *(void**)val = group->m_device_interactive_arena.d_get();
         return true;
     }
@@ -3669,20 +3674,32 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
             break;
         }
     }
-    if (!layer)
+    if (!layer) {
+        if (use_hart())
+            errorfmt("HART ReParameter: unknown layer '{}'", layername);
         return false;  // could not find the named layer
+    }
 
     // Find the named parameter within the layer
     int paramindex = layer->findparam(ustring(paramname),
                                       false /* don't go to master */);
     if (paramindex < 0) {
         paramindex = layer->findparam(ustring(paramname), true);
-        if (paramindex >= 0)
+        if (paramindex >= 0) {
             // This param exists, but it got optimized away, no failure
+            if (use_hart() && !group.m_device_interactive_arena_valid)
+                return group.upload_hart_interactive(
+                    0, { group.interactive_arena_ptr(),
+                         group.m_interactive_arena_size });
             return true;
+        }
     }
-    if (paramindex < 0)
+    if (paramindex < 0) {
+        if (use_hart())
+            errorfmt("HART ReParameter: unknown parameter '{}.{}'", layername,
+                     paramname);
         return false;  // could not find the named parameter
+    }
 
     Symbol* sym = layer->symbol(paramindex);
     if (!sym) {
@@ -3703,8 +3720,19 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
     // Check for mismatch versus previously-declared type
     if ((relaxed_param_typecheck() && !relaxed_equivalent(sym->typespec(), type))
         || (!relaxed_param_typecheck()
-            && !relaxed_equivalent(sym->typespec(), type)))
+            && !relaxed_equivalent(sym->typespec(), type))) {
+        if (use_hart())
+            errorfmt("HART ReParameter: type mismatch for '{}.{}'", layername,
+                     paramname);
         return false;
+    }
+    if (use_hart()
+        && (!val || type.arraylen < 0
+            || type.size() != sym->typespec().simpletype().size())) {
+        errorfmt("HART ReParameter: invalid data or size for '{}.{}'",
+                 layername, paramname);
+        return false;
+    }
 
     // Can't change param value if the group has already been optimized,
     // unless that parameter is marked lockgeom=0.
@@ -3716,20 +3744,39 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
 
     if (offset >= 0) {
         size_t size = type.size();
+        if (use_hart()
+            && (size_t(offset) > group.m_interactive_arena_size
+                || size > group.m_interactive_arena_size - size_t(offset))) {
+            errorfmt("HART ReParameter: invalid arena range for '{}.{}'",
+                     layername, paramname);
+            return false;
+        }
         m_stat_reparam_calls_total += 1;
         m_stat_reparam_bytes_total += size;
 
         // Copy ustringhashes instead of ustrings
         const void* payload;
-        ustringhash string_hash;
+        ustringhash scalar_hash;
+        std::vector<ustringhash> string_hashes;
         if (type == TypeDesc::STRING) {
-            string_hash = ustringhash_from(
-                *reinterpret_cast<const ustring*>(val));
-            payload = &string_hash;
+            scalar_hash = ustringhash_from(*static_cast<const ustring*>(val));
+            payload     = &scalar_hash;
+        } else if (type.basetype == TypeDesc::STRING) {
+            const auto* strings = static_cast<const ustring*>(val);
+            string_hashes.reserve(size / sizeof(ustring));
+            for (size_t i = 0; i < size / sizeof(ustring); ++i)
+                string_hashes.push_back(ustringhash_from(strings[i]));
+            payload = string_hashes.data();
         } else
             payload = val;
 
-        if (memcmp(group.interactive_arena_ptr() + offset, payload, size)) {
+        if ((use_hart() && !group.m_device_interactive_arena_valid)
+            || memcmp(group.interactive_arena_ptr() + offset, payload, size)) {
+            if (use_hart()
+                && !group.upload_hart_interactive(
+                    size_t(offset),
+                    { static_cast<const uint8_t*>(payload), size }))
+                return false;
             memcpy(group.interactive_arena_ptr() + offset, payload,
                    type.size());
             if (use_optix())
@@ -3748,9 +3795,7 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
 
 PerThreadInfo*
 ShadingSystemImpl::create_thread_info()
-{
-    return new PerThreadInfo;
-}
+{ return new PerThreadInfo; }
 
 
 
@@ -4052,8 +4097,8 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
                  "renderer bitcode, or selective group compilation");
         return false;
     }
-    if (group.m_interactive_arena_size) {
-        errorfmt("HART does not yet support interactive shader parameters");
+    if (!group.m_device_interactive_arena_valid) {
+        errorfmt("HART: interactive parameter device storage is invalid");
         return false;
     }
     if (!group.optimized()) {
@@ -4213,6 +4258,14 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                 cpper.load_dso(dso_path);
             }
         }
+    }
+
+    if (use_hart() && !group.m_device_interactive_arena_valid) {
+        if (ctx_allocated) {
+            release_context(ctx);
+            destroy_thread_info(thread_info);
+        }
+        return;
     }
 
     if (need_jit) {

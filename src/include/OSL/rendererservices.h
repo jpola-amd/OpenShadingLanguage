@@ -551,6 +551,9 @@ public:
     /// machine making this call) into location `dst_device` on the device
     /// executing shaders. (Equivalent to `memcpy(dst, src, size)` on the
     /// CPU.)
+    /// Return dst_device on success, nullptr on failure. HART checks this
+    /// result before publishing an interactive parameter update. Complete the
+    /// upload before returning; src_host is only valid during this call.
     virtual void* copy_to_device(void* dst_device, const void* src_host,
                                  size_t size)
     {
@@ -560,7 +563,7 @@ public:
         //
         //     auto r = cudaMemcpy(dst_device, src_host, size,
         //                         cudaMemcpyHostToDevice);
-        //     return dst_device;
+        //     return r == cudaSuccess ? dst_device : nullptr;
     }
 
     /// Options we use for noise calls.

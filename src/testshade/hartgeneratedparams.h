@@ -23,9 +23,10 @@ struct HartGeneratedParams {
     const HartTextureState* textures;
     const OSL::Matrix44* transforms;
     uint64_t closure_capacity;
+    void* interactive;
 };
 
-static_assert(sizeof(void*) == 8 && sizeof(HartGeneratedParams) == 72,
+static_assert(sizeof(void*) == 8 && sizeof(HartGeneratedParams) == 80,
               "The generated HART grid ABI requires 64-bit pointers");
 static_assert(sizeof(OSL::Matrix44) == 16 * sizeof(float),
               "The HART transform ABI requires packed 4x4 float matrices");

@@ -594,6 +594,9 @@ public:
     ///                              Pointer to the memory block containing
     ///                                 device-side interactive parameter values
     ///                                 for this shader group.
+    ///                              HART returns false and null after an
+    ///                              allocation/upload failure. A successful
+    ///                              ReParameter repairs the binding.
     ///
     /// Note: the attributes referred to as "string" are actually on the app
     /// side as ustring or const char* (they have the same data layout), NOT
@@ -778,6 +781,14 @@ public:
     /// fail if the shader has already been irrevocably optimized/compiled,
     /// unless the particular parameter is marked as either interpolated=1
     /// or interactive=1.
+    /// HART requires HARTInteractive renderer support and device_alloc,
+    /// device_free, and copy_to_device hooks. Numeric and string parameters
+    /// retain their compiled type and array length. The group owns device
+    /// storage; bind device_interactive_params as the sixth callable argument.
+    /// Finish all launches before updating parameters or destroying the group,
+    /// and destroy groups before their renderer. Updates do not recompile the
+    /// artifact. A failed upload leaves the host mirror unchanged and invalidates
+    /// the device binding until a successful update restores it.
     bool ReParameter(ShaderGroup& group, string_view layername,
                      string_view paramname, TypeDesc type, const void* val);
     // Shortcuts for param passing a single int, float, or string.
@@ -793,10 +804,7 @@ public:
     }
     bool ReParameter(ShaderGroup& group, string_view layername,
                      string_view paramname, const std::string& val)
-    {
-        const char* s = val.c_str();
-        return ReParameter(group, layername, paramname, TypeDesc::STRING, &s);
-    }
+    { return ReParameter(group, layername, paramname, ustring(val)); }
     bool ReParameter(ShaderGroup& group, string_view layername,
                      string_view paramname, ustring val)
     {

@@ -330,6 +330,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --noise-families)
             set_tests_properties (hart-noise-families-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-interactive-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-interactive.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-interactive-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-gabor-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
@@ -473,6 +479,15 @@ if (BUILD_TESTING AND OSL_USE_HART)
                             "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
                             --mode ${mode} --kind outputs)
                     set_tests_properties (hart-output-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-interactive-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind interactive)
+                    set_tests_properties (hart-interactive-rebind-${mode} PROPERTIES
                         LABELS "hart;gpu" RUN_SERIAL TRUE
                         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
                     add_test (NAME hart-color-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"

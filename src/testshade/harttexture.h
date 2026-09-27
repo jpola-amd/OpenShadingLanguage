@@ -34,6 +34,11 @@ public:
     bool check_errors();
     bool clear();
 
+    // RendererServices hooks; allocations belong to ShaderGroup, not this store.
+    void* device_alloc(int device, size_t size);
+    void device_free(int device, void* ptr);
+    void* copy_to_device(int device, void* dst, const void* src, size_t size);
+
     // Reacquire after prepare(): adding files may replace the device table.
     const testshade::HartTextureState* device_state() const;
 

@@ -2049,6 +2049,11 @@ public:
     // live with the group and copy the initial data.
     void setup_interactive_arena(cspan<uint8_t> paramblock);
 
+    bool upload_hart_interactive(size_t offset, cspan<uint8_t> data);
+
+    void invalidate_device_interactive_arena()
+    { m_device_interactive_arena_valid = false; }
+
     uint8_t* interactive_arena_ptr() { return m_interactive_arena.get(); }
 
     device_ptr<uint8_t>& device_interactive_arena()
@@ -2171,6 +2176,7 @@ private:
     std::unique_ptr<uint8_t[]> m_interactive_arena;
     size_t m_interactive_arena_size = 0;
     device_ptr<uint8_t> m_device_interactive_arena;
+    bool m_device_interactive_arena_valid = true;
 
     friend class OSL::pvt::ShadingSystemImpl;
     friend class OSL::pvt::BackendLLVM;

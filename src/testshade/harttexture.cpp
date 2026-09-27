@@ -421,6 +421,43 @@ HartTextureStore::load(OIIO::ustring filename)
 
 
 
+void*
+HartTextureStore::device_alloc(int device, size_t size)
+{
+    auto& err = m_impl->err;
+    void* ptr = nullptr;
+    if (!hip_check(err, hipSetDevice(device), "hipSetDevice interactive")
+        || !hip_check(err, hipMalloc(&ptr, size), "hipMalloc interactive"))
+        return nullptr;
+    return ptr;
+}
+
+
+
+void
+HartTextureStore::device_free(int device, void* ptr)
+{
+    auto& err = m_impl->err;
+    if (hip_check(err, hipSetDevice(device), "hipSetDevice interactive"))
+        hip_check(err, hipFree(ptr), "hipFree interactive");
+}
+
+
+
+void*
+HartTextureStore::copy_to_device(int device, void* dst, const void* src,
+                                 size_t size)
+{
+    auto& err = m_impl->err;
+    if (!hip_check(err, hipSetDevice(device), "hipSetDevice interactive")
+        || !hip_check(err, hipMemcpy(dst, src, size, hipMemcpyHostToDevice),
+                      "hipMemcpy interactive"))
+        return nullptr;
+    return dst;
+}
+
+
+
 bool
 HartTextureStore::prepare()
 {

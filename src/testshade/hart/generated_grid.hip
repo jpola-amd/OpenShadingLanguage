@@ -59,11 +59,12 @@ testshade_generated(testshade::HartClosurePool* closure_pool = nullptr)
                            ? params.scratch + shadeindex * params.group_stride
                            : nullptr;
     optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int, void*>(
-        0u, &sg, group, nullptr, params.output, int(shadeindex), nullptr);
+        0u, &sg, group, nullptr, params.output, int(shadeindex),
+        params.interactive);
     if (!Fused)
         optixDirectCall<void, OSL::ShaderGlobals*, void*, void*, void*, int,
                         void*>(1u, &sg, group, nullptr, params.output,
-                               int(shadeindex), nullptr);
+                               int(shadeindex), params.interactive);
     return sg.Ci;
 }
 

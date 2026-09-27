@@ -226,6 +226,7 @@ struct HartRaytracer::Impl {
                 return false;
             const void* data = nullptr;
             uint64_t bytes   = 0;
+            void* interactive = nullptr;
             int size = 0, alignment = 0, local = 0;
             HartCallable callable;
             callable.entries.resize(m_fused ? 1 : 2);
@@ -236,6 +237,8 @@ struct HartRaytracer::Impl {
                 || !ss.getattribute(group, "llvm_groupdata_size", size)
                 || !ss.getattribute(group, "llvm_groupdata_alignment", alignment)
                 || !ss.getattribute(group, "hart_groupdata_alloc", local)
+                || !ss.getattribute(group, "device_interactive_params",
+                                    TypeDesc::PTR, &interactive)
                 || size < 0 || alignment <= 0 || (alignment & (alignment - 1))
                 || local < 0 || (local && local != size)
                 || !ss.getattribute(group,
@@ -250,7 +253,8 @@ struct HartRaytracer::Impl {
             callable.bitcode = { static_cast<const unsigned char*>(data),
                                  size_t(bytes) };
             const HartMaterialBinding binding { next_callable,
-                                                unsigned(m_fused && local) };
+                                                unsigned(m_fused && local),
+                                                interactive };
             next_callable += unsigned(callable.entries.size());
             max_size      = std::max(max_size, size_t(size));
             max_alignment = std::max(max_alignment, size_t(alignment));
@@ -346,6 +350,7 @@ struct HartRaytracer::Impl {
     HartTextureStore m_textures;
     HartContext m_context;
     std::string m_arch;
+    int m_device               = 0;
     bool m_initialized         = false;
     bool m_prepared            = false;
     bool m_published           = false;
@@ -389,6 +394,7 @@ HartRaytracer::initialize(int device, bool fused, size_t local_budget)
         return false;
     }
     impl.m_fused        = fused;
+    impl.m_device       = device;
     impl.m_local_budget = local_budget;
     impl.m_initialized  = true;
     return true;
@@ -408,8 +414,27 @@ HartRaytracer::supports(string_view feature) const
     return feature == "HART" || feature == "HARTClosures"
            || feature == "HARTTextures" || feature == "HARTArrayBounds"
            || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
-           || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics";
+           || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
+           || feature == "HARTInteractive";
 }
+
+
+
+void*
+HartRaytracer::device_alloc(size_t size)
+{ return m_impl->m_textures.device_alloc(m_impl->m_device, size); }
+
+
+
+void
+HartRaytracer::device_free(void* ptr)
+{ m_impl->m_textures.device_free(m_impl->m_device, ptr); }
+
+
+
+void*
+HartRaytracer::copy_to_device(void* dst, const void* src, size_t size)
+{ return m_impl->m_textures.copy_to_device(m_impl->m_device, dst, src, size); }
 
 
 
@@ -523,6 +548,16 @@ HartRaytracer::render(int xres, int yres)
         impl.fail("Prepare the HART renderer before rendering");
         pixelbuf.clear();
         return;
+    }
+    for (const auto& material : shaders()) {
+        void* interactive = nullptr;
+        if (!shadingsys->getattribute(material.surf.get(),
+                                      "device_interactive_params",
+                                      TypeDesc::PTR, &interactive)) {
+            impl.fail("Cannot retrieve HART material interactive bindings");
+            pixelbuf.clear();
+            return;
+        }
     }
     if (!impl.render_options(*this)
         || !impl.configure_camera(camera, xres, yres)

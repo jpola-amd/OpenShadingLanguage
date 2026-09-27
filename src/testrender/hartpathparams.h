@@ -12,6 +12,7 @@ OSL_NAMESPACE_BEGIN
 struct HartMaterialBinding {
     unsigned callable;
     unsigned local;
+    void* interactive;
 };
 
 struct HartPathParams {

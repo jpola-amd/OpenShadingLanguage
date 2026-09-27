@@ -3316,13 +3316,26 @@ RuntimeOptimizer::run()
                 size_t totalsize = typesize * (s.has_derivs() ? 3 : 1);
                 size_t alignment = typesize > 4 ? 8 : 4;
                 offset = OIIO::round_to_multiple_of_pow2(offset, alignment);
+                if (shadingsys().use_hart()
+                    && (offset > size_t(std::numeric_limits<int>::max())
+                        || typesize > (size_t(std::numeric_limits<int>::max())
+                                       - offset)
+                                          / (s.has_derivs() ? 3 : 1))) {
+                    shadingsys().errorfmt(
+                        "HART: interactive parameter arena exceeds INT_MAX");
+                    group().invalidate_device_interactive_arena();
+                    return;
+                }
                 interactive_data.resize(offset + totalsize);
                 // Copy from the instance value to the interactive block
                 // If the value is a string, copy its hash.
-                if (s.typespec().is_string()) {
-                    ustring string_data = *reinterpret_cast<ustring*>(s.data());
-                    ustringhash string_hash(string_data);
-                    memcpy(&interactive_data[offset], &string_hash, typesize);
+                if (s.typespec().is_string_based()) {
+                    const auto* strings = static_cast<const ustring*>(s.data());
+                    for (size_t i = 0; i < typesize / sizeof(ustring); ++i) {
+                        const auto hash = ustringhash_from(strings[i]);
+                        memcpy(&interactive_data[offset] + i * sizeof(hash),
+                               &hash, sizeof(hash));
+                    }
                 } else
                     memcpy(&interactive_data[offset], s.data(), typesize);
                 if (totalsize > typesize)

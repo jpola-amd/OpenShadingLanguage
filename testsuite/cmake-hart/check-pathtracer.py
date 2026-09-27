@@ -56,7 +56,8 @@ def compare(actual, expected, tolerance=3e-5):
 with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     root = Path(temporary)
     shaders = {
-        "path_emit": """shader path_emit(color tint = 1, int globals = 0) {
+        "path_emit": """shader path_emit(
+            color tint = 1 [[int interactive=1]], int globals = 0) {
             color w = tint;
             if (globals)
                 w += color(0.1*u, 0.1*v,
@@ -125,7 +126,8 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
 
     camera = '<Camera eye="0,0,4" dir="0,0,-1" fov="90"/>'
     emission = f"""<World>{camera}
-      <ShaderGroup>color tint 0.6 0.1 0.2; int globals 1; shader path_emit m;</ShaderGroup>
+      <ShaderGroup>color tint 0.6 0.1 0.2 [[int interactive=1]];
+        int globals 1; shader path_emit m;</ShaderGroup>
       <Quad corner="-2,-1.4,0" edge_x="1.8,0,0" edge_y="0,2.8,0"/>
       <ShaderGroup>shader path_producer p; shader path_connected c;
         connect p.weight c.weight; connect p.label c.label;</ShaderGroup>
@@ -133,9 +135,10 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
       </World>"""
     offset_camera = camera.replace('eye="0,0,4"', 'eye="0.13,0.07,4"')
     furnace = f"""<World>{offset_camera}
-      <ShaderGroup>color tint 0.2 0.4 0.6; shader path_diffuse d;</ShaderGroup>
+      <ShaderGroup>color tint 0.2 0.4 0.6 [[int interactive=1]];
+        shader path_diffuse d;</ShaderGroup>
       <Quad corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"/>
-      <ShaderGroup>color tint 2 1 0.5; shader path_emit e;</ShaderGroup>
+      <ShaderGroup>color tint 2 1 0.5 [[int interactive=1]]; shader path_emit e;</ShaderGroup>
       <Quad corner="-10,-10,6" edge_x="20,0,0" edge_y="0,20,0"/>
       <Quad corner="-10,-10,0" edge_x="20,0,0" edge_y="0,0,6"/>
       <Quad corner="-10,10,0" edge_x="20,0,0" edge_y="0,0,6"/>
@@ -143,9 +146,9 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
       <Quad corner="10,-10,0" edge_x="0,20,0" edge_y="0,0,6"/>
       </World>"""
     multiple = furnace.replace(
-        '<ShaderGroup>color tint 2 1 0.5;',
+        '<ShaderGroup>color tint 2 1 0.5 [[int interactive=1]];',
         '<Quad corner="0.7,-1,2" edge_x="1.5,0,0" edge_y="0,2,0"/>'
-        '<ShaderGroup>color tint 2 1 0.5;')
+        '<ShaderGroup>color tint 2 1 0.5 [[int interactive=1]];')
     scenes = {"emission": emission, "furnace": furnace, "multiple": multiple,
               "seams": furnace.replace(offset_camera, camera),
               "empty": f"""<World>{camera}

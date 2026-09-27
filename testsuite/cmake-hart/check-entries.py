@@ -120,13 +120,15 @@ try:
         (["a", "b", "unused"], ["b", "b"], {"b"}),
         (["a", "b", "unused"], ["a"], {"a"}),
     ]
+    # CPU --print reads Groupdata even for unexecuted layers. Explicitly clear
+    # it so those values can be compared with HART's zeroed output arena.
+    cpu = ["-t", "1", "--options", "clearmemory=1", "-g", "3", "2", "--print"]
     for declared, chosen, selected in cases:
         options = declarations(declared) + entry_outputs(chosen)
-        check(command(testshade, ["-t", "1", "-g", "3", "2", "--print"]
-                      + options + outputs + graph), selected, chosen or declared)
+        check(command(testshade, cpu + options + outputs + graph),
+              selected, chosen or declared)
     repeated_last = declarations(["b", "b", "a"])
-    check(command(testshade, ["-t", "1", "-g", "3", "2", "--print"]
-                  + repeated_last + outputs + short_graph),
+    check(command(testshade, cpu + repeated_last + outputs + short_graph),
           {"a", "b"}, ["b", "b", "a"], last="b")
     for mode, flags in (
         ("split", []),

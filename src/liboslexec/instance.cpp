@@ -865,10 +865,20 @@ ShaderInstance::validate_hart() const
         if (!validate_type(sym))
             return false;
         const auto& hints = m_instoverrides[i];
-        if (hints.interpolated() || hints.interactive()) {
-            shadingsys().errorfmt("HART: interpolated or interactive parameter "
-                                  "'{}' is unsupported in shader '{}'",
-                                  sym.name(), shadername());
+        if (hints.interactive() && sym.typespec().is_closure_based()) {
+            shadingsys().errorfmt("HART: interactive closure parameter '{}' "
+                                  "is unsupported",
+                                  sym.name());
+            return false;
+        }
+        if (hints.interpolated()
+            || (hints.interactive()
+                && !shadingsys().renderer()->supports("HARTInteractive"))) {
+            shadingsys().errorfmt(
+                "HART: {} parameter '{}' is unsupported by the renderer in "
+                "shader '{}'",
+                hints.interpolated() ? "interpolated" : "interactive",
+                sym.name(), shadername());
             return false;
         }
     }
@@ -1649,11 +1659,54 @@ ShaderGroup::setup_interactive_arena(cspan<uint8_t> paramblock)
             // print("group {} has device interactive_params set to {:p}\n",
             //       name(), m_device_interactive_arena.d_get());
         }
+        if (shadingsys().use_hart())
+            upload_hart_interactive(0, paramblock);
     } else {
         m_interactive_arena_size = 0;
         m_interactive_arena.reset();
         m_device_interactive_arena.reset();
     }
+}
+
+
+
+bool
+ShaderGroup::upload_hart_interactive(size_t offset, cspan<uint8_t> data)
+{
+    auto& ss = shadingsys();
+    if (offset > m_interactive_arena_size
+        || data.size() > m_interactive_arena_size - offset || !data.data()) {
+        ss.errorfmt("HART: invalid interactive parameter arena range");
+        return false;
+    }
+    auto* rs = ss.renderer();
+    if (!m_device_interactive_arena) {
+        m_device_interactive_arena_valid = false;
+        m_device_interactive_arena.reset(
+            static_cast<uint8_t*>(rs->device_alloc(m_interactive_arena_size)));
+        if (!m_device_interactive_arena) {
+            ss.errorfmt("HART: failed to allocate interactive parameters");
+            return false;
+        }
+    }
+    // A failed copy may have modified part of the device arena. Recover from
+    // the last committed host mirror, not just the next parameter's bytes.
+    std::vector<uint8_t> recovery;
+    if (!m_device_interactive_arena_valid
+        && (offset || data.size() != m_interactive_arena_size)) {
+        recovery.assign(m_interactive_arena.get(),
+                        m_interactive_arena.get() + m_interactive_arena_size);
+        memcpy(recovery.data() + offset, data.data(), data.size());
+        offset = 0;
+        data   = recovery;
+    }
+    auto* destination = m_device_interactive_arena.d_get() + offset;
+    m_device_interactive_arena_valid
+        = rs->copy_to_device(destination, data.data(), data.size())
+          == destination;
+    if (!m_device_interactive_arena_valid)
+        ss.errorfmt("HART: failed to upload interactive parameters");
+    return m_device_interactive_arena_valid;
 }
 
 

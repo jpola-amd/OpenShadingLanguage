@@ -11,7 +11,8 @@ parser.add_argument("unit")
 parser.add_argument("stdosl")
 parser.add_argument("--mode", choices=("split", "fused", "fused-local", "unoptimized"),
                     default="split")
-parser.add_argument("--kind", choices=("transform", "color", "outputs"), default="transform")
+parser.add_argument("--kind", choices=("transform", "color", "outputs", "interactive"),
+                    default="transform")
 args = parser.parse_args()
 if args.kind == "transform" and args.mode == "unoptimized":
     parser.error("Unoptimized mode is only available for color or outputs")
@@ -46,5 +47,8 @@ if args.kind == "outputs":
     assert all("does not match the existing output layout" in e for e in errors[:2]), output
     assert ("does not match the existing output layout" in errors[2]
             or errors[2] == "HART output 'out.Cout' has no resolved numeric storage"), output
+if args.kind == "interactive":
+    assert output.count("Launching HART grid") == 3, output
+    assert "ERROR:" not in output, output
 checks = "typed values and layout rejection" if args.kind == "outputs" else "values and derivatives"
 print(f"HART {args.kind} {args.mode} A/B/A {checks}, artifact and cache reuse passed")

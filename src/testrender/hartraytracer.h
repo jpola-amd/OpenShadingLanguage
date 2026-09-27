@@ -25,6 +25,9 @@ public:
     TextureHandle* get_texture_handle(ustring filename, ShadingContext* context,
                                       const TextureOpt* options) override;
     bool good(TextureHandle* handle) override;
+    void* device_alloc(size_t size) override;
+    void device_free(void* ptr) override;
+    void* copy_to_device(void* dst, const void* src, size_t size) override;
 
     void prepare_render() override;
     void render(int xres, int yres) override;
