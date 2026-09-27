@@ -3894,7 +3894,7 @@ LLVMGEN(llvm_gen_spline)
 
 
 
-static void
+static bool
 llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
                       const ClosureRegistry::ClosureEntry* clentry,
                       ustring clname, llvm::Value* mem_void_ptr, int argsoffset)
@@ -3907,6 +3907,13 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
         int argno     = attr_i * 2 + argsoffset;
         Symbol& Key   = *rop.opargsym(op, argno);
         Symbol& Value = *rop.opargsym(op, argno + 1);
+        if (rop.use_hart()
+            && (!Key.typespec().is_string() || !Key.is_constant())) {
+            rop.shadingcontext()->errorfmt(
+                "HART: closure keyword names must be literal strings ({}:{})",
+                op.sourcefile(), op.sourceline());
+            return false;
+        }
         OSL_DASSERT(Key.typespec().is_string());
         OSL_ASSERT(Key.is_constant());
         ustring key        = Key.get_string();
@@ -3918,7 +3925,12 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
             const ClosureParam& p = clentry->params[clentry->nformal + t];
             // strcmp might be too much, we could precompute the ustring for the param,
             // but in this part of the code is not a big deal
-            if (equivalent(p.type, ValueType) && !strcmp(key.c_str(), p.key)) {
+            if (equivalent(p.type, ValueType) && !strcmp(key.c_str(), p.key)
+                && (!rop.use_hart()
+                    || (p.type == TypeDesc::PTR
+                            ? Value.typespec().is_closure()
+                                  && !Value.typespec().is_array()
+                            : !Value.typespec().is_closure_based()))) {
                 // store data
                 OSL_DASSERT(p.offset + p.field_size <= clentry->struct_size);
                 llvm::Value* dst = rop.ll.offset_ptr(mem_void_ptr, p.offset);
@@ -3930,11 +3942,18 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
             }
         }
         if (!legal) {
+            if (rop.use_hart()) {
+                rop.shadingcontext()->errorfmt(
+                    "HART: unsupported closure keyword '{}' for '{}' ({}:{})",
+                    key, clname, op.sourcefile(), op.sourceline());
+                return false;
+            }
             rop.shadingcontext()->warningfmt(
                 "Unsupported closure keyword arg \"{}\" for {} ({}:{})", key,
                 clname, op.sourcefile(), op.sourceline());
         }
     }
+    return true;
 }
 
 
@@ -3974,10 +3993,13 @@ LLVMGEN(llvm_gen_closure)
     // Do not let an already optimized group bypass the host-callback guard.
     // Neither callbacks nor the host renderer may enter the device module.
     if (rop.use_hart()
-        && (clentry->prepare || clentry->setup
-            || (closure_name != ustring("diffuse")
-                && closure_name != ustring("emission"))
-            || op.nargs() != 2 + weighted + clentry->nformal)) {
+        && (clentry->prepare || clentry->setup || clentry->nformal < 0
+            || clentry->nformal > op.nargs() - 2 - weighted
+            || (op.nargs() - 2 - weighted - clentry->nformal) % 2
+            || (!rop.shadingsys().renderer()->supports("HARTClosureParameters")
+                && ((closure_name != ustring("diffuse")
+                     && closure_name != ustring("emission"))
+                    || op.nargs() != 2 + weighted + clentry->nformal)))) {
         rop.shadingcontext()->errorfmt(
             "HART: unsupported closure '{}', keyword arguments, or "
             "prepare/setup callbacks ({}:{})",
@@ -3989,9 +4011,9 @@ LLVMGEN(llvm_gen_closure)
 
     // Call osl_allocate_closure_component(closure, id, size).  It returns
     // the memory for the closure parameter data.
-    llvm::Value* sg_ptr     = rop.sg_void_ptr();
-    llvm::Value* id_int     = rop.ll.constant(clentry->id);
-    llvm::Value* size_int   = rop.ll.constant(clentry->struct_size);
+    llvm::Value* sg_ptr   = rop.sg_void_ptr();
+    llvm::Value* id_int   = rop.ll.constant(clentry->id);
+    llvm::Value* size_int = rop.ll.constant(clentry->struct_size);
     llvm::Value* return_ptr
         = weighted
               ? rop.ll.call_function("osl_allocate_weighted_closure_component",
@@ -4045,7 +4067,11 @@ LLVMGEN(llvm_gen_closure)
         TypeDesc t  = sym.typespec().simpletype();
 
         if (!sym.typespec().is_closure_array() && !sym.typespec().is_structure()
-            && equivalent(t, p.type)) {
+            && equivalent(t, p.type)
+            && (!rop.use_hart()
+                || (p.type == TypeDesc::PTR
+                        ? sym.typespec().is_closure()
+                        : !sym.typespec().is_closure_based()))) {
             llvm::Value* dst = rop.ll.offset_ptr(mem_void_ptr, p.offset);
             llvm::Value* src = rop.llvm_void_ptr(sym);
             rop.ll.op_memcpy(dst, src, (int)p.type.size(),
@@ -4055,6 +4081,8 @@ LLVMGEN(llvm_gen_closure)
                 "Incompatible formal argument {} to '{}' closure ({} {}, expected {}). Prototypes don't match renderer registry ({}:{}).",
                 carg + 1, closure_name, sym.typespec(), sym.unmangled(), p.type,
                 op.sourcefile(), op.sourceline());
+            if (rop.use_hart())
+                return false;
         }
     }
 
@@ -4072,8 +4100,9 @@ LLVMGEN(llvm_gen_closure)
         rop.ll.call_function(funct_ptr, args);
     }
 
-    llvm_gen_keyword_fill(rop, op, clentry, closure_name, mem_void_ptr,
-                          2 + weighted + clentry->nformal);
+    if (!llvm_gen_keyword_fill(rop, op, clentry, closure_name, mem_void_ptr,
+                               2 + weighted + clentry->nformal))
+        return false;
 
     if (next_block)
         rop.ll.op_branch(next_block);

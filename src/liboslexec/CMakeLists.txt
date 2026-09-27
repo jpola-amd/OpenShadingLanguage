@@ -718,7 +718,7 @@ if (OSL_BUILD_TESTS AND BUILD_TESTING)
 
     if (OSL_USE_HART AND USE_LLVM_BITCODE)
         add_executable (hart_codegen_test hart_codegen_test.cpp)
-        target_link_libraries (hart_codegen_test PRIVATE oslexec oslcomp
+        target_link_libraries (hart_codegen_test PRIVATE oslexec oslcomp BSDL
             ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
         target_include_directories (hart_codegen_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
         set_target_properties (hart_codegen_test PROPERTIES FOLDER "Unit Tests")

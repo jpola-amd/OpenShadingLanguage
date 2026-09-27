@@ -13,7 +13,13 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 
-renderer, compiler, stdosl, mode = sys.argv[1:]
+if len(sys.argv) not in (5, 6) or (len(sys.argv) == 6
+                                 and sys.argv[5] != "--materials"):
+    raise SystemExit("Usage: check-pathtracer.py renderer compiler stdosl "
+                     "{split|fused|fused-local|unoptimized} [--materials]")
+renderer, compiler, stdosl, mode = sys.argv[1:5]
+# Select the material suite instead of the ordinary path/diagnostic regressions.
+materials = len(sys.argv) == 6
 env = os.environ.copy()
 for key in ("TESTSHADE_OPTIX", "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
     env.pop(key, None)
@@ -47,14 +53,196 @@ def pixels(path):
     return list(data)
 
 
-def compare(actual, expected, tolerance=3e-5):
+def compare(actual, expected, tolerance=3e-5, half_output=False):
     assert len(actual) == len(expected)
     for i, (a, b) in enumerate(zip(actual, expected)):
+        if half_output and abs(a - b) > tolerance:
+            # testrender quantizes to HALF even when writing float PFM.
+            # Permit only adjacent representable values, not a blanket
+            # relative tolerance; component probes compare unquantized floats.
+            packed = struct.pack("<ee", a, b)
+            bits = struct.unpack("<HH", packed)
+            if (struct.unpack("<ee", packed) == (a, b)
+                    and abs(bits[0] - bits[1]) == 1):
+                continue
         assert abs(a - b) <= tolerance, (i, a, b, tolerance)
+
+
+common = ["--res", str(width), str(height), "--no-jitter", "-t", "1"]
+
+
+def render(name, gpu, bounces=1, aa=1, repeat=False, material_count=None,
+           cpu_unoptimized=False):
+    image = root / (name + ("-gpu.pfm" if gpu else "-cpu.pfm"))
+    args = [renderer] + common + ["-aa", str(aa)]
+    if gpu:
+        args += ["--hart", "-v", "--hart-bounces", str(bounces)] + flags
+        if repeat:
+            args += ["--warmup", "--iters", "3"]
+    else:
+        args += ["--max-bounces", str(bounces), "--llvm_opt", "3"]
+        if cpu_unoptimized:
+            args += ["-O0"]
+    output = run(args + [name + ".xml", str(image)], root)
+    if gpu:
+        assert "HART path tracer" in output, output
+        storage = re.search(r"(\d+) caller Groupdata bytes per pixel", output)
+        assert storage and (int(storage[1]) == 0) == (mode == "fused-local")
+        if material_count is not None:
+            assert (f"HART path tracer rendered {width}x{height} with "
+                    f"{aa * aa} samples per pixel") in output, output
+            compiled = re.search(r"HART compiled (\d+) materials, "
+                                 r"(\d+) callables", output)
+            entries = 1 if mode in ("fused", "fused-local") else 2
+            assert compiled and int(compiled[1]) == material_count, output
+            assert int(compiled[2]) == material_count * entries, output
+    if material_count is not None:
+        assert "triangles to be treated as lights" not in output, output
+    return pixels(image)
+
+
+def check_materials():
+    shaders = {
+        "path_material_inputs": """shader path_material_inputs(
+            output color weight=0, output string distribution="",
+            output string label="") {
+            weight = color(0.2+0.3*u, 0.25+0.25*v, 0.3+0.1*u)
+                   * texture("material_texture.pfm", u, v, "wrap", "clamp",
+                             "interp", "linear");
+            distribution = u>v ? "ggx" : "beckmann";
+            label = u>v ? "top" : "base";
+        }""",
+        "path_material_light": """shader path_material_light(
+            output closure color value=0) {
+            value = uniform_edf(color(2,1,0.5), "label", "enclosure");
+            Ci = value;
+        }""",
+    }
+    closures = {
+        "oren": "oren_nayar(n, 0.35)",
+        "phong": "phong(n, 12)",
+        "ward": "ward(n, t, 0.2, 0.35)",
+        "ggx_reflect": 'microfacet("ggx", n, t, 0.2, 0.35, 1.5, 0)',
+        "beckmann_reflect": 'microfacet("beckmann", n, t, 0.2, 0.35, 1.5, 0)',
+        "ggx_transmit": 'microfacet("ggx", n, t, 0.2, 0.35, 1.5, 1)',
+        "beckmann_transmit": 'microfacet("beckmann", n, t, 0.2, 0.35, 1.5, 1)',
+        "microfacet_dynamic": "microfacet(distribution, n, t, 0.2, 0.35, 1.5, 2)",
+        "reflection": "reflection(n)",
+        "fresnel_reflection": "reflection(n, 1.5)",
+        "refraction": "refraction(n, 1.5)",
+        "transparent": "transparent()",
+        "mx_burley": ('burley_diffuse_bsdf(n, color(0.5,0.7,0.4), 0.35, '
+                      '"label", label)'),
+        "mx_oren": ('oren_nayar_diffuse_bsdf(n, color(0.5,0.7,0.4), 0.35, '
+                    '"energy_compensation", 1, "label", label)'),
+        "mx_sheen0": ('sheen_bsdf(n, color(0.5,0.7,0.4), 0.35, '
+                      '"mode", 0, "label", label)'),
+        "mx_sheen1": ('sheen_bsdf(n, color(0.5,0.7,0.4), 0.35, '
+                      '"mode", 1, "label", label)'),
+        "mx_conductor": ('conductor_bsdf(n, t, 0.2, 0.35, color(0.2,0.9,1.1), '
+                         'color(3,2,1), "ggx", "thinfilm_thickness", 100.0, '
+                         '"thinfilm_ior", 1.4)'),
+        "mx_dielectric": ('dielectric_bsdf(n, t, color(0.8), color(0.6), '
+                          '0.2, 0.35, 1.5, "ggx", "thinfilm_thickness", 100.0, '
+                          '"thinfilm_ior", 1.4, "absorption", color(0.1,0.2,0.3))'),
+        "mx_schlick": ('generalized_schlick_bsdf(n, t, color(0.8), color(0.6), '
+                       '0.2, 0.35, color(0.04,0.09,0.16), color(0.95), '
+                       '4.0, "ggx")'),
+        "mx_layer": ('layer(sheen_bsdf(n, color(0.2,0.35,0.5), 0.35, '
+                     '"mode", 1, "label", label), '
+                     'burley_diffuse_bsdf(n, color(0.4,0.5,0.7), 0.25, '
+                     '"label", "undercoat"))'),
+        "thinlayer": ("thinlayer(n, t, 1.5, 0.25, 0.3, 0.1, "
+                      "color(0.8), color(0.7), color(0.1,0.2,0.3))"),
+    }
+    # The registered thinlayer prototype follows render-spi-thinlayer.
+    thinlayer = """closure color thinlayer(normal N, vector U, float IOR,
+        float roughness, float anisotropy, float thickness, color refl_tint,
+        color refr_tint, color sigma_t) [[int builtin=1]];"""
+    constant = {"reflection", "transparent"}
+    expressions = dict(closures)
+    expressions["bad_distribution"] = (
+        'microfacet(u>v ? "invalid_ggx" : "invalid_beckmann", '
+        'n, t, 0.2, 0.35, 1.5, 0)')
+    for name, expression in expressions.items():
+        tint = "color(0.25,0.5,0.75)" if name in constant else "weight"
+        prefix = thinlayer if name == "thinlayer" else ""
+        shaders["path_material_" + name] = prefix + f"""
+            shader path_material_{name}(color weight=0,
+                string distribution="missing", string label="missing",
+                output closure color value=0) {{
+                normal n = normalize(N + vector(0.06+0.04*u, -0.05+0.04*v, 0));
+                N = n;
+                vector t = normalize(vector(1,0,0) - n[0]*vector(n));
+                value = {expression};
+                Ci = {tint} * value;
+            }}"""
+    for name, source in shaders.items():
+        (root / (name + ".osl")).write_text(source, encoding="ascii")
+        run([compiler, "-I" + str(Path(stdosl).parent), name + ".osl"], root)
+    texels = [v for y in range(4) for x in range(4)
+              for v in (0.5+0.125*x, 0.5+0.125*y, 0.75)]
+    (root / "material_texture.pfm").write_bytes(
+        b"PF\n4 4\n-1.0\n" + struct.pack("<48f", *texels))
+
+    # No light primitives or Background: CPU and HART both sample only the BSDF.
+    # The lower emitter catches transmission; the offset camera avoids seams.
+    for name in expressions:
+        scene = f"""<World>
+          <Camera eye="0.13,0.07,4" dir="0,0,-1" fov="90"/>
+          <ShaderGroup name="surface" is_light="0">
+            shader path_material_inputs p; shader path_material_{name} m;
+            connect p.weight m.weight; connect p.distribution m.distribution;
+            connect p.label m.label;</ShaderGroup>
+          <Quad corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"/>
+          <ShaderGroup name="enclosure" is_light="0">
+            shader path_material_light e;</ShaderGroup>
+          <Quad corner="-10,-10,6" edge_x="20,0,0" edge_y="0,20,0"/>
+          <Quad corner="-10,-10,-6" edge_x="20,0,0" edge_y="0,20,0"/>
+          <Quad corner="-10,-10,-6" edge_x="20,0,0" edge_y="0,0,12"/>
+          <Quad corner="-10,10,-6" edge_x="20,0,0" edge_y="0,0,12"/>
+          <Quad corner="-10,-10,-6" edge_x="0,20,0" edge_y="0,0,12"/>
+          <Quad corner="10,-10,-6" edge_x="0,20,0" edge_y="0,0,12"/>
+          </World>"""
+        (root / ("material_" + name + ".xml")).write_text(scene, encoding="ascii")
+
+    compare(render("material_reflection", True, bounces=0, material_count=2),
+            [0.0] * (width * height * 3), 0)
+    for name in closures:
+        print("Checking HART material: " + name + " (" + mode + ")", flush=True)
+        cpu = render("material_" + name, False, aa=4, material_count=2)
+        if name == "mx_layer":
+            compare(render("material_" + name, False, aa=4, material_count=2,
+                           cpu_unoptimized=True), cpu, half_output=True)
+        gpu = render("material_" + name, True, aa=4, material_count=2,
+                     repeat=name == "mx_layer")
+        compare(gpu, cpu, half_output=True)
+        for values in (cpu, gpu):
+            assert min(values) >= 0 and max(values) > 0, name
+            if name in constant:
+                compare(values, [0.5, 0.5, 0.375] * (width * height), 0)
+            else:
+                colors = {tuple(round(v, 4) for v in values[i:i+3])
+                          for i in range(0, len(values), 3)}
+                assert len(colors) > 8, (name, len(colors))
+
+    image = root / "material-rejected.pfm"
+    out = run([renderer, "--hart", "-v", "--hart-bounces", "1"] + flags
+              + ["--res", "2", "2", "--no-jitter", "-t", "1", "-aa", "1",
+                 "material_bad_distribution.xml", str(image)], root, 1)
+    assert "HART compiled 2 materials" in out, out
+    assert "HART device services failed (error bits 32)" in out, out
+    assert "invalid closure tree" in out, out
+    assert "HART path tracer rendered" not in out and not image.exists(), out
 
 
 with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     root = Path(temporary)
+    if materials:
+        check_materials()
+        print("HART material path tracer verified: " + mode)
+        sys.exit(0)
+
     shaders = {
         "path_emit": """shader path_emit(
             color tint = 1 [[int interactive=1]], int globals = 0) {
@@ -181,25 +369,6 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     for name, scene in scenes.items():
         (root / (name + ".xml")).write_text(scene, encoding="ascii")
 
-    common = ["--res", str(width), str(height), "--no-jitter", "-t", "1"]
-
-    def render(name, gpu, bounces=1, aa=1, repeat=False):
-        image = root / (name + ("-gpu.pfm" if gpu else "-cpu.pfm"))
-        args = [renderer] + common + ["-aa", str(aa)]
-        if gpu:
-            args += ["--hart", "-v", "--hart-bounces", str(bounces)] + flags
-            if repeat:
-                args += ["--warmup", "--iters", "3"]
-        else:
-            args += ["--max-bounces", str(bounces), "--llvm_opt", "3"]
-        output = run(args + [name + ".xml", str(image)], root)
-        if gpu:
-            assert "HART path tracer" in output, output
-            storage = re.search(r"(\d+) caller Groupdata bytes per pixel",
-                                output)
-            assert storage and (int(storage[1]) == 0) == (mode == "fused-local")
-        return pixels(image)
-
     cpu = render("emission", False)
     gpu = render("emission", True, repeat=True)
     compare(gpu, cpu)
@@ -254,7 +423,9 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
                str(image)], root, 1)
     assert "Invalid HART options" in out and not image.exists()
     out = run([renderer, "--hart", "bad.xml", str(image)], root, 1)
-    assert "HART" in out and "background" in out and not image.exists()
+    assert "HART device services failed (error bits 32)" in out, out
+    assert "invalid closure tree" in out, out
+    assert "HART path tracer rendered" not in out and not image.exists(), out
     out = run([renderer, "--hart", "-v"] + flags
               + ["--res", "2", "2", "overflow.xml", str(image)], root, 1)
     assert "closure pool allocation failed" in out and not image.exists()

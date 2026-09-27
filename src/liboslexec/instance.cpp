@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -661,7 +662,8 @@ ShaderInstance::validate_hart() const
         if (!closures)
             return fail("unsupported operation 'closure' "
                         "(renderer lacks HARTClosures)");
-        if (op.nargs() < 2 || !symbol(0).typespec().is_closure()
+        if (op.nargs() < 2 || symbol(0).is_constant()
+            || !symbol(0).typespec().is_closure()
             || symbol(0).typespec().is_array())
             return fail("invalid closure argument list");
         const int weighted = symbol(1).typespec().is_string() ? 0 : 1;
@@ -671,9 +673,11 @@ ShaderInstance::validate_hart() const
         const Symbol& id = symbol(1 + weighted);
         if (!id.is_constant() || !id.typespec().is_string())
             return fail("closure names must be literal strings");
-        const ustring name = id.get_string();
-        const bool diffuse = name == ustring("diffuse");
-        if (!diffuse && name != ustring("emission"))
+        const ustring name    = id.get_string();
+        const bool diffuse    = name == ustring("diffuse");
+        const bool parameters = shadingsys().renderer()->supports(
+            "HARTClosureParameters");
+        if (!parameters && !diffuse && name != ustring("emission"))
             return fail(fmtformat("unsupported closure '{}'", name));
         const auto* entry = shadingsys().find_closure(name);
         if (!entry)
@@ -681,6 +685,97 @@ ShaderInstance::validate_hart() const
         if (entry->prepare || entry->setup)
             return fail(fmtformat(
                 "closure '{}' prepare/setup callbacks are unsupported", name));
+        if (parameters) {
+            auto bad_layout = [&]() {
+                return fail(
+                    fmtformat("invalid closure '{}' parameter layout", name));
+            };
+            if (entry->id < 0 || entry->name != name || entry->nformal < 0
+                || entry->nkeyword < 0 || entry->struct_size <= 0
+                || entry->nformal
+                       > std::numeric_limits<int>::max() - entry->nkeyword
+                || size_t(entry->nformal) + size_t(entry->nkeyword) + 1
+                       != entry->params.size())
+                return bad_layout();
+            const auto& finish  = entry->params.back();
+            const int alignment = finish.field_size;
+            if (finish.type != TypeDesc() || finish.key
+                || finish.offset != entry->struct_size || alignment <= 0
+                || alignment > 16 || (alignment & (alignment - 1))
+                || entry->struct_size % alignment)
+                return bad_layout();
+            const int count = entry->nformal + entry->nkeyword;
+            for (int i = 0; i < count; ++i) {
+                const auto& p = entry->params[i];
+                const bool numeric
+                    = p.type == TypeInt || p.type == TypeFloat
+                      || p.type == TypeColor || p.type == TypePoint
+                      || p.type == TypeVector || p.type == TypeNormal
+                      || p.type == TypeMatrix
+                      || p.type == TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3);
+                if (p.type.is_array()
+                    || (!numeric && p.type != TypeString
+                        && p.type != TypeDesc::PTR))
+                    return fail(
+                        fmtformat("unsupported closure '{}' parameter type",
+                                  name));
+                const int field_alignment
+                    = p.type == TypeString || p.type == TypeDesc::PTR ? 8 : 4;
+                if (p.offset < 0 || p.field_size <= 0
+                    || p.offset > entry->struct_size
+                    || p.field_size > entry->struct_size - p.offset
+                    || size_t(p.field_size) != p.type.size()
+                    || p.offset % field_alignment || alignment < field_alignment
+                    || (i < entry->nformal ? p.key != nullptr
+                                           : !p.key || !p.key[0]))
+                    return bad_layout();
+                for (int j = 0; j < i; ++j) {
+                    const auto& previous = entry->params[j];
+                    if ((p.offset < previous.offset + previous.field_size
+                         && previous.offset < p.offset + p.field_size)
+                        || (p.key && previous.key
+                            && string_view(p.key) == previous.key))
+                        return bad_layout();
+                }
+            }
+            const int first = 2 + weighted;
+            if (entry->nformal > op.nargs() - first
+                || (op.nargs() - first - entry->nformal) % 2)
+                return fail("invalid closure argument list");
+            auto compatible = [&](const Symbol& value, TypeDesc type) {
+                const TypeSpec& actual = value.typespec();
+                if (actual.is_array() || actual.is_structure_based())
+                    return false;
+                if (type == TypeDesc::PTR)
+                    return actual.is_closure();
+                return !actual.is_closure_based()
+                       && equivalent(actual.simpletype(), type);
+            };
+            for (int i = 0; i < entry->nformal; ++i)
+                if (!compatible(symbol(first + i), entry->params[i].type))
+                    return fail(fmtformat(
+                        "incompatible formal argument to closure '{}'", name));
+            for (int i = first + entry->nformal; i < op.nargs(); i += 2) {
+                const auto& key = symbol(i);
+                if (!key.typespec().is_string() || !key.is_constant())
+                    return fail(
+                        "closure keyword names must be literal strings");
+                bool found = false;
+                for (int j = entry->nformal; j < count; ++j) {
+                    const auto& p = entry->params[j];
+                    if (key.get_string() == p.key
+                        && compatible(symbol(i + 1), p.type)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return fail(fmtformat(
+                        "unsupported or incompatible keyword '{}' to closure '{}'",
+                        key.get_string(), name));
+            }
+            return true;
+        }
         const int nformal = diffuse ? 1 : 0;
         if (op.nargs() > 2 + weighted + nformal)
             return fail("closure keyword arguments are unsupported");

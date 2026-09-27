@@ -161,7 +161,7 @@ getargs(int argc, const char* argv[])
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
     ap.arg("--hart", &use_hart)
-      .help("Use experimental HART diffuse/emission path tracing");
+      .help("Use experimental HART surface path tracing");
     ap.arg("--hart-device %d:DEVICE", &hart_device)
       .help("HART device ordinal (default: 0)");
     ap.arg("--hart-fused", &hart_fused)
@@ -169,7 +169,7 @@ getargs(int argc, const char* argv[])
     ap.arg("--hart-local-groupdata %d:BYTES", &hart_local_groupdata)
       .help("Maximum callable-local HART Groupdata bytes (requires --hart-fused)");
     ap.arg("--hart-bounces %d:N", &hart_bounces)
-      .help("HART diffuse bounce limit, 0 through 64 (default: 4)");
+      .help("HART surface bounce limit, 0 through 64 (default: 4)");
     ap.arg("--max-bounces %d:N", &max_bounces)
       .help("CPU/OptiX path depth limit (default: 1000000)");
     ap.arg("--debug", &debug1)

@@ -412,10 +412,11 @@ int
 HartRaytracer::supports(string_view feature) const
 {
     return feature == "HART" || feature == "HARTClosures"
-           || feature == "HARTTextures" || feature == "HARTArrayBounds"
-           || feature == "HARTSplineErrors" || feature == "HARTColorSystem"
-           || feature == "HARTNoiseErrors" || feature == "HARTDiagnostics"
-           || feature == "HARTInteractive" || feature == "HARTGeometry";
+           || feature == "HARTClosureParameters" || feature == "HARTTextures"
+           || feature == "HARTArrayBounds" || feature == "HARTSplineErrors"
+           || feature == "HARTColorSystem" || feature == "HARTNoiseErrors"
+           || feature == "HARTDiagnostics" || feature == "HARTInteractive"
+           || feature == "HARTGeometry";
 }
 
 

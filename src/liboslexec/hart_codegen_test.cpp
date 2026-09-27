@@ -7,8 +7,8 @@
 // checking target metadata, ordered entries, split/fused callable ABI, address
 // spaces, group-data alignment, output placement, string hash storage, packed
 // diagnostics, interactive uploads, userdata caching, geometry state, renderer
-// attributes/libraries, named transforms, linked shadeops, control flow, HART
-// provenance, and rejection of unsupported operations.
+// attributes/libraries, named transforms, material closure records, linked
+// shadeops, control flow, HART provenance, and rejection of unsupported operations.
 // This allows testing every configured architecture without its physical GPU.
 //
 // Built as a separate test executable, not part of the runtime library, only
@@ -26,11 +26,15 @@
 #include <OSL/rendererservices.h>
 #include <OSL/shaderglobals.h>
 
+#include "../testrender/bsdl_config.h"
 #include "../testshade/hartgeneratedparams.h"
 #include "../testshade/hartrenderstate.h"
 #include "../testshade/render_state.h"
 #include "hart_bitcode.h"
 #include "oslexec_pvt.h"
+#include <BSDL/MTX/bsdf_dielectric_decl.h>
+#include <BSDL/MTX/bsdf_oren_nayar_diffuse_decl.h>
+#include <BSDL/MTX/bsdf_sheen_decl.h>
 #include "opcolor.h"
 
 #include <OpenImageIO/unittest.h>
@@ -158,6 +162,143 @@ register_hart_closures(ShadingSystem& ss)
     ss.register_closure("emission", 1, emission_params, nullptr, nullptr);
     ss.register_closure("diffuse", 3, diffuse_params, nullptr, nullptr);
 }
+
+
+
+// These small records follow testrender/shading.h without importing its
+// raytracer/CUDA dependencies. BSDL records use their actual Data and entry().
+struct MaterialMicrofacetParams {
+    ustringhash dist;
+    Vec3 N, U;
+    float xalpha, yalpha, eta;
+    int refract;
+};
+
+
+
+struct MaterialLayerParams {
+    ClosureColor* top;
+    ClosureColor* base;
+};
+
+
+
+struct MaterialUniformParams {
+    Color3 emittance;
+    ustringhash label;
+};
+
+
+
+struct MaterialProbeParams {
+    Matrix44 basis;
+    ClosureColor* input;
+    ClosureColor* fallback;
+    float gain;
+    int mode;
+    ustringhash label;
+};
+
+
+
+struct MaterialBsdfRoot { };
+using MaterialOren       = bsdl::mtx::OrenNayarDiffuseLobe<MaterialBsdfRoot>;
+using MaterialSheen      = bsdl::mtx::SheenLobe<MaterialBsdfRoot>;
+using MaterialDielectric = bsdl::mtx::DielectricLobe<MaterialBsdfRoot>;
+
+
+
+struct MaterialClosure {
+    const char* name;
+    int id;
+    std::vector<ClosureParam> params;
+};
+
+
+
+template<typename Lobe>
+MaterialClosure
+material_bsdl_closure(int id)
+{
+    const auto entry = Lobe::template entry<typename Lobe::Data>();
+    MaterialClosure result { entry.name, id, { } };
+    for (const auto& p : entry.params) {
+        TypeDesc type;
+        switch (p.type) {
+        case bsdl::ParamType::NONE: break;
+        case bsdl::ParamType::VECTOR: type = TypeVector; break;
+        case bsdl::ParamType::COLOR: type = TypeColor; break;
+        case bsdl::ParamType::INT: type = TypeInt; break;
+        case bsdl::ParamType::FLOAT: type = TypeFloat; break;
+        case bsdl::ParamType::STRING: type = TypeString; break;
+        case bsdl::ParamType::CLOSURE: type = TypeDesc::PTR; break;
+        }
+        result.params.push_back({ type, p.offset, p.key, p.type_size });
+        if (p.type == bsdl::ParamType::NONE)
+            break;
+    }
+    OIIO_CHECK_ASSERT(!result.params.empty()
+                      && result.params.back().type == TypeDesc());
+    return result;
+}
+
+
+
+const std::vector<MaterialClosure>&
+material_closures()
+{
+    static const std::vector<MaterialClosure> entries {
+        { "emission", 1, { CLOSURE_FINISH_PARAM(EmptyClosureParams) } },
+        { "microfacet",
+          8,
+          { CLOSURE_STRING_PARAM(MaterialMicrofacetParams, dist),
+            CLOSURE_VECTOR_PARAM(MaterialMicrofacetParams, N),
+            CLOSURE_VECTOR_PARAM(MaterialMicrofacetParams, U),
+            CLOSURE_FLOAT_PARAM(MaterialMicrofacetParams, xalpha),
+            CLOSURE_FLOAT_PARAM(MaterialMicrofacetParams, yalpha),
+            CLOSURE_FLOAT_PARAM(MaterialMicrofacetParams, eta),
+            CLOSURE_INT_PARAM(MaterialMicrofacetParams, refract),
+            CLOSURE_FINISH_PARAM(MaterialMicrofacetParams) } },
+        material_bsdl_closure<MaterialOren>(15),
+        material_bsdl_closure<MaterialDielectric>(17),
+        material_bsdl_closure<MaterialSheen>(23),
+        { "uniform_edf",
+          24,
+          { CLOSURE_COLOR_PARAM(MaterialUniformParams, emittance),
+            CLOSURE_STRING_KEYPARAM(MaterialUniformParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MaterialUniformParams) } },
+        { "layer",
+          27,
+          { CLOSURE_CLOSURE_PARAM(MaterialLayerParams, top),
+            CLOSURE_CLOSURE_PARAM(MaterialLayerParams, base),
+            CLOSURE_FINISH_PARAM(MaterialLayerParams) } },
+        { "hart_material_probe",
+          101,
+          { { TypeMatrix, offsetof(MaterialProbeParams, basis), nullptr,
+              sizeof(Matrix44) },
+            CLOSURE_CLOSURE_PARAM(MaterialProbeParams, input),
+            { TypeDesc::PTR, offsetof(MaterialProbeParams, fallback),
+              "fallback", sizeof(ClosureColor*) },
+            CLOSURE_FLOAT_KEYPARAM(MaterialProbeParams, gain, "gain"),
+            CLOSURE_INT_KEYPARAM(MaterialProbeParams, mode, "mode"),
+            CLOSURE_STRING_KEYPARAM(MaterialProbeParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MaterialProbeParams) } },
+    };
+    return entries;
+}
+
+
+
+class HartMaterialServices final : public RendererServices {
+public:
+    int supports(string_view feature) const override
+    {
+        return feature == "HART" || feature == "HARTArrayBounds"
+               || (closures && feature == "HARTClosures")
+               || (parameters && feature == "HARTClosureParameters");
+    }
+    bool closures = true, parameters = true;
+};
 
 
 
@@ -1654,8 +1795,9 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              bool looping = false, int used_layers = 0, bool closures = false,
              bool aggregates = false, int spline_arraylen = 0,
              int color_transforms = -1, int noise_guard_flags = -1,
-             cspan<DiagnosticExpectation> diagnostics = { },
-             bool eager_layers                        = false)
+             cspan<DiagnosticExpectation> diagnostics   = { },
+             bool eager_layers                          = false,
+             cspan<std::pair<int, int>> closure_layouts = { })
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -1803,11 +1945,29 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                                 call->getArgOperand(2));
                             OIIO_CHECK_ASSERT(id && size);
                             if (id && size) {
-                                OIIO_CHECK_ASSERT(id->getZExtValue() == 1
-                                                  || id->getZExtValue() == 3);
-                                OIIO_CHECK_EQUAL(size->getZExtValue(),
-                                                 id->getZExtValue() == 1 ? 1
-                                                                         : 24);
+                                if (closure_layouts.empty()) {
+                                    OIIO_CHECK_ASSERT(id->getZExtValue() == 1
+                                                      || id->getZExtValue()
+                                                             == 3);
+                                    OIIO_CHECK_EQUAL(size->getZExtValue(),
+                                                     id->getZExtValue() == 1
+                                                         ? 1
+                                                         : 24);
+                                } else {
+                                    const auto layout = std::find_if(
+                                        closure_layouts.begin(),
+                                        closure_layouts.end(),
+                                        [&](const auto& p) {
+                                            return uint64_t(p.first)
+                                                   == id->getZExtValue();
+                                        });
+                                    OIIO_CHECK_ASSERT(layout
+                                                      != closure_layouts.end());
+                                    if (layout != closure_layouts.end())
+                                        OIIO_CHECK_EQUAL(size->getZExtValue(),
+                                                         uint64_t(
+                                                             layout->second));
+                                }
                             }
                         }
                     }
@@ -4284,7 +4444,7 @@ check_explicit_entry_modules(string_view arch, string_view stdosl,
 
 
 bool
-interactive_address(const llvm::Value* value, const llvm::Argument* arena,
+interactive_address(const llvm::Value* value, const llvm::Value* arena,
                     const llvm::DataLayout& layout, int64_t& offset,
                     unsigned depth = 0)
 {
@@ -10002,6 +10162,721 @@ check_texture_modules(string_view arch, string_view stdosl)
 
 
 
+struct MaterialFieldExpectation {
+    int id;
+    const char* key;
+    int writes       = 1;
+    const char* text = nullptr;
+    double number    = 0;
+    bool numeric     = false;
+};
+
+
+
+bool
+check_material_closure_ir(ShadingSystem& ss, ShaderGroup& group,
+                          cspan<std::pair<int, int>> counts,
+                          cspan<MaterialFieldExpectation> fields, bool weighted,
+                          bool null_input)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_material_closures"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    auto& module        = **parsed;
+    const auto& layout  = module.getDataLayout();
+    auto* groupdata     = llvm::StructType::getTypeByName(context, "Groupdata");
+    auto* shaderglobals = llvm::StructType::getTypeByName(context,
+                                                          "ShaderGlobals");
+    auto leaf_type      = [&](const auto& self, llvm::Type* type,
+                              uint64_t offset) -> llvm::Type* {
+        if (auto* array = llvm::dyn_cast<llvm::ArrayType>(type)) {
+            const uint64_t stride
+                = layout.getTypeAllocSize(array->getElementType())
+                      .getFixedValue();
+            return stride && offset / stride < array->getNumElements()
+                       ? self(self, array->getElementType(), offset % stride)
+                       : nullptr;
+        }
+        if (auto* record = llvm::dyn_cast<llvm::StructType>(type)) {
+            if (record->isOpaque() || !record->getNumElements()
+                || offset >= layout.getTypeAllocSize(record).getFixedValue())
+                return nullptr;
+            const auto* members = layout.getStructLayout(record);
+            const unsigned i    = members->getElementContainingOffset(offset);
+            return self(self, record->getElementType(i),
+                        offset - members->getElementOffset(i));
+        }
+        return offset == 0 ? type : nullptr;
+    };
+    auto source_type = [&](const llvm::Value* pointer,
+                           const llvm::Function& function) -> llvm::Type* {
+        int64_t offset = 0;
+        const auto* base
+            = llvm::GetPointerBaseWithConstantOffset(pointer, offset, layout);
+        llvm::Type* type = nullptr;
+        if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(base))
+            type = global->getValueType();
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(base))
+            type = alloca->getAllocatedType();
+        if (!type && groupdata
+            && interactive_address(pointer, function.getArg(1), layout, offset))
+            type = groupdata;
+        if (!type && shaderglobals
+            && interactive_address(pointer, function.getArg(0), layout, offset))
+            type = shaderglobals;
+        return type && offset >= 0 ? leaf_type(leaf_type, type, offset)
+                                   : nullptr;
+    };
+    auto constant_at = [&](const llvm::Value* pointer,
+                           unsigned component) -> const llvm::Constant* {
+        int64_t offset = 0;
+        const auto* base
+            = llvm::GetPointerBaseWithConstantOffset(pointer, offset, layout);
+        const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(base);
+        if (!global || !global->hasInitializer() || offset < 0)
+            return nullptr;
+        const auto* array = llvm::dyn_cast<llvm::ArrayType>(
+            global->getValueType());
+        if (!array)
+            return nullptr;
+        const auto stride
+            = layout.getTypeAllocSize(array->getElementType()).getFixedValue();
+        const uint64_t index = stride ? uint64_t(offset) / stride + component
+                                      : 0;
+        return stride && uint64_t(offset) % stride == 0
+                       && index < array->getNumElements()
+                   ? global->getInitializer()->getAggregateElement(
+                         unsigned(index))
+                   : nullptr;
+    };
+    std::vector<int> seen(counts.size(), 0);
+    int weighted_calls = 0, closure_copies = 0, null_copies = 0;
+    for (auto& function : module) {
+        if (function.getName().find("osl_layer_group_") != 0)
+            continue;
+        llvm::DominatorTree dominators(function);
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                const auto* allocation = llvm::dyn_cast<llvm::CallBase>(&inst);
+                const auto* helper     = allocation
+                                             ? allocation->getCalledFunction()
+                                             : nullptr;
+                if (!helper)
+                    continue;
+                const bool is_weighted
+                    = helper->getName()
+                      == "osl_allocate_weighted_closure_component";
+                if (!is_weighted
+                    && helper->getName() != "osl_allocate_closure_component")
+                    continue;
+                weighted_calls += is_weighted;
+                OIIO_CHECK_EQUAL(allocation->arg_size(), is_weighted ? 4 : 3);
+                OIIO_CHECK_EQUAL(
+                    allocation->getArgOperand(0)->stripPointerCasts(),
+                    function.getArg(0));
+                const auto* id = llvm::dyn_cast<llvm::ConstantInt>(
+                    allocation->getArgOperand(1));
+                const auto* size = llvm::dyn_cast<llvm::ConstantInt>(
+                    allocation->getArgOperand(2));
+                OIIO_CHECK_ASSERT(id && size);
+                if (!id || !size)
+                    continue;
+                const auto entry = std::find_if(
+                    material_closures().begin(), material_closures().end(),
+                    [&](const auto& e) {
+                        return uint64_t(e.id) == id->getZExtValue();
+                    });
+                OIIO_CHECK_ASSERT(entry != material_closures().end());
+                if (entry == material_closures().end())
+                    continue;
+                OIIO_CHECK_EQUAL(size->getZExtValue(),
+                                 uint64_t(entry->params.back().offset));
+                int matched = 0;
+                for (size_t i = 0; i < counts.size(); ++i)
+                    if (counts[i].first == entry->id) {
+                        ++seen[i];
+                        ++matched;
+                    }
+                OIIO_CHECK_EQUAL(matched, 1);
+                auto guarded = [&](const llvm::Instruction* write) {
+                    for (const auto& candidate : function) {
+                        const auto* branch = llvm::dyn_cast<llvm::BranchInst>(
+                            candidate.getTerminator());
+                        const auto* cmp = branch && branch->isConditional()
+                                              ? llvm::dyn_cast<llvm::ICmpInst>(
+                                                    branch->getCondition())
+                                              : nullptr;
+                        if (!cmp || !cmp->isEquality())
+                            continue;
+                        for (unsigned a = 0; a < 2; ++a) {
+                            if (cmp->getOperand(a) != allocation
+                                || !llvm::isa<llvm::ConstantPointerNull>(
+                                    cmp->getOperand(1 - a)))
+                                continue;
+                            const unsigned good
+                                = cmp->getPredicate() == llvm::CmpInst::ICMP_NE
+                                      ? 0
+                                      : 1;
+                            if (dominators.dominates(branch->getSuccessor(good),
+                                                     write->getParent())
+                                && !dominators.dominates(branch->getSuccessor(
+                                                             1 - good),
+                                                         write->getParent()))
+                                return true;
+                        }
+                    }
+                    return false;
+                };
+                const llvm::MemSetInst* clear = nullptr;
+                std::vector<const llvm::MemCpyInst*> copies;
+                for (const auto& body : function)
+                    for (const auto& write : body) {
+                        int64_t offset = 0;
+                        if (const auto* zero = llvm::dyn_cast<llvm::MemSetInst>(
+                                &write)) {
+                            if (!interactive_address(zero->getDest(),
+                                                     allocation, layout,
+                                                     offset))
+                                continue;
+                            OIIO_CHECK_ASSERT(!clear);
+                            clear = zero;
+                            OIIO_CHECK_EQUAL(offset, 16);
+                            const auto* length
+                                = llvm::dyn_cast<llvm::ConstantInt>(
+                                    zero->getLength());
+                            const auto* value
+                                = llvm::dyn_cast<llvm::ConstantInt>(
+                                    zero->getValue());
+                            OIIO_CHECK_ASSERT(length && value
+                                              && value->isZero());
+                            if (length)
+                                OIIO_CHECK_EQUAL(length->getZExtValue(),
+                                                 size->getZExtValue());
+                            OIIO_CHECK_ASSERT(guarded(zero));
+                        }
+                        if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(
+                                &write))
+                            if (interactive_address(copy->getDest(), allocation,
+                                                    layout, offset))
+                                copies.push_back(copy);
+                    }
+                OIIO_CHECK_ASSERT(clear);
+                std::vector<int> writes(entry->params.size() - 1, 0);
+                std::vector<const llvm::MemCpyInst*> last(writes.size(),
+                                                          nullptr);
+                for (const auto* copy : copies) {
+                    int64_t offset = 0;
+                    OIIO_CHECK_ASSERT(interactive_address(copy->getDest(),
+                                                          allocation, layout,
+                                                          offset));
+                    OIIO_CHECK_ASSERT(guarded(copy));
+                    if (clear)
+                        OIIO_CHECK_ASSERT(dominators.dominates(clear, copy));
+                    const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
+                        copy->getLength());
+                    OIIO_CHECK_ASSERT(length);
+                    int matches = 0;
+                    for (size_t p = 0; length && p < writes.size(); ++p) {
+                        const auto& param = entry->params[p];
+                        if (offset != 16 + param.offset
+                            || length->getZExtValue()
+                                   != uint64_t(param.field_size))
+                            continue;
+                        ++matches;
+                        ++writes[p];
+                        if (last[p])
+                            OIIO_CHECK_ASSERT(
+                                dominators.dominates(last[p], copy));
+                        last[p]          = copy;
+                        const auto* type = source_type(copy->getSource(),
+                                                       function);
+                        OIIO_CHECK_ASSERT(type);
+                        if (type)
+                            OIIO_CHECK_ASSERT(
+                                param.type == TypeDesc::PTR
+                                    ? type->isPointerTy()
+                                          && type->getPointerAddressSpace() == 0
+                                : param.type == TypeString
+                                    ? type->isIntegerTy(64)
+                                : param.type == TypeInt ? type->isIntegerTy(32)
+                                                        : type->isFloatTy());
+                        if (param.type == TypeDesc::PTR) {
+                            ++closure_copies;
+                            const llvm::StoreInst* latest = nullptr;
+                            int64_t source_offset         = 0;
+                            const auto* source
+                                = llvm::GetPointerBaseWithConstantOffset(
+                                    copy->getSource(), source_offset, layout);
+                            // A self-nested assignment must not publish the new
+                            // parent into its input slot before copying that slot.
+                            for (const auto& b : function)
+                                for (const auto& instruction : b) {
+                                    const auto* store
+                                        = llvm::dyn_cast<llvm::StoreInst>(
+                                            &instruction);
+                                    if (!store)
+                                        continue;
+                                    int64_t offset = 0;
+                                    const auto* base
+                                        = llvm::GetPointerBaseWithConstantOffset(
+                                            store->getPointerOperand(), offset,
+                                            layout);
+                                    if (base != source
+                                        || offset != source_offset
+                                        || !dominators.dominates(store, copy))
+                                        continue;
+                                    OIIO_CHECK_ASSERT(store->getValueOperand()
+                                                      != allocation);
+                                    if (!latest
+                                        || dominators.dominates(latest, store))
+                                        latest = store;
+                                }
+                            if (latest
+                                && llvm::isa<llvm::ConstantPointerNull>(
+                                    latest->getValueOperand()))
+                                ++null_copies;
+                        }
+                    }
+                    OIIO_CHECK_EQUAL(matches, 1);
+                }
+                for (size_t p = 0; p < writes.size(); ++p) {
+                    const auto& param = entry->params[p];
+                    const auto field  = std::find_if(
+                        fields.begin(), fields.end(), [&](const auto& f) {
+                            return f.id == entry->id
+                                   && (param.key ? f.key
+                                                       && string_view(param.key)
+                                                              == f.key
+                                                 : f.key == nullptr);
+                        });
+                    const int expected = field != fields.end() ? field->writes
+                                         : param.key           ? 0
+                                                               : 1;
+                    OIIO_CHECK_EQUAL(writes[p], expected);
+                    if (!last[p] || field == fields.end())
+                        continue;
+                    if (field->text && param.type == TypeString) {
+                        const auto* hash
+                            = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+                                constant_at(last[p]->getSource(), 0));
+                        OIIO_CHECK_ASSERT(hash && hash->getBitWidth() == 64);
+                        if (hash)
+                            OIIO_CHECK_EQUAL(hash->getZExtValue(),
+                                             ustringhash(field->text).hash());
+                    }
+                    if (field->numeric && param.type.basetype != TypeDesc::PTR)
+                        for (unsigned c = 0; c < param.type.aggregate; ++c) {
+                            const auto* value
+                                = constant_at(last[p]->getSource(), c);
+                            if (param.type == TypeInt) {
+                                const auto* number
+                                    = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+                                        value);
+                                OIIO_CHECK_ASSERT(number);
+                                if (number)
+                                    OIIO_CHECK_EQUAL(number->getSExtValue(),
+                                                     int64_t(field->number));
+                            } else {
+                                const auto* number
+                                    = llvm::dyn_cast_or_null<llvm::ConstantFP>(
+                                        value);
+                                OIIO_CHECK_ASSERT(number);
+                                if (number)
+                                    OIIO_CHECK_EQUAL(
+                                        number->getValueAPF().convertToDouble(),
+                                        field->number);
+                            }
+                        }
+                }
+            }
+    }
+    for (size_t i = 0; i < counts.size(); ++i)
+        OIIO_CHECK_EQUAL(seen[i], counts[i].second);
+    OIIO_CHECK_EQUAL(weighted_calls > 0, weighted);
+    OIIO_CHECK_ASSERT(closure_copies > 0);
+    if (null_input)
+        OIIO_CHECK_ASSERT(null_copies > 0);
+    return true;
+}
+
+
+
+bool
+check_material_closure_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader material_old(output closure color value=0, output color Cout=0) { "
+        "color weight=color(u,v,0.5); "
+        "closure color base=oren_nayar_diffuse_bsdf(normal(0,0,1),color(0.5),0.25); "
+        "value=microfacet(\"ggx\",normal(0,0,1),vector(1,0,0),u+0.125,0.25,1.5,1); "
+        "value=weight*layer(value,base); "
+        "value=value+uniform_edf(color(0.125),\"label\",\"lamp\"); "
+        "Ci=value; Cout=color(u,v,0.5); }",
+        "shader material_mx(output closure color value=0, output color Cout=0) { "
+        "string dist=u>v?\"ggx\":\"beckmann\"; float rough=0.125+u; "
+        "value=dielectric_bsdf(normal(0,0,1),vector(1,0,0),color(0.75),color(0.25),"
+        "rough,0.25,1.5,dist,\"thinfilm_thickness\",0.5,\"thinfilm_ior\",1.25,"
+        "\"absorption\",color(0.125),\"dispersion\",0.25); "
+        "closure color coat=color(0.5,0.25,0.75)*"
+        "sheen_bsdf(normal(0,0,1),color(0.5),0.25,"
+        "\"label\",\"coat\",\"mode\",0,\"mode\",1); "
+        "value=layer(coat,value); Ci=value; Cout=color(Dx(rough),v,1); }",
+        "shader material_defaults(output closure color value=0, output color Cout=0) { "
+        "closure color empty=0; "
+        "value=layer(empty,sheen_bsdf(normal(0,0,1),color(0.5),0.25)); "
+        "Ci=value; Cout=color(u,v,1); }",
+        "closure color hart_material_probe(matrix basis, closure color input)"
+        " [[int builtin=1]]; "
+        "shader material_probe(output closure color value=0, output color Cout=0) { "
+        "closure color empty=0; "
+        "value=emission(); value=hart_material_probe(matrix(1),empty,"
+        "\"fallback\",value,\"gain\",0.5,\"mode\",7,\"label\",\"\"); "
+        "Ci=value; Cout=color(u,v,1); }",
+    };
+    std::string oso[std::size(sources)];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], oso[i], { }, stdosl))
+            return false;
+    }
+    const std::vector<std::pair<int, int>> counts[] = {
+        { { 8, 1 }, { 15, 1 }, { 24, 1 }, { 27, 1 } },
+        { { 17, 1 }, { 23, 1 }, { 27, 1 } },
+        { { 23, 1 }, { 27, 1 } },
+        { { 1, 1 }, { 101, 1 } },
+    };
+    const std::vector<MaterialFieldExpectation> fields[] = {
+        { { 8, nullptr, 1, "ggx" }, { 24, "label", 1, "lamp" } },
+        { { 17, "thinfilm_thickness", 1, nullptr, 0.5, true },
+          { 17, "thinfilm_ior", 1, nullptr, 1.25, true },
+          { 17, "absorption", 1, nullptr, 0.125, true },
+          { 17, "dispersion", 1, nullptr, 0.25, true },
+          { 23, "label", 1, "coat" },
+          { 23, "mode", 2, nullptr, 1, true } },
+        { },
+        { { 101, "fallback" },
+          { 101, "gain", 1, nullptr, 0.5, true },
+          { 101, "mode", 1, nullptr, 7, true },
+          { 101, "label", 1, "" } },
+    };
+    std::vector<std::pair<int, int>> layouts;
+    for (const auto& entry : material_closures())
+        layouts.emplace_back(entry.id, entry.params.back().offset);
+    for (size_t source = 0; source < std::size(sources); ++source) {
+        const struct {
+            int osl, llvm, budget;
+        } variants[] = { { 0, 10, 0 },
+                         { 2, 10, 4096 },
+                         { 2, 3, source % 2 ? 0 : 4096 } };
+        for (const auto& variant : variants) {
+            HartMaterialServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            for (const auto& entry : material_closures())
+                ss.register_closure(entry.name, entry.id, entry.params.data(),
+                                    nullptr, nullptr);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", variant.osl));
+            OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", variant.llvm));
+            OIIO_CHECK_ASSERT(
+                ss.attribute("max_hart_groupdata_alloc", variant.budget));
+            auto group = make_group(ss, oso[source]);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "Material closures {} OSL{} LLVM{}: {}\n", source,
+                      variant.osl, variant.llvm, errors.messages);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch, { }, variant.llvm, false, false,
+                         false, 0, true, false, 0, -1, -1, { }, false, layouts);
+            if (variant.llvm == 10
+                && !check_material_closure_ir(ss, *group, counts[source],
+                                              fields[source],
+                                              source < 2 && variant.osl == 2,
+                                              source >= 2))
+                return false;
+            int allocated = -1, size = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_ASSERT(
+                ss.getattribute(group.get(), "llvm_groupdata_size", size));
+            OIIO_CHECK_EQUAL(allocated, variant.budget ? size : 0);
+            OIIO_CHECK_ASSERT(size > 0 && size <= 4096);
+            OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+        }
+    }
+    enum class RegistryFailure {
+        Missing,
+        Prepare,
+        Setup,
+        Empty,
+        Extent,
+        Alignment,
+        EndKey,
+        NegativeOffset,
+        Outside,
+        Misaligned,
+        Overlap,
+        KeywordSize,
+        UnsupportedType,
+        Array,
+        Order,
+        DuplicateKey
+    };
+    const RegistryFailure failures[] = {
+        RegistryFailure::Missing,         RegistryFailure::Prepare,
+        RegistryFailure::Setup,           RegistryFailure::Empty,
+        RegistryFailure::Extent,          RegistryFailure::Alignment,
+        RegistryFailure::EndKey,          RegistryFailure::NegativeOffset,
+        RegistryFailure::Outside,         RegistryFailure::Misaligned,
+        RegistryFailure::Overlap,         RegistryFailure::KeywordSize,
+        RegistryFailure::UnsupportedType, RegistryFailure::Array,
+        RegistryFailure::Order,           RegistryFailure::DuplicateKey,
+    };
+    for (RegistryFailure failure : failures) {
+        HartMaterialServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        for (const auto& entry : material_closures()) {
+            if (entry.id != 23) {
+                ss.register_closure(entry.name, entry.id, entry.params.data(),
+                                    nullptr, nullptr);
+                continue;
+            }
+            if (failure == RegistryFailure::Missing)
+                continue;
+            auto params = entry.params;
+            switch (failure) {
+            case RegistryFailure::Extent: params.back().offset = 16; break;
+            case RegistryFailure::Alignment:
+                params.back().field_size = 3;
+                break;
+            case RegistryFailure::EndKey:
+                params.back().key = "not_an_end";
+                break;
+            case RegistryFailure::NegativeOffset: params[0].offset = -4; break;
+            case RegistryFailure::Outside: params[0].offset = 40; break;
+            case RegistryFailure::Misaligned: params[0].offset = 9; break;
+            case RegistryFailure::Overlap:
+                params[1].offset = params[0].offset;
+                break;
+            case RegistryFailure::KeywordSize: params[3].field_size = 4; break;
+            case RegistryFailure::UnsupportedType:
+                params[3].type = TypeDesc::DOUBLE;
+                break;
+            case RegistryFailure::Array:
+                params[3].type       = TypeDesc(TypeDesc::STRING, 2);
+                params[3].field_size = 16;
+                break;
+            case RegistryFailure::Order: std::swap(params[1], params[3]); break;
+            case RegistryFailure::DuplicateKey:
+                params[4].key = params[3].key;
+                break;
+            default: break;
+            }
+            ss.register_closure(
+                entry.name, entry.id,
+                failure == RegistryFailure::Empty ? nullptr : params.data(),
+                failure == RegistryFailure::Prepare ? host_closure_callback
+                                                    : nullptr,
+                failure == RegistryFailure::Setup ? host_closure_callback
+                                                  : nullptr);
+        }
+        OIIO_CHECK_EQUAL(errors.errors, 0);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+        auto group          = make_group(ss, oso[2]);
+        const char* message = failure == RegistryFailure::Missing
+                                  ? "not registered"
+                              : failure == RegistryFailure::Prepare
+                                      || failure == RegistryFailure::Setup
+                                  ? "prepare/setup callbacks"
+                              : failure == RegistryFailure::UnsupportedType
+                                      || failure == RegistryFailure::Array
+                                  ? "parameter type"
+                                  : "parameter layout";
+        check_rejected_group(ss, *group, errors, message);
+        OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+    }
+    OSLCompiler clean_compiler;
+    std::string clean;
+    if (!clean_compiler.compile_buffer(
+            "shader material_clean(output color Cout=0) { Cout=color(u,v,1); }",
+            clean, { }, stdosl))
+        return false;
+    for (int failure = 0; failure < 4; ++failure) {
+        HartMaterialServices renderer;
+        renderer.closures   = failure != 0;
+        renderer.parameters = failure != 1 && failure != 2;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        for (const auto& entry : material_closures())
+            ss.register_closure(entry.name, entry.id, entry.params.data(),
+                                failure == 3 && entry.id == 23
+                                    ? host_closure_callback
+                                    : nullptr,
+                                nullptr);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+        auto group = make_group(ss, oso[failure == 0 ? 0 : 2]);
+        if (failure >= 2) {
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("material_clean", clean));
+            group = ss.ShaderGroupBegin("hart_test_group");
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "unused"));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "material_clean", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("layer0.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+        }
+        check_rejected_group(ss, *group, errors,
+                             failure == 0   ? "unsupported type 'closure color'"
+                             : failure == 3 ? "prepare/setup callbacks"
+                                            : "unsupported closure");
+        OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+    }
+    OSLCompiler malformed_compiler;
+    std::string original;
+    if (!malformed_compiler.compile_buffer(
+            "shader material_bad(string label=\"coat\", string words[2]={\"a\",\"b\"}, "
+            "float gain=0.25, float numbers[2]={1,2}, closure color child=0, "
+            "output closure color value=0, output color Cout=0) { "
+            "value=sheen_bsdf(normal(0,0,1),color(0.5),gain,"
+            "\"label\",\"coat\",\"mode\",1); Ci=value; Cout=color(u,v,1); }",
+            original, { }, stdosl))
+        return false;
+    const auto marker = original.find("\n\tclosure\t");
+    OIIO_CHECK_ASSERT(marker != std::string::npos);
+    if (marker == std::string::npos)
+        return false;
+    const size_t op = marker + 1;
+    const auto end  = original.find('\n', op);
+    const auto hint = original.find('%', op);
+    OIIO_CHECK_ASSERT(end != std::string::npos && hint < end);
+    if (end == std::string::npos || hint >= end)
+        return false;
+    std::vector<std::string> operands;
+    OIIO::Strutil::split(string_view(original).substr(op, hint - op), operands,
+                         "", -1);
+    OIIO_CHECK_EQUAL(operands.size(), 10);
+    if (operands.size() != 10)
+        return false;
+    const auto original_hints   = original.substr(hint, end - hint);
+    const std::string rw_prefix = "%argrw{\"";
+    const auto rw               = original_hints.find(rw_prefix);
+    const auto rw_end = rw == std::string::npos
+                            ? std::string::npos
+                            : original_hints.find('"', rw + rw_prefix.size());
+    OIIO_CHECK_ASSERT(rw_end != std::string::npos);
+    if (rw_end == std::string::npos)
+        return false;
+    const struct {
+        unsigned operand;
+        const char* replacement;
+        const char* error;
+    } bad_operands[] = {
+        { 1, "gain", "invalid closure argument list" },
+        { 2, "gain", "invalid closure weight" },
+        { 2, "label", "closure names must be literal strings" },
+        { 3, "numbers", "incompatible formal argument" },
+        { 4, "child", "incompatible formal argument" },
+        { 5, "child", "incompatible formal argument" },
+        { 6, "label", "closure keyword names must be literal strings" },
+        { 6, "gain", "closure keyword names must be literal strings" },
+        { 7, "gain", "unsupported or incompatible keyword" },
+        { 6, operands[7].c_str(), "unsupported or incompatible keyword" },
+        { 9, "words", "unsupported or incompatible keyword" },
+        { 0, nullptr, "invalid closure argument list" },
+    };
+    for (const auto& test : bad_operands) {
+        auto words = operands;
+        if (test.replacement)
+            words[test.operand] = test.replacement;
+        else
+            words.pop_back();
+        auto hints = original_hints;
+        std::string access(words.size() - 1, 'r');
+        access[0] = 'w';
+        hints.replace(rw + rw_prefix.size(), rw_end - rw - rw_prefix.size(),
+                      access);
+        auto bytecode = original;
+        bytecode.replace(op, end - op,
+                         fmtformat("\t{}\t{}", OIIO::Strutil::join(words, "\t"),
+                                   hints));
+        HartMaterialServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        for (const auto& entry : material_closures())
+            ss.register_closure(entry.name, entry.id, entry.params.data(),
+                                nullptr, nullptr);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        OIIO_CHECK_ASSERT(ss.attribute("optimize", 2));
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+        OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+    }
+    for (const char* argument : { "gain", "label" }) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                "shader material_pointer(closure color child=0, float gain=0, "
+                "string label=\"\", output closure color value=0, output color Cout=0) { "
+                "value=layer(child,child); Ci=value; Cout=color(u,v,1); }",
+                bytecode, { }, stdosl))
+            return false;
+        const auto marker = bytecode.find("\n\tclosure\t");
+        OIIO_CHECK_ASSERT(marker != std::string::npos);
+        if (marker == std::string::npos)
+            return false;
+        const auto hint = bytecode.find('%', marker);
+        const auto end  = bytecode.find('\n', marker + 1);
+        if (hint >= end) {
+            OIIO_CHECK_ASSERT(false);
+            return false;
+        }
+        std::vector<std::string> words;
+        OIIO::Strutil::split(string_view(bytecode).substr(marker + 1,
+                                                          hint - marker - 1),
+                             words, "", -1);
+        OIIO_CHECK_EQUAL(words.size(), 5);
+        if (words.size() != 5)
+            return false;
+        words[3] = argument;
+        bytecode.replace(marker + 1, hint - marker - 1,
+                         fmtformat("\t{}\t", OIIO::Strutil::join(words, "\t")));
+        HartMaterialServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        for (const auto& entry : material_closures())
+            ss.register_closure(entry.name, entry.id, entry.params.data(),
+                                nullptr, nullptr);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors,
+                             "incompatible formal argument");
+        OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+    }
+    return true;
+}
+
+
+
 bool
 check_closure_modules(string_view arch, string_view stdosl)
 {
@@ -11725,7 +12600,8 @@ main(int argc, char* argv[])
         return 1;
     if (!check_named_transform_modules(arch, argv[2]) || unit_test_failures)
         return 1;
-    if (!check_closure_modules(arch, argv[2]) || unit_test_failures)
+    if (!check_closure_modules(arch, argv[2])
+        || !check_material_closure_modules(arch, argv[2]) || unit_test_failures)
         return 1;
     const char* sources[] = {
         "shader hart_test(output color Cout=0) { Cout=color(u,v,u+v); }",

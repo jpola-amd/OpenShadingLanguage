@@ -151,7 +151,7 @@ struct SpiThinLayer : public bsdl::spi::ThinLayerLobe<BSDLLobe> {
     }
 };
 
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
 // Helper to register BSDL closures
 struct BSDLtoOSL {
     template<typename BSDF> void visit()
@@ -1182,7 +1182,7 @@ struct HenyeyGreenstein : public bsdl::spi::VolumeLobe<BSDLLobe> {
 };
 
 
-BSDF::Sample
+OSL_HOSTDEVICE BSDF::Sample
 MediumParams::sample_phase_func(const Vec3& wo, float rx, float ry,
                                 float rz) const
 {
@@ -1225,19 +1225,19 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
             break;
         default: {
             const ClosureComponent* comp = closure->as_comp();
-            Color3 w                     = comp->w;
+            branch_weight *= comp->w;
             switch (comp->id) {
             case MX_LAYER_ID: {
                 const MxLayerParams* srcparams = comp->as<MxLayerParams>();
                 closure                        = srcparams->top;
                 ptr_stack[stack_idx]           = srcparams->base;
-                weight_stack[stack_idx++]      = branch_weight * w;
+                weight_stack[stack_idx++]      = branch_weight;
                 break;
             }
             case REFLECTION_ID:
             case FRESNEL_REFLECTION_ID: {
                 Reflection bsdf(*comp->as<ReflectionParams>());
-                branch_weight *= w * bsdf.get_albedo(-sg.I);
+                branch_weight *= bsdf.get_albedo(-sg.I);
                 closure = nullptr;
                 break;
             }
@@ -1245,7 +1245,7 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
                 const MxDielectric::Data& params
                     = *comp->as<MxDielectric::Data>();
                 MxDielectric d(params, -sg.I, sg.backfacing, path_roughness);
-                branch_weight *= w * (Color3(1) - d.filter_o(-sg.I).toRGB(0));
+                branch_weight *= Color3(1) - d.filter_o(-sg.I).toRGB(0);
                 closure = nullptr;
                 break;
             }
@@ -1259,13 +1259,13 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
                 }
                 MxGeneralizedSchlick d(params, -sg.I, sg.backfacing,
                                        path_roughness);
-                branch_weight *= w * (Color3(1) - d.filter_o(-sg.I).toRGB(0));
+                branch_weight *= Color3(1) - d.filter_o(-sg.I).toRGB(0);
                 break;
             }
             case MxSheen::closureid(): {
                 const MxSheen::Data& params = *comp->as<MxSheen::Data>();
                 MxSheen d(params, -sg.I, sg.backfacing, path_roughness);
-                branch_weight *= w * (Color3(1) - d.filter_o(-sg.I).toRGB(0));
+                branch_weight *= Color3(1) - d.filter_o(-sg.I).toRGB(0);
                 closure = nullptr;
                 break;
             }
@@ -1317,6 +1317,7 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
         case MX_LAYER_ID: {
             const ClosureComponent* comp = closure->as_comp();
             const MxLayerParams* params  = comp->as<MxLayerParams>();
+            weight *= comp->w;
             Color3 base_w                = weight
                             * (Color3(1)
                                - clamp(evaluate_layer_opacity(sg, path_roughness,
@@ -1451,17 +1452,17 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
 }
 
 // recursively walk through the closure tree, creating bsdfs as we go
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
 process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
                      ShadingResult& result, MediumStack& medium_stack,
                      const ClosureColor* closure, const Color3& w,
                      bool light_only)
 {
-    static const ustringhash uh_ggx("ggx");
-    static const ustringhash uh_beckmann("beckmann");
-    static const ustringhash uh_default("default");
+    static constexpr ustringhash uh_ggx(strhash("ggx"));
+    static constexpr ustringhash uh_beckmann(strhash("beckmann"));
+    static constexpr ustringhash uh_default(strhash("default"));
     if (!closure)
-        return;
+        return true;
 
     // Non-recursive traversal stack
     const int STACK_SIZE = 16;
@@ -1650,7 +1651,7 @@ process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
                 case MX_LAYER_ID: {
                     const MxLayerParams* srcparams = comp->as<MxLayerParams>();
                     Color3 base_w
-                        = weight
+                        = cw
                           * (Color3(1, 1, 1)
                              - clamp(evaluate_layer_opacity(sg, path_roughness,
                                                             srcparams->top),
@@ -1678,7 +1679,10 @@ process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
                     break;
                 }
                 }
-#ifndef __CUDACC__
+#if defined(__HIPCC__)
+                if (!ok)
+                    return false;
+#elif !defined(__CUDACC__)
                 OSL_ASSERT(ok && "Invalid closure invoked in surface shader");
 #else
                 // TODO: We should never get here, but we sometimes do, e.g. in
@@ -1695,10 +1699,11 @@ process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
             weight  = weight_stack[stack_idx];
         }
     }
+    return true;
 }
 
 
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
 process_closure(const ShaderGlobalsType& sg, float path_roughness,
                 ShadingResult& result, MediumStack& medium_stack,
                 const ClosureColor* Ci, bool light_only)
@@ -1706,8 +1711,8 @@ process_closure(const ShaderGlobalsType& sg, float path_roughness,
     if (!light_only)
         process_medium_closure(sg, path_roughness, result, medium_stack, Ci,
                                Color3(1));
-    process_bsdf_closure(sg, path_roughness, result, medium_stack, Ci,
-                         Color3(1), light_only);
+    return process_bsdf_closure(sg, path_roughness, result, medium_stack, Ci,
+                                Color3(1), light_only);
 }
 
 OSL_HOSTDEVICE Vec3

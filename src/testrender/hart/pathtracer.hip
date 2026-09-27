@@ -10,6 +10,7 @@
 #include "../../testshade/hart/texture.h"
 #include "../hartpathparams.h"
 #include "../sampling.h"
+#include "material.h"
 #include "trace.h"
 
 #include <OSL/oslclosure.h>
@@ -21,87 +22,6 @@ extern "C" __constant__ OSL::HartPathParams osl_hart_render_params;
 using namespace OSL;
 
 namespace {
-
-struct DiffuseLobe {
-    Color3 weight;
-    Vec3 normal;
-    float probability;
-};
-
-
-
-__device__ bool
-contains(const testshade::HartClosurePool& pool, const void* ptr, size_t bytes)
-{
-    const auto address = reinterpret_cast<uintptr_t>(ptr);
-    const auto base    = reinterpret_cast<uintptr_t>(pool.data);
-    return address >= base && address - base <= pool.used
-           && bytes <= pool.used - (address - base);
-}
-
-
-
-__device__ bool
-collect(const ClosureColor* root, const testshade::HartClosurePool& pool,
-        Color3& emission, DiffuseLobe* lobes, unsigned& num_lobes)
-{
-    struct Pending {
-        const ClosureColor* closure;
-        Color3 weight;
-    };
-    Pending pending[64];
-    unsigned count = 0, visited = 0;
-    if (root)
-        pending[count++] = { root, Color3(1) };
-    num_lobes = 0;
-    emission  = Color3(0);
-    while (count) {
-        const auto current = pending[--count];
-        const auto* node   = current.closure;
-        if (!node)
-            continue;
-        if (++visited > 128 || !contains(pool, node, sizeof(ClosureColor)))
-            return false;
-        if (node->id == ClosureColor::ADD) {
-            if (count + 2 > 64 || !contains(pool, node, sizeof(ClosureAdd)))
-                return false;
-            pending[count++] = { node->as_add()->closureB, current.weight };
-            pending[count++] = { node->as_add()->closureA, current.weight };
-        } else if (node->id == ClosureColor::MUL) {
-            if (count == 64 || !contains(pool, node, sizeof(ClosureMul)))
-                return false;
-            const auto* mul  = node->as_mul();
-            pending[count++] = { mul->closure, current.weight * mul->weight };
-        } else {
-            if ((node->id != 1 && node->id != 3)
-                || !contains(pool, node,
-                             sizeof(ClosureComponent)
-                                 + (node->id == 3 ? sizeof(Vec3) : 0)))
-                return false;
-            const auto* comp = node->as_comp();
-            Color3 weight    = current.weight * comp->w;
-            if (!isfinite(weight.x) || !isfinite(weight.y)
-                || !isfinite(weight.z))
-                return false;
-            if (comp->id == 1) {
-                emission += weight;
-            } else {
-                float probability = fabsf(weight.x) + fabsf(weight.y)
-                                    + fabsf(weight.z);
-                if (!probability)
-                    continue;
-                Vec3 n = *comp->as<Vec3>();
-                if (num_lobes == 32 || !isfinite(n.length2())
-                    || n.length2() <= 0 || !isfinite(probability))
-                    return false;
-                lobes[num_lobes++] = { weight, n.normalized(), probability };
-            }
-        }
-    }
-    return true;
-}
-
-
 
 __device__ void
 globals_from_hit(ShaderGlobals& sg, const Scene& scene, const Ray& ray,
@@ -147,6 +67,7 @@ radiance(const Scene& scene, Ray ray, Sampler& sampler, uint64_t pixel)
     unsigned previous = ~0u;
     alignas(16) unsigned char storage[1024];
     testshade::HartClosurePool pool { storage, sizeof(storage) };
+    MediumStack medium_stack;
     for (unsigned bounce = 0; bounce <= params.max_bounces; ++bounce) {
         auto hit = hart_trace(params.traversable, ray.origin, ray.direction, 0,
                               1.0e30f);
@@ -176,54 +97,60 @@ radiance(const Scene& scene, Ray ray, Sampler& sampler, uint64_t pixel)
             hartDirectCall<void, ShaderGlobals*, void*, void*, void*, int,
                            void*>(material.callable + 1, &sg, group, nullptr,
                                   nullptr, int(pixel), material.interactive);
-        DiffuseLobe lobes[32];
-        unsigned num_lobes = 0;
-        Color3 emission(0);
         if (pool.failed)
             return Color3(0);
-        if (!collect(sg.Ci, pool, emission, lobes, num_lobes)) {
+        ShadingResult shading;
+        if (!hart_valid_closure(sg.Ci, pool)
+            || !process_closure(sg, ray.roughness, shading, medium_stack, sg.Ci,
+                                bounce == params.max_bounces)) {
             atomicOr(params.textures->errors,
                      testshade::HartClosureInvalidTree);
             return Color3(0);
         }
-        result += throughput * emission;
-        if (bounce == params.max_bounces || !num_lobes)
+        result += throughput * shading.Le;
+        if (bounce == params.max_bounces)
             break;
-        float sum = 0;
-        for (unsigned i = 0; i < num_lobes; ++i)
-            sum += lobes[i].probability;
-        if (!isfinite(sum)) {
+        if (!shading.bsdf.prepare(-sg.I, throughput, false)) {
             atomicOr(params.textures->errors,
                      testshade::HartClosureInvalidTree);
             return Color3(0);
         }
-        const Vec3 random  = sampler.get();
-        const float target = random.x * sum;
-        unsigned selected  = 0;
-        float cumulative   = 0;
-        while (selected + 1 < num_lobes
-               && target >= cumulative + lobes[selected].probability)
-            cumulative += lobes[selected++].probability;
-        const float sample_x = fminf((target - cumulative)
-                                         / lobes[selected].probability,
-                                     0.99999994f);
-        Vec3 direction;
-        float pdf;
-        Sampling::sample_cosine_hemisphere(lobes[selected].normal, sample_x,
-                                           random.y, direction, pdf);
-        Color3 eval(0);
-        pdf = 0;
-        for (unsigned i = 0; i < num_lobes; ++i) {
-            const float cosine = fmaxf(0.0f, lobes[i].normal.dot(direction));
-            eval += lobes[i].weight * cosine;
-            pdf += (lobes[i].probability / sum) * cosine;
+        const Vec3 random = sampler.get();
+        const auto sample = shading.bsdf.sample(-sg.I, random.x, random.y,
+                                                random.z);
+        if (isnan(sample.pdf) || sample.pdf < 0) {
+            atomicOr(params.textures->errors,
+                     testshade::HartClosureInvalidTree);
+            return Color3(0);
         }
-        if (pdf <= 0)
+        if (sample.pdf == 0)
             break;
-        throughput *= eval / pdf;
+        if (!isfinite(sample.weight.x) || !isfinite(sample.weight.y)
+            || !isfinite(sample.weight.z) || !isfinite(sample.roughness)
+            || !isfinite(sample.wi.x) || !isfinite(sample.wi.y)
+            || !isfinite(sample.wi.z)) {
+            atomicOr(params.textures->errors,
+                     testshade::HartClosureInvalidTree);
+            return Color3(0);
+        }
+        throughput *= sample.weight;
+        if (!(throughput.x > 0) && !(throughput.y > 0) && !(throughput.z > 0))
+            break;
+        const Vec3 direction = sample.wi;
+        if (sg.Ng.dot(direction) < 0) {
+            if (!sg.backfacing) {
+                if (!medium_stack.add_medium(shading.medium_data)) {
+                    atomicOr(params.textures->errors,
+                             testshade::HartClosureInvalidTree);
+                    return Color3(0);
+                }
+            } else {
+                medium_stack.pop_medium();
+            }
+        }
         ray.radius += ray.spread * hit.t;
-        ray.spread    = fmaxf(ray.spread, 1.0f);
-        ray.roughness = 1;
+        ray.spread    = fmaxf(ray.spread, sample.roughness);
+        ray.roughness = sample.roughness;
         ray.raytype   = Ray::DIFFUSE;
         // Reconstruct on the triangle and move beyond its floating-point
         // uncertainty, including shared edges with a different primitive ID.

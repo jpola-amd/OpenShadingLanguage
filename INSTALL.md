@@ -1333,9 +1333,17 @@ NVIDIA driver. A mixed HART/OptiX build can be validated by compilation only.
 The experimental closure path is separate from ordinary RGB `testshade --hart`
 output. A renderer advertising `HARTClosures` may compile scalar closure values,
 closure connections and `Ci`, using registered `diffuse(N)` and `emission()`
-components, addition, scalar/color multiplication and null closures. Other
-constructors, keyword arguments and host prepare/setup callbacks are rejected
-before optimization; they are not device-callable implementations.
+components, addition, scalar/color multiplication and null closures. Without
+further renderer capabilities, other constructors and keyword arguments are
+rejected before optimization.
+
+A renderer also advertising `HARTClosureParameters` may use its registered
+closures with numeric, scalar string-hash and nested closure parameters.
+Literal registered keyword names may have varying values. HART validates
+registration sizes, alignment, field bounds and types before optimization;
+array fields and host prepare/setup callbacks remain unsupported. The renderer
+must actually consume these device records: this capability does not provide
+an implementation of an arbitrary registered closure.
 
 The test renderer binds a combined `HartRenderState` through `ShaderGlobals`
 `renderstate`. It contains the existing texture descriptor/error state and a
@@ -1397,28 +1405,38 @@ geometry produces an explicit error before acceleration construction.
 Codegen tests verify the device module for every configured architecture.
 Only execution on the selected physical device is runtime evidence.
 
-### Rendering diffuse/emission scenes with HART
+### Rendering surface materials with HART
 
 `testrender --hart scene.xml output.exr` uses the existing XML scene parser,
 triangle meshes, camera and sampling helpers with native HART traversal and
-OSL-generated material callables. It supports `diffuse(N)`, `emission()`,
-closure addition/multiplication, connected materials and the existing raw
-2D HART texture interface. Misses return black. Background shaders,
-displacement, other closure families and diagnostic visualization modes are
-explicitly unsupported in this initial renderer.
+OSL-generated material callables. It reuses the reference renderer's BSDF/BSDL
+implementations for diffuse, Oren-Nayar, Phong, Ward, GGX/Beckmann microfacet,
+reflection/refraction, translucent/transparent, MaterialX diffuse, sheen,
+conductor, dielectric, generalized Schlick, layers and SPI thinlayer surfaces.
+Emission includes `emission()` and MaterialX uniform EDF. Closure parameters
+and keywords, nested closures, connected textured/procedural weights and
+modified shading normals use the same generated callable path.
+MaterialX subsurface uses the reference's diffuse approximation, not a BSSRDF.
 
-The integrator samples diffuse closure mixtures and accumulates emission
-along the resulting paths. It has no next-event light sampling or Russian
-roulette yet. `--hart-bounces N` limits diffuse bounces to 0..64 (default 4);
+The integrator samples BSDF mixtures and accumulates emission along the
+resulting paths, maintaining medium boundary state for dielectric surfaces.
+Misses return black. Background shaders, volume integration, displacement and
+diagnostic visualization modes remain explicitly unsupported. It has no
+next-event light sampling, MIS or Russian roulette yet.
+`--hart-bounces N` limits surface bounces to 0..64 (default 4);
 `-aa N` uses N squared samples per pixel, with N in 1..64. A limit of zero
 shows directly visible emission only. `--no-jitter` fixes primary rays at
-pixel centers while retaining deterministic diffuse sampling.
+pixel centers while retaining deterministic BSDF sampling.
 
 Hit-point ShaderGlobals use real incident rays, interpolated normals/UVs,
 mesh surface areas, camera/ray-cone differentials and camera/diffuse ray
 flags. Secondary ray origins use triangle-scaled offsets to avoid shared-edge
 self-intersections. The bounded 1024-byte closure pool belongs to the raygen
-caller and is reset only after consuming each material. `--hart-fused` selects fused
+caller and is reset only after consuming each material. Closure trees are
+checked for valid records, bounded depth and cycles before reference traversal.
+A separate aligned 1024-byte BSDF arena holds up to 32 lobes, subject to their
+sizes. Invalid closure records, distributions, PDFs and exhausted arenas
+produce device errors rather than partial images. `--hart-fused` selects fused
 callables; `--hart-local-groupdata BYTES` additionally permits bounded
 callable-local storage. Otherwise Groupdata uses per-pixel caller storage.
 Allocation, compilation, launch and device errors fail without writing an
@@ -1426,9 +1444,9 @@ image. This traversal does not implement the OSL `trace()` renderer service.
 
 ```powershell
 cmake --build build\hart-validation --config Release `
-  --target testrender oslc hart_trace_test --parallel 8
+  --target testrender oslc hart_trace_test hart_material_test --parallel 8
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(pathtracer|raytracer)-" --output-on-failure
+  -R "^hart-(pathtracer|raytracer|material)-" --output-on-failure
 ```
 
 The path tests compare connected textured emissive materials and geometry
@@ -1441,6 +1459,22 @@ modes. Groupdata queries verify caller versus callable-local storage rather
 than inferring it from matching pixels. CPU/OptiX renders can use
 `--max-bounces N` to match the HART depth limit; their existing
 default is unchanged.
+
+The material component probe compares unquantized GPU/CPU albedo, BSDF
+evaluation and sampling, PDFs, directions and roughness for 14 cases at three
+inputs. It also checks seven invalid/boundary cases, including cycles,
+truncated records, the 32/33 lobe limit and overflowing PDFs.
+Its float tolerance is `2e-6 + 2e-5*abs(CPU)`; delta PDFs and rejection flags
+have exact checks. Material rendering tests exercise 21 CPU/HART scene pairs
+in all four dispatch/storage modes with direct-light sampling disabled.
+Image comparisons use `3e-5` absolute tolerance or adjacent HALF values:
+`testrender` quantizes output to HALF even for float PFM files. Constant
+reflection/transparent references and zero-bounce output remain exact.
+Invalid runtime distributions must fail without publishing an image.
+Weighted layer records preserve the scaling of explicit closure multiplication,
+including base lobes and opacity. The layered scene also compares CPU OSL 0
+and OSL 2 to catch optimizer-dependent energy changes. Host-only medium scaling
+checks do not imply HART volume-rendering support.
 
 ### Testing external HART device code
 

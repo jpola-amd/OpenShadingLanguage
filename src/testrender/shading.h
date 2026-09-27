@@ -319,7 +319,7 @@ struct BSDF : public AbstractBSDF {
 struct CompositeBSDF {
     OSL_HOSTDEVICE CompositeBSDF() : num_bsdfs(0), num_bytes(0) {}
 
-    OSL_HOSTDEVICE void prepare(const Vec3& wo, const Color3& path_weight,
+    OSL_HOSTDEVICE bool prepare(const Vec3& wo, const Color3& path_weight,
                                 bool absorb)
     {
         float total = 0;
@@ -327,7 +327,11 @@ struct CompositeBSDF {
             pdfs[i] = weights[i].dot(path_weight
                                      * bsdfs[i]->get_albedo_vrtl(wo))
                       / (path_weight.x + path_weight.y + path_weight.z);
-#ifndef __CUDACC__
+#ifdef __HIPCC__
+            if (!std::isfinite(pdfs[i]) || pdfs[i] < 0)
+                return false;
+#endif
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
             // TODO: Figure out what to do with weights/albedos with negative
             //       components (e.g., as might happen when bipolar noise is
             //       used as a color).
@@ -340,6 +344,10 @@ struct CompositeBSDF {
 #endif
             total += pdfs[i];
         }
+#ifdef __HIPCC__
+        if (!std::isfinite(total))
+            return false;
+#endif
         if ((!absorb && total > 0) || total > 1) {
             for (int i = 0; i < num_bsdfs; i++) {
 #ifndef __CUDACC__
@@ -351,6 +359,7 @@ struct CompositeBSDF {
 #endif
             }
         }
+        return true;
     }
 
     OSL_HOSTDEVICE Color3 get_albedo(const Vec3& wo) const
@@ -405,16 +414,19 @@ struct CompositeBSDF {
     template<typename BSDF_Type, typename... BSDF_Args>
     OSL_HOSTDEVICE bool add_bsdf(const Color3& w, BSDF_Args&&... args)
     {
-        // make sure we have enough space
+        static_assert(alignof(BSDF_Type) <= 16,
+                      "The BSDF arena must satisfy each lobe's alignment");
         if (num_bsdfs >= MaxEntries)
             return false;
-        if (num_bytes + sizeof(BSDF_Type) > MaxSize)
+        const int alignment = alignof(BSDF_Type);
+        const int offset    = (num_bytes + alignment - 1) & ~(alignment - 1);
+        if (offset + sizeof(BSDF_Type) > MaxSize)
             return false;
         weights[num_bsdfs] = w;
-        bsdfs[num_bsdfs]   = new (pool + num_bytes)
+        bsdfs[num_bsdfs]   = new (pool + offset)
             BSDF_Type(std::forward<BSDF_Args>(args)...);
         num_bsdfs++;
-        num_bytes += sizeof(BSDF_Type);
+        num_bytes = offset + sizeof(BSDF_Type);
         return true;
     }
 
@@ -426,13 +438,17 @@ private:
     OSL_HOSTDEVICE BSDF::Sample eval(const BSDF* bsdf, const Vec3& wo,
                                      const Vec3& wi) const;
 
+#ifdef __HIPCC__
+    enum { MaxEntries = 32 };
+#else
     enum { MaxEntries = 8 };
+#endif
     enum { MaxSize = 256 * sizeof(float) };
 
     Color3 weights[MaxEntries];
     float pdfs[MaxEntries];
     BSDF* bsdfs[MaxEntries];
-    char pool[MaxSize];
+    alignas(16) char pool[MaxSize];
     int num_bsdfs, num_bytes;
 };
 
@@ -737,7 +753,7 @@ struct ShadingResult {
 
 void
 register_closures(ShadingSystem* shadingsys);
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
 process_closure(const OSL::ShaderGlobals& sg, float path_roughness,
                 ShadingResult& result, MediumStack& medium_stack,
                 const ClosureColor* Ci, bool light_only);

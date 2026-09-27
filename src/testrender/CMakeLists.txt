@@ -100,6 +100,8 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
     list (APPEND hart_path_includes
           "${PROJECT_SOURCE_DIR}/src/include" "${PROJECT_BINARY_DIR}/include"
           ${IMATH_INCLUDES} ${OpenImageIO_INCLUDES})
+    get_target_property (hart_bsdl_includes BSDL INTERFACE_INCLUDE_DIRECTORIES)
+    list (APPEND hart_path_includes ${hart_bsdl_includes})
     list (REMOVE_DUPLICATES hart_path_includes)
     set (hart_path_declarations "")
     set (hart_path_entries "")
@@ -136,6 +138,47 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
     target_include_directories (testrender PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     osl_hart_target (testrender)
     osl_hart_runtime_target (testrender)
+    if (BUILD_TESTING)
+        set (hart_material_declarations "")
+        set (hart_material_entries "")
+        set (hart_material_sources)
+        foreach (arch IN LISTS hart_path_architectures)
+            MAKE_HART_BITCODE ("hart/material_test.hip" "_hart_${arch}" "${arch}"
+                              material_bc "" "${hart_path_includes}")
+            set (symbol "osl_hart_material_test_${arch}")
+            set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/material_test.bc.cpp")
+            MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${material_bc}")
+            list (APPEND hart_material_sources "${embedded}")
+            string (APPEND hart_material_declarations
+                "extern unsigned char ${symbol}_block[];\nextern int ${symbol}_size;\n")
+            string (APPEND hart_material_entries
+                "    { \"${arch}\", ${symbol}_block, &${symbol}_size },\n")
+            add_test (NAME hart-material-codegen-${arch}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}" "-DBITCODE_FILE=${material_bc}"
+                    "-DARCH=${arch}" "-DRAYGEN=__raygen__osl_hart_material_test"
+                    -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-raytracer-bitcode.cmake")
+        endforeach ()
+        file (WRITE "${CMAKE_CURRENT_BINARY_DIR}/hart_material_bitcode.h"
+            "${hart_material_declarations}"
+            "struct HartMaterialModule { const char* arch; const unsigned char* data; const int* size; };\n"
+            "static const HartMaterialModule hart_material_modules[] = {\n"
+            "${hart_material_entries}};\n")
+        add_executable (hart_material_test hart_material_test.cpp hartcontext.cpp
+                        ${hart_material_sources})
+        target_include_directories (hart_material_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+        target_include_directories (hart_material_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+        target_link_libraries (hart_material_test PRIVATE oslexec BSDL)
+        osl_hart_target (hart_material_test)
+        osl_optix_target (hart_material_test)
+        osl_hart_runtime_target (hart_material_test)
+        set_target_properties (hart_material_test PROPERTIES FOLDER "Unit Tests")
+        if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+            add_test (NAME hart-material-components COMMAND hart_material_test)
+            set_tests_properties (hart-material-components PROPERTIES
+                                  LABELS "gpu;hart" RUN_SERIAL TRUE)
+        endif ()
+    endif ()
     if (BUILD_TESTING AND "$ENV{TESTSUITE_HART}" STREQUAL "1")
         foreach (mode split fused fused-local unoptimized)
             add_test (NAME hart-pathtracer-${mode}
@@ -144,6 +187,13 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testrender>" "$<TARGET_FILE:oslc>"
                     "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}")
             set_tests_properties (hart-pathtracer-${mode} PROPERTIES
+                                  LABELS "gpu;hart" RUN_SERIAL TRUE)
+            add_test (NAME hart-material-render-${mode}
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-pathtracer.py"
+                    "$<TARGET_FILE:testrender>" "$<TARGET_FILE:oslc>"
+                    "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}" --materials)
+            set_tests_properties (hart-material-render-${mode} PROPERTIES
                                   LABELS "gpu;hart" RUN_SERIAL TRUE)
         endforeach ()
     endif ()
