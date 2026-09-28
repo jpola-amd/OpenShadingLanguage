@@ -302,7 +302,12 @@ def testshade (args) :
 # appending output to the file "out.txt".
 def testrender (args) :
     os.environ["optix_log_level"] = "0"
-    return (osl_app("testrender") + " " + hart_command_options()
+    options = hart_command_options()
+    if options :
+        # Use the native limit instead of the four-bounce preview default.
+        # Explicit scene max_bounces options still take precedence.
+        options += "--hart-bounces 64 "
+    return (osl_app("testrender") + " " + options
             + args + redirect + " ;\n")
 
 

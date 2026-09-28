@@ -7,6 +7,9 @@
 failthresh = 0.01
 failpercent = 1
 outputs = [ "out.exr" ]
+# Keep the fixture's explicit LLVM level in HART variants too.
+if int(os.environ.get('TESTSHADE_HART') or 0) :
+    os.environ.pop("TESTSHADE_LLVM_OPT", None)
 command = testrender("-r 128 128 -aa 4 --llvm_opt 12 cornell.xml out.exr")
 
 # Note: we pick this test arbitrarily as the one to verify llvm_opt=12 works

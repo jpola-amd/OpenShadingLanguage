@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
-"""Exercise the real runner's exclusive CPU/HART/OSL0/fused references."""
+"""Exercise the real runner's references and native-render options."""
 
 import os
 from pathlib import Path
@@ -16,9 +16,9 @@ root = Path.cwd() / ("hart-references-" + uuid.uuid4().hex)
 source = root / "source"
 source.mkdir(parents=True)
 (source / "ref").mkdir()
-for name, text in (("out.txt", "cpu"), ("out-hart.txt", "gpu"),
-                   ("out-noopt-hart.txt", "noopt"),
-                   ("out-fused-hart.txt", "fused")):
+references = (("out.txt", "cpu"), ("out-hart.txt", "gpu"),
+              ("out-noopt-hart.txt", "noopt"), ("out-fused-hart.txt", "fused"))
+for name, text in references:
     (source / "ref" / name).write_text(text + "\n", encoding="ascii")
 emitter = root / "emit.py"
 emitter.write_text(
@@ -37,7 +37,7 @@ env = os.environ.copy()
 env.update(OSL_SOURCE_DIR=str(testsuite.parent),
            OSL_TESTSUITE_ROOT=str(testsuite), OSL_TESTSUITE_SRC=str(source),
            TESTSUITE_CLEANUP_ON_SUCCESS="0", TESTSHADE_OPTIX="0",
-           TESTSHADE_FUSED="0")
+           TESTSHADE_FUSED="0", TESTSHADE_BATCHED="0", TESTSHADE_RS_BITCODE="0")
 env.pop("OSL_REGRESSION_TEST", None)
 success = False
 try:
@@ -96,6 +96,56 @@ try:
         output = result.stdout + result.stderr
         assert result.returncode == (0 if matches else 1), output
         assert ("PASS: " if matches else "NO MATCH for  out.txt") in output, output
+    for name, text in references:
+        (source / "ref" / name).write_text(text + "\n", encoding="ascii")
+    native_cases = [(hart, fused, None, 0)
+                    for hart in (0, 1) for fused in (0, 1)]
+    native_cases += [(hart, 0, fixture, level) for hart in (0, 1)
+                     for fixture, level in (("render-bumptest", 13),
+                                             ("render-cornell", 12))]
+    for i, (hart, fused, fixture, level) in enumerate(native_cases):
+        lines = ["compile_osl_files = False", "relative_source_paths = False"]
+        if fixture:
+            fixture_path = str(testsuite / fixture / "run.py")
+            lines += [
+                f"with open({fixture_path!r}, encoding='utf-8') as fixture:",
+                f"    exec(compile(fixture.read(), {fixture_path!r}, 'exec'))",
+                "native_command = command",
+                f"assert '--llvm_opt {level}' in native_command",
+                f"assert os.environ.get('TESTSHADE_LLVM_OPT') == "
+                f"{None if hart else '3'!r}",
+            ]
+        else:
+            lines += ["native_command = testrender('scene.xml out.exr')"]
+            if hart:
+                lines += [
+                    "override = testrender('--hart-bounces 7 scene.xml out.exr')",
+                    "assert override.index('--hart-bounces 64') "
+                    "< override.index('--hart-bounces 7')",
+                ]
+        lines += [
+            f"assert native_command.count('--hart-bounces 64') == {hart}",
+            f"assert ('--hart ' in native_command) == {bool(hart)!r}",
+            f"assert ('--hart-fused ' in native_command) == "
+            f"{bool(hart and fused)!r}",
+            "assert os.environ['TESTSHADE_OPT'] == '2'",
+            f"assert os.environ['TESTSHADE_FUSED'] == {str(fused)!r}",
+            "outputs = ['out.txt']",
+            "command = " + repr(command),
+        ]
+        (source / "run.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        work = root / ("native-" + str(i))
+        work.mkdir()
+        wanted = "cpu" if not hart else "fused" if fused else "gpu"
+        child_env = dict(env, TESTSHADE_HART=str(hart), TESTSHADE_OPT="2",
+                         TESTSHADE_FUSED=str(fused), TESTSHADE_LLVM_OPT="3",
+                         REFERENCE_PAYLOAD=wanted)
+        result = subprocess.run(
+            [sys.executable, str(testsuite / "runtest.py"), str(work)],
+            cwd=root, env=child_env, capture_output=True, text=True, timeout=30,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode == 0 and "PASS: " in output, output
     success = True
 finally:
     if success:
@@ -103,4 +153,4 @@ finally:
     else:
         print("Reference-selection failure artifacts retained in", root, flush=True)
 
-print("57 actual runner cases passed: exclusive references and scoped source paths")
+print("65 actual runner cases passed: references, source paths and native options")

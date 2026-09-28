@@ -1245,6 +1245,35 @@ text comparison removes only the current test directory prefix from HART
 source paths. Filenames, line numbers, point indices and payloads remain checked,
 and the raw diagnostic output is unchanged.
 
+The standard native-render fixtures also opt into HART. Existing
+`OPTIX_OPTIMIZEONLY` markers retain their GPU optimization restriction.
+The bump and Cornell fixtures preserve their explicit LLVM modes 13 and 12
+while still exercising the selected OSL optimization and dispatch mode.
+The runner selects `--hart-bounces 64`, rather than the four-bounce preview
+default; explicit scene `max_bounces` settings still take precedence.
+The native HART limit remains 64, not the CPU renderer's larger default.
+
+Image references use the same exclusive naming convention, for example
+`out-hart.exr`. CPU and OptiX never consume HART references. Backend-specific
+images are qualified by visual equivalence with identical display conversion
+and exposure, retaining finite/nonblack output, geometry/material/lighting
+checks and independent analytic tests. Pixel differences are diagnostic data,
+not an expectation of CPU/GPU bit identity; existing comparison thresholds
+and CPU/OptiX references remain unchanged.
+
+For an enabled HART build, a core development smoke and the extended selection
+can be run separately:
+
+```powershell
+ctest --test-dir build\hart-validation -C Release --output-on-failure `
+  -R "^(hart-(codegen-gfx1201|generated-cli|reference-selection|generated-runtime)|render-cornell\.hart\.fused)$"
+ctest --test-dir build\hart-validation -C Release --output-on-failure -j 1 `
+  -R "^hart-|\.hart(\.|$)"
+```
+
+The extended selection includes all configured compiler architectures and the
+longer numeric, spline, material and resource tests, not just the smoke set.
+
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
 which compares arithmetic, `sin(u+v)`, and straight-line and conditional
 two-layer groups

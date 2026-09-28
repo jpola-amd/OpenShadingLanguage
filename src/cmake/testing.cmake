@@ -261,7 +261,9 @@ macro ( TESTSUITE )
         if (OSL_USE_HART AND USE_LLVM_BITCODE
             AND "$ENV{TESTSUITE_HART}" STREQUAL "1"
             AND EXISTS "${_testsrcdir}/HART")
-            if (NOT EXISTS "${_testsrcdir}/OPTIMIZEONLY")
+            # Preserve the original GPU optimized-only fixture restrictions.
+            if (NOT EXISTS "${_testsrcdir}/OPTIMIZEONLY"
+                AND NOT EXISTS "${_testsrcdir}/OPTIX_OPTIMIZEONLY")
                 add_one_testsuite ("${_testname}.hart" "${_testsrcdir}"
                                    ENV TESTSHADE_HART=1 TESTSHADE_OPT=0
                                        TESTSHADE_LLVM_OPT=10 TESTSHADE_FUSED=0)
