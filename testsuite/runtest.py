@@ -371,6 +371,11 @@ def runtest (command, outputs, failureok=0, failthresh=0, failpercent=0, regress
                 testfiles = ["ref/"+out] + glob.glob (os.path.join ("ref", "*"+extension))
                 hartref = os.path.join("ref", os.path.splitext(out)[0]
                                        + "-hart" + extension)
+                hart_noopt_ref = os.path.join("ref", os.path.splitext(out)[0]
+                                              + "-noopt-hart" + extension)
+                if (os.environ.get('TESTSHADE_OPT') == "0"
+                        and os.path.isfile(hart_noopt_ref)) :
+                    hartref = hart_noopt_ref
                 if (int(os.environ.get('TESTSHADE_HART') or 0)
                         and os.path.isfile(hartref)) :
                     testfiles = [hartref]

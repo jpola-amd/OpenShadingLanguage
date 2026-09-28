@@ -291,6 +291,10 @@ passes verified AMDGPU bitcode and the generated init/entry names to HART.
 `--inbuffer` uses the existing source-buffer compiler and memory-loaded shader
 API for each named layer; it does not require or write `.oso` files. A missing
 or invalid `.osl` source is an error even if a compiled file exists.
+Serialized `--group` (or `-group`) specifications use the same inline-string
+or file parser as CPU testshade. `--oslquery` prints the actual group
+serialization, layers and parameter types before optimization; `-v` also
+prints group serialization and layer names.
 The renderer embeds a separate raygen module for every configured
 architecture; execution does not read device code from build-tree paths.
 Each point receives real `ShaderGlobals` and separately aligned group
@@ -1194,6 +1198,9 @@ The runner rejects conflicting backend selections rather than falling back
 to CPU. A dedicated `out-hart.txt` reference is backend-exclusive and can
 preserve HART's existing shader/source/point diagnostic prefix; CPU references
 are not changed or accepted in its place.
+An optional `out-noopt-hart.txt` is exclusive to the OSL 0 variant when
+optimization legitimately changes executed diagnostics; it cannot fall back
+to the optimized reference.
 
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
 which compares arithmetic, `sin(u+v)`, and straight-line and conditional

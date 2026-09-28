@@ -827,6 +827,9 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("-od %s:FORMAT", &format);
     ap.arg("--center");
     ap.arg("--inbuffer");
+    ap.arg("--oslquery");
+    ap.arg("--group %s:GROUPSPEC")
+      .action([&](cspan<const char*>) { has_shader = true; });
     ap.arg("--groupname %s:NAME");
     ap.arg("--layer %s:NAME");
     ap.arg("--entry %s:LAYERNAME");

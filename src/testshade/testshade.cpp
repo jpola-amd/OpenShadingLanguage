@@ -639,13 +639,21 @@ action_groupspec(cspan<const char*> argv)
     if (OIIO::Filesystem::exists(groupspec)) {
         // If it names a file, use the contents of the file as the group
         // specification.
-        OIIO::Filesystem::read_text_file(groupspec, groupspec);
+        if (!OIIO::Filesystem::read_text_file(groupspec, groupspec)) {
+            ErrorHandler::default_handler().errorfmt(
+                "Could not read shader group '{}'", argv[1]);
+            exit(EXIT_FAILURE);
+        }
     }
     set_shadingsys_options();
     if (verbose)
         std::cout << "Processing group specification:\n---\n"
                   << groupspec << "\n---\n";
     shadergroup = shadingsys->ShaderGroupBegin(groupname, "surface", groupspec);
+    if (!shadergroup) {
+        ErrorHandler::default_handler().errorfmt("Invalid shader group");
+        exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -2166,6 +2174,37 @@ test_shade(int argc, const char* argv[])
     // End the group
     shadingsys->ShaderGroupEnd(*shadergroup);
 
+    if (verbose || do_oslquery) {
+        std::string pickle;
+        shadingsys->getattribute(shadergroup.get(), "pickle", pickle);
+        std::cout << "Shader group:\n---\n" << pickle << "\n---\n";
+        std::cout << "\n";
+        ustring groupname;
+        shadingsys->getattribute(shadergroup.get(), "groupname", groupname);
+        std::cout << "Shader group \"" << groupname << "\" layers are:\n";
+        int num_layers = 0;
+        shadingsys->getattribute(shadergroup.get(), "num_layers", num_layers);
+        if (num_layers > 0) {
+            std::vector<const char*> layers(size_t(num_layers), NULL);
+            shadingsys->getattribute(shadergroup.get(), "layer_names",
+                                     TypeDesc(TypeDesc::STRING, num_layers),
+                                     &layers[0]);
+            for (int i = 0; i < num_layers; ++i) {
+                std::cout << "    " << (layers[i] ? layers[i] : "<unnamed>")
+                          << "\n";
+                if (do_oslquery) {
+                    OSLQuery q = shadingsys->oslquery(*shadergroup, i);
+                    for (size_t p = 0; p < q.nparams(); ++p) {
+                        const OSLQuery::Parameter* param = q.getparam(p);
+                        std::cout << "\t" << (param->isoutput ? "output " : "")
+                                  << param->type << ' ' << param->name << "\n";
+                    }
+                }
+            }
+        }
+        std::cout << "\n";
+    }
+
 #if OSL_TESTSHADE_HART
     if (use_hart) {
         setup_transformations(*rend, Mshad, Mobj);
@@ -2198,36 +2237,6 @@ test_shade(int argc, const char* argv[])
     }
 #endif
 
-    if (verbose || do_oslquery) {
-        std::string pickle;
-        shadingsys->getattribute(shadergroup.get(), "pickle", pickle);
-        std::cout << "Shader group:\n---\n" << pickle << "\n---\n";
-        std::cout << "\n";
-        ustring groupname;
-        shadingsys->getattribute(shadergroup.get(), "groupname", groupname);
-        std::cout << "Shader group \"" << groupname << "\" layers are:\n";
-        int num_layers = 0;
-        shadingsys->getattribute(shadergroup.get(), "num_layers", num_layers);
-        if (num_layers > 0) {
-            std::vector<const char*> layers(size_t(num_layers), NULL);
-            shadingsys->getattribute(shadergroup.get(), "layer_names",
-                                     TypeDesc(TypeDesc::STRING, num_layers),
-                                     &layers[0]);
-            for (int i = 0; i < num_layers; ++i) {
-                std::cout << "    " << (layers[i] ? layers[i] : "<unnamed>")
-                          << "\n";
-                if (do_oslquery) {
-                    OSLQuery q = shadingsys->oslquery(*shadergroup, i);
-                    for (size_t p = 0; p < q.nparams(); ++p) {
-                        const OSLQuery::Parameter* param = q.getparam(p);
-                        std::cout << "\t" << (param->isoutput ? "output " : "")
-                                  << param->type << ' ' << param->name << "\n";
-                    }
-                }
-            }
-        }
-        std::cout << "\n";
-    }
     if (archivegroup.size())
         shadingsys->archive_shadergroup(shadergroup.get(), archivegroup);
 
