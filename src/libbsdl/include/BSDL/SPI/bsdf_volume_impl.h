@@ -84,9 +84,9 @@ VolumeLobe<BSDF_ROOT>::sample_phase(float g1, float g2, float blend,
         cosTheta = (1 + g * g - k * k) / (2 * g);
     }
     float sinTheta = sqrtf(MAX(0.0f, 1.0f - cosTheta * cosTheta));
-    float phi      = 2 * sample.y;
-    float cosPhi   = BSDLConfig::Fast::cospif(phi);
-    float sinPhi   = BSDLConfig::Fast::sinpif(phi);
+    float cosPhi, sinPhi;
+    // Coarse sinpi/cospi approximations produce non-unit ray directions.
+    BSDLConfig::Fast::sincosf(2 * PI * sample.y, &sinPhi, &cosPhi);
     return { sinTheta * cosPhi, sinTheta * sinPhi, cosTheta };
 }
 

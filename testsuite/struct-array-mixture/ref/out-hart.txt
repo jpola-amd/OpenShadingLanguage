@@ -1,0 +1,43 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:108, point 0): Using a D directly in main:
+HART shader 'test' (test.osl:112, point 0): d.c.bs[0].a.i = 0
+HART shader 'test' (test.osl:112, point 0): d.c.bs[1].a.i = 1
+HART shader 'test' (test.osl:112, point 0): d.c.bs[2].a.i = 2
+HART shader 'test' (test.osl:112, point 0): d.c.bs[3].a.i = 3
+HART shader 'test' (test.osl:112, point 0): d.c.bs[4].a.i = 4
+HART shader 'test' (test.osl:113, point 0): 
+HART shader 'test' (test.osl:81, point 0): passing a ref to a D:
+HART shader 'test' (test.osl:91, point 0): d.c.bs[0].a.i = 0
+HART shader 'test' (test.osl:91, point 0): d.c.bs[1].a.i = 1
+HART shader 'test' (test.osl:91, point 0): d.c.bs[2].a.i = 2
+HART shader 'test' (test.osl:91, point 0): d.c.bs[3].a.i = 3
+HART shader 'test' (test.osl:91, point 0): d.c.bs[4].a.i = 4
+HART shader 'test' (test.osl:92, point 0): 
+HART shader 'test' (test.osl:63, point 0): passing a ref to a C:
+HART shader 'test' (test.osl:73, point 0): c.bs[0].a.i = 0
+HART shader 'test' (test.osl:73, point 0): c.bs[1].a.i = 3
+HART shader 'test' (test.osl:73, point 0): c.bs[2].a.i = 6
+HART shader 'test' (test.osl:73, point 0): c.bs[3].a.i = 9
+HART shader 'test' (test.osl:73, point 0): c.bs[4].a.i = 12
+HART shader 'test' (test.osl:74, point 0): 
+HART shader 'test' (test.osl:45, point 0): passing a ref to a B[]:
+HART shader 'test' (test.osl:55, point 0): bs[0].a.i = 0
+HART shader 'test' (test.osl:55, point 0): bs[1].a.i = 4
+HART shader 'test' (test.osl:55, point 0): bs[2].a.i = 8
+HART shader 'test' (test.osl:55, point 0): bs[3].a.i = 12
+HART shader 'test' (test.osl:55, point 0): bs[4].a.i = 16
+HART shader 'test' (test.osl:56, point 0): 
+HART shader 'test' (test.osl:29, point 0): passing a ref to a B:
+HART shader 'test' (test.osl:37, point 0): b.a.i = 4
+HART shader 'test' (test.osl:38, point 0): 
+HART shader 'test' (test.osl:129, point 0): Testing assignment of the whole nested structure:
+HART shader 'test' (test.osl:81, point 0): passing a ref to a D:
+HART shader 'test' (test.osl:91, point 0): d.c.bs[0].a.i = 0
+HART shader 'test' (test.osl:91, point 0): d.c.bs[1].a.i = 1
+HART shader 'test' (test.osl:91, point 0): d.c.bs[2].a.i = 2
+HART shader 'test' (test.osl:91, point 0): d.c.bs[3].a.i = 3
+HART shader 'test' (test.osl:91, point 0): d.c.bs[4].a.i = 4
+HART shader 'test' (test.osl:92, point 0): 
+HART shader 'test' (test.osl:135, point 0): Testing writing to the innermost struct through function call:
+HART shader 'test' (test.osl:137, point 0):   before: d.c.bs[0].a.i = 0
+HART shader 'test' (test.osl:139, point 0):   after:  d.c.bs[0].a.i = 42

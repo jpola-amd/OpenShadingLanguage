@@ -1,0 +1,25 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_loop(float value = 42, int count = -1, int reuse = 0,
+                 output color Cout = 0)
+{
+    int n = count;
+    if (n < 0) {
+        n = 1;
+        if (u > v)
+            n = 4;
+        else if (u < v)
+            n = 0;
+    }
+    float sum = 0;
+    int i = 0;
+    while (i < n) {
+        sum += sin(value + i);
+        i += 1;
+    }
+    Cout = color(u, v, sum);
+    if (reuse)
+        Cout[0] = value;
+}

@@ -1,0 +1,12 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_branch_reuse(float value = 42, output color Cout = 0)
+{
+    if (u > v)
+        Cout = color(sin(value), v, 0);
+    else
+        Cout = color(0, v, 0);
+    Cout[2] = value;
+}

@@ -1,0 +1,13 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:10, point 0): int:
+HART shader 'test' (test.osl:13, point 0):   a = 0
+HART shader 'test' (test.osl:15, point 0):   after b = ++a, a = 1, b = 1
+HART shader 'test' (test.osl:17, point 0):   after b = --a, a = 0, b = 0
+HART shader 'test' (test.osl:19, point 0):   after b = a++, a = 1, b = 0
+HART shader 'test' (test.osl:21, point 0):   after b = a--, a = 0, b = 1
+HART shader 'test' (test.osl:27, point 0): float:
+HART shader 'test' (test.osl:30, point 0):   a = 0
+HART shader 'test' (test.osl:32, point 0):   after b = ++a, a = 1, b = 1
+HART shader 'test' (test.osl:34, point 0):   after b = --a, a = 0, b = 0
+HART shader 'test' (test.osl:36, point 0):   after b = a++, a = 1, b = 0
+HART shader 'test' (test.osl:38, point 0):   after b = a--, a = 0, b = 1

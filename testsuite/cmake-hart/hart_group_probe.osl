@@ -1,0 +1,27 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_group_probe(float scalar = 0, color tint = 0,
+                        point position = point(0), vector direction = vector(0),
+                        normal orientation = normal(0), matrix basis = matrix(1),
+                        output color Cout = 0)
+{
+    // Distinct weights expose swapped ports while keeping every type live.
+    // Matrix values contribute to the result but not its derivatives.
+    color result = 0.0625 * color(
+        scalar + 2 * tint[0] + 4 * position[0] + 8 * direction[0]
+        + 16 * orientation[0] + basis[3][0],
+        scalar + 2 * tint[1] + 4 * position[1] + 8 * direction[1]
+        + 16 * orientation[1] + basis[3][1],
+        scalar + 2 * tint[2] + 4 * position[2] + 8 * direction[2]
+        + 16 * orientation[2]
+        + basis[0][0] + basis[1][1]);
+    int component = int(u >= 0.25) + int(u >= 0.75);
+    float sample = result[0];
+    if (component == 1)
+        sample = result[1];
+    else if (component == 2)
+        sample = result[2];
+    Cout = color(sample, Dx(sample), Dy(sample));
+}

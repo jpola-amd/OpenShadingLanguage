@@ -1,0 +1,11 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_noise_dynamic(output color Cout = 0)
+{
+    string name = "perlin";
+    if (u > v)
+        name = "cell";
+    Cout = noise(name, P);
+}

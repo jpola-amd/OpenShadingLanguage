@@ -1,0 +1,4 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:10, point 0):   isnan (10) = 0
+HART shader 'test' (test.osl:11, point 0):   isinf (10) = 0
+HART shader 'test' (test.osl:12, point 0):   isfinite (10) = 1

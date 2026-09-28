@@ -1,0 +1,36 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_geometry_globals(output color Cout = 0)
+{
+    int field = min(int(12 * v), 11);
+    vector q = I + vector(u, v, u * v);
+    if (field == 0)
+        Cout = color(I);
+    else if (field == 1)
+        Cout = color(Dx(I));
+    else if (field == 2)
+        Cout = color(Dy(I));
+    else if (field == 3)
+        Cout = color(filterwidth(I));
+    else if (field == 4)
+        Cout = color(time, Dx(time), Dy(time));
+    else if (field == 5)
+        Cout = color(filterwidth(time), 0, 0);
+    else if (field == 6)
+        Cout = color(q);
+    else if (field == 7)
+        Cout = color(Dx(q));
+    else if (field == 8)
+        Cout = color(Dy(q));
+    else if (field == 9)
+        Cout = color(filterwidth(q));
+    else if (field == 10) {
+        float timed = u * (1 + time) + v;
+        Cout = color(timed, Dx(timed), Dy(timed));
+    } else {
+        float mixed = u * v + dot(I, vector(u, v, 1)) + time * (u + v);
+        Cout = color(mixed, Dx(mixed), Dy(mixed));
+    }
+}

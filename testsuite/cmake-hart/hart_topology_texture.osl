@@ -1,0 +1,25 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_topology_texture(int side = 0, int mode = 0, output float value = 0)
+{
+    int take_left = u > v;
+    if (mode == 1)
+        take_left = 1;
+    else if (mode == 2)
+        take_left = 0;
+    else if (mode == 3)
+        take_left = u == v;
+    float s = side == 0 ? 0.125 + 0.5 * u : 0.25 + 0.5 * v;
+    float t = 0.25 + 0.25 * (u + v);
+    // A texture error is observable if an unselected producer runs eagerly.
+    // Keep the overflow dependent on u so it is not a compile-time constant.
+    if (side == 0) {
+        if (!take_left)
+            s = 3.0e38 * (2 + u);
+    } else if (take_left)
+        s = 3.0e38 * (2 + u);
+    value = texture("hart_texture_rgb.pfm", s, t,
+                    "interp", "linear", "wrap", "clamp");
+}

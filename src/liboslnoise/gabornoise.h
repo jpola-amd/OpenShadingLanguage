@@ -187,7 +187,16 @@ wrap(float s, float period)
     period = floorf(period);
     if (period < 1.0f)
         period = 1.0f;
+#if defined(__HIP_DEVICE_COMPILE__)
+    // Reciprocal approximation can cross an integer boundary before floor.
+    // Use a true remainder, including when the quotient is very large.
+    float remainder = fmodf(s, period);
+    if (remainder < 0.0f)
+        remainder += period;
+    return remainder;
+#else
     return s - period * floorf(s / period);
+#endif
 }
 
 

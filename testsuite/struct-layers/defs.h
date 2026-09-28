@@ -7,6 +7,10 @@ struct coords {
     float s, t;
 };
 
+struct coords_packet {
+    coords values[2];
+};
+
 struct shading_result {
    closure color Cout;
    color Copac;

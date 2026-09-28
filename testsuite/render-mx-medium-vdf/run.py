@@ -7,6 +7,7 @@
 failthresh = 0.01
 failpercent = 1
 
+# The volume-win reference uses unit phase directions and robust boundary offsets.
 outputs = [ "out.exr", "out_layer_weight.exr" ]
 command = testrender("-v -r 98 98 -aa 32 scene.xml out.exr")
 command += testrender(

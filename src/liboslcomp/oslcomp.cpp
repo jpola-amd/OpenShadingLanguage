@@ -787,7 +787,7 @@ OSLCompilerImpl::write_oso_symbol(const Symbol* sym)
     // %struct, %structfields, and %structfieldtypes document the
     // definition of a structure and which other symbols comprise the
     // individual fields.
-    if (sym->typespec().is_structure()) {
+    if (sym->typespec().is_structure_based()) {
         const StructSpec* structspec(sym->typespec().structspec());
         std::string fieldlist, signature;
         for (int i = 0; i < (int)structspec->numfields(); ++i) {

@@ -15,11 +15,11 @@
 #include <vector>
 
 // Pull in the modified Imath headers and the OSL_HOSTDEVICE macro
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP__)
 #    include <OSL/oslconfig.h>
 #endif
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP__)
 #    include <OSL/hashes.h>
 #endif
 
@@ -87,6 +87,9 @@ optix_cache_unwrap(string_view cache_value, std::string& ptx,
                    size_t& groupdata_size);
 std::string
 optix_cache_wrap(string_view ptx, size_t groupdata_size);
+
+bool
+hart_supports_noise(ustring name, bool periodic);
 
 // forward definitions
 class ShadingSystemImpl;
@@ -667,6 +670,10 @@ public:
     TextureSystem* texturesys() const { return m_texturesys; }
 
     bool use_optix() const { return m_use_optix; }
+    bool use_hart() const { return m_use_hart; }
+    bool use_gpu() const { return use_optix() || use_hart(); }
+    const std::string& hart_arch() const { return m_hart_arch; }
+    bool validate_hart_group(const ShaderGroup& group);
     bool use_optix_cache() const { return m_use_optix_cache; }
     bool debug_nan() const { return m_debugnan; }
     bool debug_uninit() const { return m_debug_uninit; }
@@ -782,6 +789,7 @@ public:
 
 
     OSLEXECPUBLIC int raytype_bit(ustring name);
+    cspan<ustring> raytypes() const { return m_raytypes; }
 
     void optimize_all_groups(int nthreads = 0, int mythread = 0,
                              int totalthreads = 1, bool do_jit = true);
@@ -1015,6 +1023,9 @@ private:
     int m_max_local_mem_KB;  ///< Local storage can a shader use
     int m_compile_report;    ///< Print compilation report?
     bool m_use_optix;        ///< This is an OptiX-based renderer
+    bool m_use_hart;         ///< This is a HART-based renderer
+    std::string m_hart_arch;
+    int m_max_hart_groupdata_alloc = 0;
     bool m_use_optix_cache;  ///< Renderer-enabled caching for OptiX ptx
     int m_max_optix_groupdata_alloc;  ///< Maximum OptiX groupdata buffer allocation
     bool m_buffer_printf;             ///< Buffer/batch printf output?
@@ -1498,7 +1509,7 @@ public:
         return (
             symbols().size() == 0
             && (ops().size() == 0 ||
-#ifdef __CUDA_ARCH__
+#if OSL_GPU_DEVICE
                 // TODO: is this ever run on a device, why special case it?
                 (ops().size() == 1
                  && ustringhash_from(OSL::strhash(ops()[0].opname().c_str()))
@@ -1511,6 +1522,8 @@ public:
 
     /// Make our own version of the code and args from the master.
     void copy_code_from_master(ShaderGroup& group);
+    bool validate_hart() const;
+    bool hart_texture_filename(const Symbol& sym, ustring& filename) const;
 
     /// Check the params to re-assess writes_globals and userdata_params.
     /// Sorry, can't think of a short name that isn't too cryptic.
@@ -2038,6 +2051,11 @@ public:
     // live with the group and copy the initial data.
     void setup_interactive_arena(cspan<uint8_t> paramblock);
 
+    bool upload_hart_interactive(size_t offset, cspan<uint8_t> data);
+
+    void invalidate_device_interactive_arena()
+    { m_device_interactive_arena_valid = false; }
+
     uint8_t* interactive_arena_ptr() { return m_interactive_arena.get(); }
 
     device_ptr<uint8_t>& device_interactive_arena()
@@ -2090,6 +2108,7 @@ private:
     volatile int m_batch_jitted
         = 0;  ///< Is it already jitted for batch execution?
     size_t m_llvm_groupdata_size = 0;  ///< Heap size needed for its groupdata
+    int m_llvm_groupdata_alignment = 1;
     size_t m_llvm_groupdata_wide_size
         = 0;                     ///< Heap size needed for its wide groupdata
     int m_id;                    ///< Unique ID for the group
@@ -2143,6 +2162,9 @@ private:
 
     // PTX assembly for compiled ShaderGroup
     std::string m_llvm_ptx_compiled_version;
+    std::string m_hart_bitcode;
+    std::vector<int> m_hart_entry_layers;
+    int m_hart_groupdata_alloc = 0;
 
     ParamValueList m_pending_params;          // Pending Parameter() values
     std::vector<ParamHints> m_pending_hints;  // ParamHints of pending params
@@ -2156,6 +2178,7 @@ private:
     std::unique_ptr<uint8_t[]> m_interactive_arena;
     size_t m_interactive_arena_size = 0;
     device_ptr<uint8_t> m_device_interactive_arena;
+    bool m_device_interactive_arena_valid = true;
 
     friend class OSL::pvt::ShadingSystemImpl;
     friend class OSL::pvt::BackendLLVM;
@@ -2592,7 +2615,7 @@ tex_interp_to_code(ustringhash modename)
     return mode;
 }
 
-#ifndef __CUDACC__
+#if !OSL_GPU_COMPILER
 inline int
 tex_interp_to_code(ustring modename)
 {

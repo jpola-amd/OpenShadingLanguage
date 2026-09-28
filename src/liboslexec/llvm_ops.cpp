@@ -109,7 +109,7 @@ void* __dso_handle = 0;  // necessary to avoid linkage issues in bitcode
 #define DCOL(x)   (*(Dual2<Color3>*)x)
 
 #ifndef OSL_SHADEOP
-#    ifdef __CUDACC__
+#    if OSL_GPU_COMPILER
 #        define OSL_SHADEOP \
             extern "C" __device__ OSL_LLVM_EXPORT __attribute__((always_inline))
 #    elif defined(OSL_COMPILING_TO_BITCODE)
@@ -274,8 +274,14 @@ void* __dso_handle = 0;  // necessary to avoid linkage issues in bitcode
 MAKE_UNARY_PERCOMPONENT_OP(sin, OIIO::fast_sin, fast_sin)
 MAKE_UNARY_PERCOMPONENT_OP(cos, OIIO::fast_cos, fast_cos)
 MAKE_UNARY_PERCOMPONENT_OP(tan, OIIO::fast_tan, fast_tan)
+#    if defined(__HIP_DEVICE_COMPILE__)
+// OIIO's HIP fast functions call libm without OSL's required domain clamp.
+MAKE_UNARY_PERCOMPONENT_OP(asin, OIIO::safe_asin, safe_asin)
+MAKE_UNARY_PERCOMPONENT_OP(acos, OIIO::safe_acos, safe_acos)
+#    else
 MAKE_UNARY_PERCOMPONENT_OP(asin, OIIO::fast_asin, fast_asin)
 MAKE_UNARY_PERCOMPONENT_OP(acos, OIIO::fast_acos, fast_acos)
+#    endif
 MAKE_UNARY_PERCOMPONENT_OP(atan, OIIO::fast_atan, fast_atan)
 MAKE_BINARY_PERCOMPONENT_OP(atan2, OIIO::fast_atan2, fast_atan2)
 MAKE_UNARY_PERCOMPONENT_OP(sinh, OIIO::fast_sinh, fast_sinh)
@@ -981,6 +987,37 @@ osl_range_check_err(int indexvalue, int length, ustringhash_pod symname,
                     OpaqueExecContextPtr ec, ustringhash_pod sourcefile,
                     int sourceline, ustringhash_pod groupname, int layer,
                     ustringhash_pod layername, ustringhash_pod shadername);
+
+#if defined(__HIP_DEVICE_COMPILE__)
+extern "C" OSL_HOSTDEVICE void
+rs_hart_range_error(OpaqueExecContextPtr ec, int index, int length);
+
+extern "C" OSL_HOSTDEVICE void
+rs_hart_spline_error(OpaqueExecContextPtr ec);
+
+
+OSL_SHADEOP int
+osl_hart_spline_validate(int count, int length, int step, float value,
+                         OpaqueExecContextPtr ec)
+{
+    if (count < 4 || count > length || (count - 4) % step
+        || std::isnan(value)) {
+        rs_hart_spline_error(ec);
+        return 0;
+    }
+    return 1;
+}
+
+
+OSL_SHADEOP_NOINLINE int
+osl_range_check_err(int indexvalue, int length, ustringhash_pod,
+                    OpaqueExecContextPtr ec, ustringhash_pod, int,
+                    ustringhash_pod, int, ustringhash_pod, ustringhash_pod)
+{
+    rs_hart_range_error(ec, indexvalue, length);
+    return indexvalue < 0 ? 0 : length - 1;
+}
+#endif
 
 
 

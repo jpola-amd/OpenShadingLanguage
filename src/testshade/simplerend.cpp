@@ -12,6 +12,7 @@
 #include <OSL/oslexec.h>
 
 #include "simplerend.h"
+#include "userdata.h"
 
 
 // Create ustrings for all strings used by the free function renderer services.
@@ -485,6 +486,8 @@ SimpleRenderer::get_array_attribute(ShaderGlobals* sg, bool derivatives,
     if (object == RS::Hashes::options && name == RS::Hashes::blahblah
         && type == TypeFloat) {
         *(float*)val = 3.14159;
+        if (derivatives)
+            ((float*)val)[1] = ((float*)val)[2] = 0;
         return true;
     }
 
@@ -518,64 +521,17 @@ bool
 SimpleRenderer::get_userdata(bool derivatives, ustringhash name, TypeDesc type,
                              ShaderGlobals* sg, void* val)
 {
-    // Just to illustrate how this works, respect s and t userdata, filled
-    // in with the uv coordinates.  In a real renderer, it would probably
-    // look up something specific to the primitive, rather than have hard-
-    // coded names.
-
-    if (name == RS::Hashes::face_idx && type == TypeInt) {
-        ((int*)val)[0] = int(4 * sg->u);
+    if (testshade::get_default_userdata(*sg, name, type, derivatives, val))
         return true;
-    }
-    if (name == RS::Hashes::s && type == TypeFloat) {
-        ((float*)val)[0] = sg->u;
-        if (derivatives) {
-            ((float*)val)[1] = sg->dudx;
-            ((float*)val)[2] = sg->dudy;
-        }
-        return true;
-    }
-    if (name == RS::Hashes::t && type == TypeFloat) {
-        ((float*)val)[0] = sg->v;
-        if (derivatives) {
-            ((float*)val)[1] = sg->dvdx;
-            ((float*)val)[2] = sg->dvdy;
-        }
-        return true;
-    }
-    if (name == RS::Hashes::red && type == TypeFloat && sg->P.x > 0.5f) {
-        ((float*)val)[0] = sg->u;
-        if (derivatives) {
-            ((float*)val)[1] = sg->dudx;
-            ((float*)val)[2] = sg->dudy;
-        }
-        return true;
-    }
-    if (name == RS::Hashes::green && type == TypeFloat && sg->P.x < 0.5f) {
-        ((float*)val)[0] = sg->v;
-        if (derivatives) {
-            ((float*)val)[1] = sg->dvdx;
-            ((float*)val)[2] = sg->dvdy;
-        }
-        return true;
-    }
-    if (name == RS::Hashes::blue && type == TypeFloat
-        && ((static_cast<int>(sg->P.y * 12) % 2) == 0)) {
-        ((float*)val)[0] = 1.0f - sg->u;
-        if (derivatives) {
-            ((float*)val)[1] = -sg->dudx;
-            ((float*)val)[2] = -sg->dudy;
-        }
-        return true;
-    }
 
     if (const OIIO::ParamValue* p = userdata.find_pv(ustring_from(name), type)) {
         size_t size = p->type().size();
 
-        if (p->type() == TypeDesc::STRING) {
-            const ustringhash* uh_data = reinterpret_cast<const ustringhash*>(
-                p->data());
-            memcpy(val, uh_data, size);
+        if (p->type().basetype == TypeDesc::STRING) {
+            const auto* strings = static_cast<const ustring*>(p->data());
+            auto* hashes        = static_cast<ustringhash*>(val);
+            for (int i = 0; i < p->type().numelements(); ++i)
+                hashes[i] = ustringhash_from(strings[i]);
         } else {
             memcpy(val, p->data(), size);
         }

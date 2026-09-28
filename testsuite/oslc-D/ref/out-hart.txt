@@ -1,0 +1,3 @@
+Compiled test.osl -> test.oso
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:15, point 0): foo is 42

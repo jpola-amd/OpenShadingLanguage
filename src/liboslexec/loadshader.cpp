@@ -131,7 +131,7 @@ OSOReaderToMaster::symbol(SymType symtype, TypeSpec typespec, const char* name_)
     int nvals  = t.aggregate * (t.is_unsized_array() ? 1 : t.numelements());
     if (sym.symtype() == SymTypeParam || sym.symtype() == SymTypeOutputParam) {
         // Skip structs for now, they're just placeholders
-        if (typespec.is_structure()) {
+        if (typespec.is_structure_based()) {
         } else if (typespec.simpletype().basetype == TypeDesc::FLOAT) {
             sym.dataoffset((int)m_master->m_fdefaults.size());
             expand(m_master->m_fdefaults, nvals);

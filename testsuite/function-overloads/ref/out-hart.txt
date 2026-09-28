@@ -1,0 +1,169 @@
+test.osl:230: warning: Ambiguous call to 'freturn ()'
+  Chosen function is:
+    test.osl:77	float freturn ()
+  Other candidates are:
+    test.osl:74	int freturn ()
+    test.osl:78	color freturn ()
+    test.osl:80	vector freturn ()
+    test.osl:75	point freturn ()
+    test.osl:81	normal freturn ()
+    test.osl:82	matrix freturn ()
+    test.osl:76	string freturn ()
+    test.osl:79	closure color freturn ()
+    test.osl:84	struct A freturn ()
+    test.osl:83	void freturn ()
+test.osl:231: warning: Ambiguous call to 'ireturn ()'
+  Chosen function is:
+    test.osl:91	int ireturn ()
+  Other candidates are:
+    test.osl:88	color ireturn ()
+    test.osl:92	vector ireturn ()
+    test.osl:89	point ireturn ()
+    test.osl:93	normal ireturn ()
+    test.osl:95	matrix ireturn ()
+    test.osl:90	string ireturn ()
+    test.osl:87	closure color ireturn ()
+    test.osl:86	struct A ireturn ()
+    test.osl:94	void ireturn ()
+test.osl:232: warning: Ambiguous call to 'creturn ()'
+  Chosen function is:
+    test.osl:102	color creturn ()
+  Other candidates are:
+    test.osl:97	vector creturn ()
+    test.osl:101	point creturn ()
+    test.osl:98	normal creturn ()
+    test.osl:104	matrix creturn ()
+    test.osl:103	string creturn ()
+    test.osl:105	closure color creturn ()
+    test.osl:100	struct A creturn ()
+    test.osl:99	void creturn ()
+test.osl:233: warning: Ambiguous call to 'vreturn ()'
+  Chosen function is:
+    test.osl:109	vector vreturn ()
+  Other candidates are:
+    test.osl:107	point vreturn ()
+    test.osl:113	normal vreturn ()
+    test.osl:110	matrix vreturn ()
+    test.osl:114	string vreturn ()
+    test.osl:108	closure color vreturn ()
+    test.osl:111	struct A vreturn ()
+    test.osl:112	void vreturn ()
+test.osl:234: warning: Ambiguous call to 'preturn ()'
+  Chosen function is:
+    test.osl:122	point preturn ()
+  Other candidates are:
+    test.osl:118	normal preturn ()
+    test.osl:120	matrix preturn ()
+    test.osl:116	string preturn ()
+    test.osl:119	closure color preturn ()
+    test.osl:121	struct A preturn ()
+    test.osl:117	void preturn ()
+test.osl:235: warning: Ambiguous call to 'nreturn ()'
+  Chosen function is:
+    test.osl:126	normal nreturn ()
+  Other candidates are:
+    test.osl:124	matrix nreturn ()
+    test.osl:127	string nreturn ()
+    test.osl:128	closure color nreturn ()
+    test.osl:125	struct A nreturn ()
+    test.osl:129	void nreturn ()
+test.osl:236: warning: Ambiguous call to 'mreturn ()'
+  Chosen function is:
+    test.osl:134	matrix mreturn ()
+  Other candidates are:
+    test.osl:135	string mreturn ()
+    test.osl:132	closure color mreturn ()
+    test.osl:133	struct A mreturn ()
+    test.osl:131	void mreturn ()
+test.osl:237: warning: Ambiguous call to 'strreturn ()'
+  Chosen function is:
+    test.osl:140	string strreturn ()
+  Other candidates are:
+    test.osl:138	closure color strreturn ()
+    test.osl:137	struct A strreturn ()
+    test.osl:139	void strreturn ()
+test.osl:238: warning: Ambiguous call to 'ccreturn ()'
+  Chosen function is:
+    test.osl:142	closure color ccreturn ()
+  Other candidates are:
+    test.osl:144	struct A ccreturn ()
+    test.osl:143	void ccreturn ()
+test.osl:239: warning: Ambiguous call to 'structreturn ()'
+  Chosen function is:
+    test.osl:146	struct A structreturn ()
+  Other candidates are:
+    test.osl:147	void structreturn ()
+test.osl:240: warning: Ambiguous call to 'structreturn1 ()'
+  Chosen function is:
+    test.osl:150	struct A structreturn1 ()
+  Other candidates are:
+    test.osl:149	void structreturn1 ()
+Compiled test.osl -> test.oso
+HART shader 'test' (a_ivp.h:3, point 0): testA int
+HART shader 'test' (b_nci.h:10, point 0): testB int
+HART shader 'test' (c_vpi.h:9, point 0): testC int
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (a_ivp.h:3, point 0): testA int
+HART shader 'test' (b_nci.h:10, point 0): testB int
+HART shader 'test' (c_vpi.h:9, point 0): testC int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:174, point 0): 
+HART shader 'test' (a_fcn.h:3, point 0): testA float
+HART shader 'test' (b_vpf.h:9, point 0): testB float
+HART shader 'test' (c_cnf.h:10, point 0): testC float
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (a_fcn.h:3, point 0): testA float
+HART shader 'test' (b_vpf.h:9, point 0): testB float
+HART shader 'test' (c_cnf.h:10, point 0): testC float
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:186, point 0): 
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:37, point 0): testD vector
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:41, point 0): testD point
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:33, point 0): testD color
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:29, point 0): testD normal
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:45, point 0): testD int
+HART shader 'test' (test.osl:55, point 0): testD int2
+HART shader 'test' (test.osl:49, point 0): testD float
+HART shader 'test' (test.osl:212, point 0): 
+HART shader 'test' (test.osl:60, point 0): testE color
+HART shader 'test' (test.osl:64, point 0): testE vector
+HART shader 'test' (test.osl:64, point 0): testE vector
+HART shader 'test' (test.osl:219, point 0): 
+HART shader 'test' (test.osl:70, point 0): funcb.color
+HART shader 'test' (test.osl:69, point 0): funcb.float
+HART shader 'test' (test.osl:68, point 0): funcb.int
+HART shader 'test' (test.osl:226, point 0): 
+HART shader 'test' (test.osl:77, point 0): freturn.float
+HART shader 'test' (test.osl:91, point 0): ireturn.int
+HART shader 'test' (test.osl:102, point 0): creturn.color
+HART shader 'test' (test.osl:109, point 0): vreturn.vector
+HART shader 'test' (test.osl:122, point 0): preturn.point
+HART shader 'test' (test.osl:126, point 0): nreturn.normal
+HART shader 'test' (test.osl:134, point 0): mreturn.matrix
+HART shader 'test' (test.osl:140, point 0): strreturn.string
+HART shader 'test' (test.osl:142, point 0): ccreturn.ccolor
+HART shader 'test' (test.osl:146, point 0): structreturn.struct
+HART shader 'test' (test.osl:150, point 0): structreturn1.struct
+HART shader 'test' (test.osl:241, point 0): 
+HART shader 'test' (test.osl:155, point 0): aaa.Bint
+HART shader 'test' (test.osl:154, point 0): aaa.Afloat
+HART shader 'test' (test.osl:157, point 0): bbb.Bint
+HART shader 'test' (test.osl:158, point 0): bbb.Afloat
+HART shader 'test' (test.osl:160, point 0): ccc.Aint
+HART shader 'test' (test.osl:161, point 0): ccc.Bfloat
+HART shader 'test' (test.osl:251, point 0): 

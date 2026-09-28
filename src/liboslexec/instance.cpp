@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include <OpenImageIO/strutil.h>
 
 #include "oslexec_pvt.h"
+#include <OSL/hart_diagnostics.h>
 
 
 OSL_NAMESPACE_BEGIN
@@ -222,7 +224,7 @@ ShaderInstance::parameters(const ParamValueList& params,
                                         sm->name());
                 continue;
             }
-            if (sm_typespec.is_structure())
+            if (sm_typespec.is_structure_based())
                 continue;  // structs are just placeholders; skip
 
             const void* data = p.data();
@@ -362,6 +364,1165 @@ ShaderInstance::parameters(const ParamValueList& params,
         ss.m_stat_mem_inst += (symmem + parammem);
         ss.m_stat_memory += (symmem + parammem);
     }
+}
+
+
+
+bool
+hart_supports_noise(ustring name, bool periodic)
+{
+    return name == ustring("perlin") || name == ustring("uperlin")
+           || name == ustring("noise") || name == ustring("snoise")
+           || name == ustring("cell") || name == ustring("hash")
+           || name == ustring("gabor")
+           || (!periodic
+               && (name == ustring("simplex") || name == ustring("usimplex")));
+}
+
+
+
+bool
+ShaderInstance::hart_texture_filename(const Symbol& sym,
+                                      ustring& filename) const
+{
+    if (!sym.typespec().is_string() || sym.typespec().is_array())
+        return false;
+    if (sym.is_constant()) {
+        filename = sym.get_string();
+        return !filename.empty();
+    }
+    // Spline selectors share parameter binding resolution with textures, but
+    // can also use locals whose initialization proves a single static value.
+    if (sym.symtype() == SymTypeLocal || sym.symtype() == SymTypeTemp) {
+        const auto& code = m_instsymbols.empty() ? m_master->m_ops : m_instops;
+        const auto& args = m_instsymbols.empty() ? m_master->m_args
+                                                 : m_instargs;
+        const auto& syms = m_instsymbols.empty() ? m_master->m_symbols
+                                                 : m_instsymbols;
+        const int first = sym.firstwrite(), last = sym.lastwrite();
+        if (first < maincodebegin() || last < first || last >= int(code.size())
+            || sym.firstread() <= first)
+            return false;
+        // The first initialization must dominate every read. Functioncall
+        // marks an inlined body, not a conditional entry to that body.
+        for (int i = maincodebegin(); i < first; ++i) {
+            const Opcode& op = code[i];
+            if (op.opname() == ustring("functioncall")) {
+                if (op.farthest_jump() > i && op.farthest_jump() <= first)
+                    i = op.farthest_jump() - 1;
+                continue;
+            }
+            if (op.farthest_jump() > first || op.opname() == ustring("return")
+                || op.opname() == ustring("exit"))
+                return false;
+        }
+        bool initialized = false;
+        for (int i = first; i <= last; ++i) {
+            const Opcode& op = code[i];
+            for (int a = 0; a < op.nargs(); ++a) {
+                if (!op.argwrite(a) || &syms[args[op.firstarg() + a]] != &sym)
+                    continue;
+                if (op.opname() != ustring("assign") || op.nargs() != 2
+                    || a != 0 || (!initialized && i != first))
+                    return false;
+                const Symbol& src = syms[args[op.firstarg() + 1]];
+                // Strictly earlier definitions also bound alias recursion.
+                if ((src.symtype() == SymTypeLocal
+                     || src.symtype() == SymTypeTemp)
+                    && src.firstwrite() >= first)
+                    return false;
+                ustring value;
+                if (!hart_texture_filename(src, value)
+                    || (initialized && filename != value))
+                    return false;
+                filename    = value;
+                initialized = true;
+            }
+        }
+        // Inlining repeated calls can initialize the same local more than
+        // once. It is immutable only if every write resolves to one value.
+        return initialized;
+    }
+    if (sym.symtype() != SymTypeParam || sym.everwritten()
+        || sym.has_init_ops())
+        return false;
+    const int index = findparam(sym.name(), m_instsymbols.empty());
+    if (index < 0)
+        return false;
+    // Validation precedes symbol copying; lowering also needs this at OSL O0.
+    const auto source       = m_instoverrides.empty()
+                                  ? sym.valuesource()
+                                  : m_instoverrides[index].valuesource();
+    const bool interpolated = m_instoverrides.empty()
+                                  ? sym.interpolated()
+                                  : m_instoverrides[index].interpolated();
+    const bool interactive  = m_instoverrides.empty()
+                                  ? sym.interactive()
+                                  : m_instoverrides[index].interactive();
+    if (interpolated || interactive
+        || (source != Symbol::DefaultVal && source != Symbol::InstanceVal))
+        return false;
+    // LLVM layout repurposes dataoffset for Groupdata. The copied symbol's
+    // data pointer still addresses its original default or instance value.
+    filename = m_instsymbols.empty()
+                   ? *static_cast<const ustring*>(param_storage(index))
+                   : sym.get_string();
+    return !filename.empty();
+}
+
+
+
+bool
+ShaderInstance::validate_hart() const
+{
+    // Check the original code before constant folding can execute host-only
+    // operations or hide unsupported paths in a particular specialization.
+    const bool closures = shadingsys().renderer()->supports("HARTClosures");
+    const bool bounds   = shadingsys().renderer()->supports("HARTArrayBounds");
+    const bool geometry = shadingsys().renderer()->supports("HARTGeometry");
+    auto validate_type  = [&](const Symbol& sym) {
+        const TypeSpec& type = sym.typespec();
+        if (type.is_structure_array() && type.structspec()->numfields() == 0) {
+            shadingsys().errorfmt(
+                "HART: missing struct-array field metadata for '{}' in shader "
+                "'{}'; recompile the shader",
+                sym.name(), shadername());
+            return false;
+        }
+        if (type.is_structure_based())
+            return true;  // Placeholder; flattened members are checked separately.
+        if (type.is_array() && !bounds) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTArrayBounds for '{}' in shader '{}'",
+                sym.name(), shadername());
+            return false;
+        }
+        if ((type.is_closure_based() && !closures)
+            || (!type.is_float_based() && !type.is_int_based()
+                && !type.is_string_based()
+                && !(closures && type.is_closure_based()))) {
+            shadingsys().errorfmt("HART: unsupported type '{}' for '{}' "
+                                  "in shader '{}'",
+                                  type.c_str(), sym.name(), shadername());
+            return false;
+        }
+        return true;
+    };
+    auto validate_transform = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto type = [&](int arg) -> const TypeSpec& {
+            return symbol(arg).typespec();
+        };
+        const ustring name = op.opname();
+        const int nargs    = op.nargs();
+        bool valid         = nargs >= 2 && !symbol(0).is_constant();
+        int spaces = 0, first_float = nargs;
+        if (valid && name == ustring("matrix")) {
+            valid = type(0).is_matrix();
+            if (nargs == 2 || nargs == 17)
+                first_float = 1;
+            else if (nargs == 3 || nargs == 18) {
+                spaces      = nargs == 3 && type(2).is_string() ? 2 : 1;
+                first_float = 1 + spaces;
+            } else
+                valid = false;
+        } else if (valid && name == ustring("getmatrix")) {
+            valid  = nargs == 4 && type(0).is_int() && type(3).is_matrix()
+                     && !symbol(3).is_constant();
+            spaces = 2;
+        } else if (valid
+                   && (name == ustring("point") || name == ustring("vector")
+                       || name == ustring("normal"))) {
+            valid       = (nargs == 4 || nargs == 5) && type(0).is_triple();
+            spaces      = nargs == 5 ? 1 : 0;
+            first_float = 1 + spaces;
+        } else if (valid) {
+            valid  = (nargs == 3 || nargs == 4) && type(0).is_triple()
+                     && type(nargs - 1).is_triple();
+            spaces = nargs == 4 ? 2 : (type(1).is_matrix() ? 0 : 1);
+        }
+        if (valid) {
+            for (int a = 1; a <= spaces; ++a)
+                valid &= type(a).is_string();
+            for (int a = first_float; a < nargs; ++a)
+                valid &= type(a).is_float();
+        }
+        if (!valid) {
+            shadingsys().errorfmt(
+                "HART: invalid coordinate transform operands for '{}' in "
+                "shader '{}' ({}:{})",
+                name, shadername(), op.sourcefile(), op.sourceline());
+            return false;
+        }
+        if (spaces && !shadingsys().renderer()->supports("HARTTransforms")) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTTransforms in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+            return false;
+        }
+        if (!shadingsys().renderer()->supports("HARTNamedTransforms"))
+            for (int a = 1; a <= spaces; ++a) {
+                const Symbol& space = symbol(a);
+                if (!space.is_constant()) {
+                    shadingsys().errorfmt(
+                        "HART: coordinate spaces must be literal strings in "
+                        "shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+                const ustring value = space.get_string();
+                if (value != Strings::common && value != Strings::object
+                    && value != Strings::shader) {
+                    shadingsys().errorfmt(
+                        "HART: unsupported coordinate space '{}' in shader "
+                        "'{}' ({}:{})",
+                        value, shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+            }
+        return true;
+    };
+    auto validate_attribute = [&](const Opcode& op) {
+        if (!shadingsys().renderer()->supports("HARTAttributes")) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTAttributes in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+            return false;
+        }
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto type = [&](int arg) -> const TypeSpec& {
+            return symbol(arg).typespec();
+        };
+        bool valid = op.nargs() >= 3 && op.nargs() <= 5;
+        if (valid) {
+            const bool object       = op.nargs() >= 4 && type(2).is_string();
+            const int attribute     = object ? 2 : 1;
+            const bool indexed      = op.nargs() == attribute + 3;
+            const auto& destination = type(op.nargs() - 1);
+            valid                   = !symbol(0).is_constant()
+                    && !symbol(op.nargs() - 1).is_constant() && type(0).is_int()
+                    && type(1).is_string() && type(attribute).is_string()
+                    && (op.nargs() == attribute + 2 || indexed)
+                    && (!indexed || type(attribute + 1).is_int())
+                    && !destination.is_structure_based()
+                    && !destination.is_closure_based()
+                    && (destination.is_float_based()
+                        || destination.is_int_based()
+                        || destination.is_string_based());
+        }
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: invalid getattribute operands in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+        return valid;
+    };
+    auto validate_string_operands = [&](const Opcode& op) {
+        auto type = [&](int arg) -> const TypeSpec& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
+                .typespec();
+        };
+        const ustring name = op.opname();
+        bool valid         = name == ustring("useparam");
+        if (op.nargs() == 2
+            && (name == ustring("assign") || name == ustring("arraycopy"))) {
+            valid = type(0).is_string_based() && type(1).is_string_based()
+                    && type(0).is_array() == type(1).is_array()
+                    && (name != ustring("arraycopy") || type(0).is_array());
+        } else if (op.nargs() == 2 && name == ustring("arraylength")) {
+            valid = type(0).is_int() && type(1).is_string_based()
+                    && type(1).is_array();
+        } else if (op.nargs() == 2 && name == ustring("isconstant")) {
+            valid = type(0).is_int();
+        } else if (op.nargs() == 3 && name == ustring("aref")) {
+            valid = type(0).is_string() && type(1).is_string_based()
+                    && type(1).is_array() && type(2).is_int();
+        } else if (op.nargs() == 3 && name == ustring("aassign")) {
+            valid = type(0).is_string_based() && type(0).is_array()
+                    && type(1).is_int() && type(2).is_string();
+        } else if (op.nargs() == 3
+                   && (name == ustring("eq") || name == ustring("neq"))) {
+            valid = type(0).is_int() && type(1).is_string()
+                    && type(2).is_string();
+        } else if (op.nargs() == 2
+                   && (name == ustring("hash") || name == ustring("raytype"))) {
+            valid = type(0).is_int() && type(1).is_string();
+        } else if (name == ustring("getattribute")) {
+            valid = true;  // The complete operation is validated first.
+        }
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: unsupported string operands for '{}' in shader '{}' "
+                "({}:{})",
+                name, shadername(), op.sourcefile(), op.sourceline());
+        return valid;
+    };
+    auto validate_hash = [&](const Opcode& op) {
+        auto type = [&](int arg) -> const TypeSpec& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
+                .typespec();
+        };
+        const bool valid
+            = (op.nargs() == 2 || op.nargs() == 3) && type(0).is_int()
+              && !type(1).is_array()
+              && (op.nargs() == 2
+                      ? (type(1).is_int() || type(1).is_float()
+                         || type(1).is_triple() || type(1).is_string())
+                      : ((type(1).is_float() || type(1).is_triple())
+                         && type(2).is_float()));
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: invalid hash operands in shader '{}' ({}:{})",
+                shadername(), op.sourcefile(), op.sourceline());
+        return valid;
+    };
+    auto validate_diagnostic = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTDiagnostics"))
+            return fail("renderer lacks HARTDiagnostics");
+        if (op.nargs() < 1 || !symbol(0).typespec().is_string()
+            || !symbol(0).is_constant())
+            return fail("diagnostic formats must be literal strings");
+        const string_view format(symbol(0).get_string());
+        if (format.size() > HartDiagnosticMaxFormat)
+            return fail("diagnostic format exceeds 4096 bytes");
+        int fields = 0;
+        for (size_t i = 0; i < format.size(); ++i) {
+            if (format[i] != '%')
+                continue;
+            const size_t start = i++;
+            if (i < format.size() && format[i] == '%')
+                continue;
+            while (i < format.size()
+                   && string_view("-+ #0").find(format[i]) != string_view::npos)
+                ++i;
+            auto number = [&](unsigned limit) {
+                unsigned value = 0;
+                while (i < format.size() && format[i] >= '0'
+                       && format[i] <= '9') {
+                    const unsigned digit = unsigned(format[i++] - '0');
+                    if (value > limit / 10 || value * 10 + digit > limit)
+                        return false;
+                    value = value * 10 + digit;
+                }
+                return true;
+            };
+            if (!number(HartDiagnosticMaxField))
+                return fail("diagnostic width exceeds 1024");
+            if (i < format.size() && format[i] == '.') {
+                ++i;
+                if (!number(128))
+                    return fail("diagnostic precision exceeds 128");
+            }
+            if (i >= format.size() || i - start >= 120
+                || string_view("cdefgimnopsvxX").find(format[i])
+                       == string_view::npos)
+                return fail("unsupported diagnostic format specification");
+            ++fields;
+        }
+        if (fields != op.nargs() - 1)
+            return fail("diagnostic format/argument count mismatch");
+        for (int a = 1; a < op.nargs(); ++a) {
+            const auto& type = symbol(a).typespec();
+            if (type.is_closure_based() || type.is_structure_based()
+                || (!type.is_float_based() && !type.is_int_based()
+                    && !type.is_string_based()))
+                return fail("unsupported diagnostic argument type");
+        }
+        return true;
+    };
+    auto validate_closure = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!closures)
+            return fail("unsupported operation 'closure' "
+                        "(renderer lacks HARTClosures)");
+        if (op.nargs() < 2 || symbol(0).is_constant()
+            || !symbol(0).typespec().is_closure()
+            || symbol(0).typespec().is_array())
+            return fail("invalid closure argument list");
+        const int weighted = symbol(1).typespec().is_string() ? 0 : 1;
+        if (op.nargs() < 2 + weighted
+            || (weighted && !symbol(1).typespec().is_color()))
+            return fail("invalid closure weight");
+        const Symbol& id = symbol(1 + weighted);
+        if (!id.is_constant() || !id.typespec().is_string())
+            return fail("closure names must be literal strings");
+        const ustring name    = id.get_string();
+        const bool diffuse    = name == ustring("diffuse");
+        const bool parameters = shadingsys().renderer()->supports(
+            "HARTClosureParameters");
+        if (!parameters && !diffuse && name != ustring("emission"))
+            return fail(fmtformat("unsupported closure '{}'", name));
+        const auto* entry = shadingsys().find_closure(name);
+        if (!entry)
+            return fail(fmtformat("closure '{}' is not registered", name));
+        if (entry->prepare || entry->setup)
+            return fail(fmtformat(
+                "closure '{}' prepare/setup callbacks are unsupported", name));
+        if (parameters) {
+            auto bad_layout = [&]() {
+                return fail(
+                    fmtformat("invalid closure '{}' parameter layout", name));
+            };
+            if (entry->id < 0 || entry->name != name || entry->nformal < 0
+                || entry->nkeyword < 0 || entry->struct_size <= 0
+                || entry->nformal
+                       > std::numeric_limits<int>::max() - entry->nkeyword
+                || size_t(entry->nformal) + size_t(entry->nkeyword) + 1
+                       != entry->params.size())
+                return bad_layout();
+            const auto& finish  = entry->params.back();
+            const int alignment = finish.field_size;
+            if (finish.type != TypeDesc() || finish.key
+                || finish.offset != entry->struct_size || alignment <= 0
+                || alignment > 16 || (alignment & (alignment - 1))
+                || entry->struct_size % alignment)
+                return bad_layout();
+            const int count = entry->nformal + entry->nkeyword;
+            for (int i = 0; i < count; ++i) {
+                const auto& p = entry->params[i];
+                const bool numeric
+                    = p.type == TypeInt || p.type == TypeFloat
+                      || p.type == TypeColor || p.type == TypePoint
+                      || p.type == TypeVector || p.type == TypeNormal
+                      || p.type == TypeMatrix
+                      || p.type == TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3);
+                if (p.type.is_array()
+                    || (!numeric && p.type != TypeString
+                        && p.type != TypeDesc::PTR))
+                    return fail(
+                        fmtformat("unsupported closure '{}' parameter type",
+                                  name));
+                const int field_alignment
+                    = p.type == TypeString || p.type == TypeDesc::PTR ? 8 : 4;
+                if (p.offset < 0 || p.field_size <= 0
+                    || p.offset > entry->struct_size
+                    || p.field_size > entry->struct_size - p.offset
+                    || size_t(p.field_size) != p.type.size()
+                    || p.offset % field_alignment || alignment < field_alignment
+                    || (i < entry->nformal ? p.key != nullptr
+                                           : !p.key || !p.key[0]))
+                    return bad_layout();
+                for (int j = 0; j < i; ++j) {
+                    const auto& previous = entry->params[j];
+                    if ((p.offset < previous.offset + previous.field_size
+                         && previous.offset < p.offset + p.field_size)
+                        || (p.key && previous.key
+                            && string_view(p.key) == previous.key))
+                        return bad_layout();
+                }
+            }
+            const int first = 2 + weighted;
+            if (entry->nformal > op.nargs() - first
+                || (op.nargs() - first - entry->nformal) % 2)
+                return fail("invalid closure argument list");
+            auto compatible = [&](const Symbol& value, TypeDesc type) {
+                const TypeSpec& actual = value.typespec();
+                if (actual.is_array() || actual.is_structure_based())
+                    return false;
+                if (type == TypeDesc::PTR)
+                    return actual.is_closure();
+                return !actual.is_closure_based()
+                       && equivalent(actual.simpletype(), type);
+            };
+            for (int i = 0; i < entry->nformal; ++i)
+                if (!compatible(symbol(first + i), entry->params[i].type))
+                    return fail(fmtformat(
+                        "incompatible formal argument to closure '{}'", name));
+            for (int i = first + entry->nformal; i < op.nargs(); i += 2) {
+                const auto& key = symbol(i);
+                if (!key.typespec().is_string() || !key.is_constant())
+                    return fail(
+                        "closure keyword names must be literal strings");
+                bool found = false;
+                for (int j = entry->nformal; j < count; ++j) {
+                    const auto& p = entry->params[j];
+                    if (key.get_string() == p.key
+                        && compatible(symbol(i + 1), p.type)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return fail(fmtformat(
+                        "unsupported or incompatible keyword '{}' to closure '{}'",
+                        key.get_string(), name));
+            }
+            return true;
+        }
+        const int nformal = diffuse ? 1 : 0;
+        if (op.nargs() > 2 + weighted + nformal)
+            return fail("closure keyword arguments are unsupported");
+        if (op.nargs() != 2 + weighted + nformal)
+            return fail("invalid closure argument list");
+        // The initial device ABI is an empty emission or a diffuse normal at
+        // offset zero, optionally followed by testshade's unused default label.
+        bool layout = entry->nformal == nformal && entry->nkeyword == 0
+                      && entry->struct_size == (diffuse ? 12 : 1);
+        if (diffuse && entry->nformal == 1 && entry->nkeyword == 1
+            && entry->params.size() >= 2) {
+            const ClosureParam& label = entry->params[1];
+            layout = label.key && string_view(label.key) == "label"
+                     && label.type == TypeString && label.offset == 16
+                     && label.field_size == 8 && entry->struct_size == 24;
+        }
+        if (diffuse && layout) {
+            const ClosureParam& normal = entry->params[0];
+            layout = !normal.key && normal.type == TypeVector
+                     && normal.offset == 0 && normal.field_size == 12;
+        }
+        if (!layout)
+            return fail(
+                fmtformat("unsupported closure '{}' parameter layout", name));
+        if (diffuse) {
+            const TypeSpec& type = symbol(2 + weighted).typespec();
+            if (type.is_array() || type.is_structure()
+                || type.is_closure_based()
+                || !equivalent(type.simpletype(), TypeVector))
+                return fail(
+                    fmtformat("incompatible formal argument to closure '{}'",
+                              name));
+        }
+        return true;
+    };
+    auto validate_texture = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTTextures"))
+            return fail("unsupported operation 'texture' "
+                        "(renderer lacks HARTTextures)");
+        ustring filename;
+        if (op.nargs() < 4
+            || (!symbol(1).is_constant() && symbol(1).symtype() != SymTypeParam)
+            || !hart_texture_filename(symbol(1), filename))
+            return fail("texture requires a literal filename or an immutable "
+                        "nonempty input string parameter");
+        const int first_option
+            = op.nargs() > 4 && symbol(4).typespec().is_float() ? 8 : 4;
+        if (op.nargs() < first_option || (op.nargs() - first_option) % 2)
+            return fail("invalid texture argument list");
+        const bool defaults = shadingsys().renderer()->supports(
+            "HARTTextureDefaults");
+        bool interp = defaults, swrap = defaults, twrap = defaults;
+        for (int a = first_option; a < op.nargs(); a += 2) {
+            const Symbol& token = symbol(a);
+            const Symbol& value = symbol(a + 1);
+            if (!token.is_constant() || !token.typespec().is_string())
+                return fail("texture option names must be literal strings");
+            const ustring name = token.get_string();
+            if (name == Strings::alpha) {
+                if (!value.typespec().is_float() || value.is_constant())
+                    return fail("texture alpha requires a float output");
+                continue;
+            }
+            if (name == Strings::firstchannel) {
+                if (!value.is_constant() || !value.typespec().is_int()
+                    || value.get_int() < 0)
+                    return fail(
+                        "texture firstchannel requires a literal nonnegative integer");
+                continue;
+            }
+            if (name != ustring("interp") && name != ustring("wrap")
+                && name != ustring("swrap") && name != ustring("twrap"))
+                return fail(fmtformat("unsupported texture option '{}'", name));
+            if (!value.is_constant() || !value.typespec().is_string())
+                return fail("texture option values must be literal strings");
+            const ustring mode = value.get_string();
+            if (name == ustring("interp")) {
+                if (mode != ustring("closest") && mode != ustring("linear"))
+                    return fail(
+                        fmtformat("unsupported texture interpolation '{}'",
+                                  mode));
+                interp = true;
+            } else {
+                if (mode != ustring("black") && mode != ustring("clamp")
+                    && mode != ustring("periodic"))
+                    return fail(
+                        fmtformat("unsupported texture wrap mode '{}'", mode));
+                swrap |= name != ustring("twrap");
+                twrap |= name != ustring("swrap");
+            }
+        }
+        if (!interp)
+            return fail(
+                "texture requires explicit closest or linear interpolation");
+        if (!swrap || !twrap)
+            return fail("texture requires explicit wrap modes");
+        return true;
+    };
+    auto validate_noise = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        auto numeric = [](const Symbol& sym) {
+            return !sym.typespec().is_array()
+                   && (sym.typespec().is_float() || sym.typespec().is_triple());
+        };
+        if (op.nargs() < 2 || !numeric(symbol(0)))
+            return fail("invalid noise result or argument list");
+        const bool periodic = op.opname() == ustring("pnoise");
+        int arg             = 1;
+        ustring name        = op.opname();
+        bool dynamic        = false;
+        if (symbol(arg).typespec().is_string()) {
+            dynamic = !symbol(arg).is_constant();
+            name    = dynamic ? ustring() : symbol(arg).get_string();
+            ++arg;
+            if (!dynamic && !hart_supports_noise(name, periodic))
+                return fail(fmtformat("unsupported noise type '{}'", name));
+        }
+        if (arg >= op.nargs() || !numeric(symbol(arg)))
+            return fail("noise coordinates must be scalar or triple floats");
+        const bool triple = symbol(arg++).typespec().is_triple();
+        bool time         = false;
+        if (periodic) {
+            if (arg + 1 < op.nargs() && numeric(symbol(arg + 1)))
+                time = true;
+        } else if (arg < op.nargs() && symbol(arg).typespec().is_float()
+                   && !symbol(arg).typespec().is_array())
+            time = true;
+        if (time) {
+            if (arg >= op.nargs() || !symbol(arg).typespec().is_float()
+                || symbol(arg).typespec().is_array())
+                return fail("second noise coordinate must be a float");
+            ++arg;
+        }
+        if (periodic) {
+            if (arg >= op.nargs() || !numeric(symbol(arg))
+                || symbol(arg).typespec().is_triple() != triple)
+                return fail("noise period must match its coordinate type");
+            ++arg;
+            if (time) {
+                if (arg >= op.nargs() || !symbol(arg).typespec().is_float()
+                    || symbol(arg).typespec().is_array())
+                    return fail("second noise period must be a float");
+                ++arg;
+            }
+        }
+        if (dynamic || name == ustring("gabor")) {
+            if (!shadingsys().renderer()->supports("HARTNoiseErrors"))
+                return fail("renderer lacks HARTNoiseErrors");
+        } else if (arg != op.nargs())
+            return fail("noise options require gabor");
+        if ((op.nargs() - arg) % 2)
+            return fail("invalid noise option list");
+        for (; arg < op.nargs(); arg += 2) {
+            const Symbol& token = symbol(arg);
+            const Symbol& value = symbol(arg + 1);
+            if (!token.typespec().is_string() || !token.is_constant())
+                return fail("noise option names must be literal strings");
+            const ustring option = token.get_string();
+            const TypeSpec& type = value.typespec();
+            const bool valid
+                = !type.is_array()
+                  && (((option == ustring("anisotropic")
+                        || option == ustring("do_filter"))
+                       && type.is_int())
+                      || (option == ustring("direction") && type.is_triple())
+                      || ((option == ustring("bandwidth")
+                           || option == ustring("impulses"))
+                          && (type.is_float() || type.is_int())));
+            if (!valid)
+                return fail(
+                    fmtformat("unsupported noise option '{}' or type '{}'",
+                              option, type.c_str()));
+        }
+        return true;
+    };
+    auto validate_spline = [&](const Opcode& op) {
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTSplineErrors"))
+            return fail("renderer lacks HARTSplineErrors");
+        if (op.nargs() != 4 && op.nargs() != 5)
+            return fail("invalid spline argument list");
+        const Symbol& basis = symbol(1);
+        ustring name;
+        if (!hart_texture_filename(basis, name))
+            return fail("spline basis must be a nonempty immutable string");
+        if (name != ustring("catmull-rom") && name != ustring("bezier")
+            && name != ustring("bspline") && name != ustring("hermite")
+            && name != ustring("linear") && name != ustring("constant"))
+            return fail(fmtformat("unsupported spline basis '{}'", name));
+        const int step         = name == ustring("bezier")    ? 3
+                                 : name == ustring("hermite") ? 2
+                                                              : 1;
+        const Symbol& knots    = symbol(op.nargs() - 1);
+        const TypeSpec& type   = knots.typespec();
+        const TypeDesc element = type.simpletype().elementtype();
+        const TypeSpec& result = symbol(0).typespec();
+        const bool inverse     = op.opname() == ustring("splineinverse");
+        if (!type.is_array() || element.basetype != TypeDesc::FLOAT
+            || (element.aggregate != TypeDesc::SCALAR
+                && element.aggregate != TypeDesc::VEC3)
+            || result.is_array() || (!result.is_float() && !result.is_triple())
+            || (result.is_float() != (element.aggregate == TypeDesc::SCALAR))
+            || (inverse && !result.is_float())
+            || !symbol(2).typespec().is_float()
+            || (op.nargs() == 5 && !symbol(3).typespec().is_int()))
+            return fail("invalid spline knot/value types");
+        int length      = type.is_unsized_array() ? knots.initializers()
+                                                  : type.arraylength();
+        const int index = m_master->m_args[op.firstarg() + op.nargs() - 1];
+        if (index >= firstparam() && index < lastparam()
+            && m_instoverrides[index].arraylen())
+            length = m_instoverrides[index].arraylen();
+        if (length < 4)
+            return fail("at least four resolved spline knots are required");
+        if (op.nargs() == 4 || symbol(3).is_constant()) {
+            const int count = op.nargs() == 4 ? length : symbol(3).get_int();
+            if (count < 4 || count > length || (count - 4) % step)
+                return fail("invalid spline knot count for array/basis");
+        }
+        return true;
+    };
+    auto validate_color = [&](const Opcode& op) {
+        const bool constructor = op.opname() == ustring("color");
+        if (constructor && op.nargs() == 4)
+            return true;
+        auto symbol = [&](int arg) -> const Symbol& {
+            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+        };
+        auto fail = [&](string_view message) {
+            shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
+                                  shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        };
+        if (!shadingsys().renderer()->supports("HARTColorSystem"))
+            return fail("renderer lacks HARTColorSystem");
+        const bool transform = op.opname() == ustring("transformc");
+        const bool luminance = op.opname() == ustring("luminance");
+        if (op.nargs() != (constructor ? 5 : (transform ? 4 : 2)))
+            return fail("invalid color operation arguments");
+        const TypeSpec& result = symbol(0).typespec();
+        if (result.is_array()
+            || (luminance ? !result.is_float() : !result.is_triple()))
+            return fail("invalid color operation result type");
+        const int first_value = constructor ? 2 : (transform ? 3 : 1);
+        for (int a = first_value; a < op.nargs(); ++a) {
+            const TypeSpec& type = symbol(a).typespec();
+            if (type.is_array()
+                || ((luminance || transform) ? !type.is_triple()
+                                             : !type.is_float()))
+                return fail("invalid color operation value type");
+        }
+        if (!constructor && !transform)
+            return true;
+        for (int a = 1; a < first_value; ++a) {
+            const Symbol& space = symbol(a);
+            if (!space.is_constant() || !space.typespec().is_string())
+                return fail("color spaces must be literal strings");
+            const ustring name = space.get_string();
+            // Constructors use to_rgb, whose built-ins intentionally differ
+            // from transformc. Other RGB system names are only current aliases.
+            const bool builtin
+                = name == ustring("RGB") || name == ustring("rgb")
+                  || name == ustring("hsv") || name == ustring("hsl")
+                  || name == ustring("YIQ") || name == ustring("XYZ")
+                  || name == ustring("xyY")
+                  || (transform
+                      && (name == ustring("linear") || name == ustring("sRGB")));
+            if (!builtin
+                && ustringhash(name) != shadingsys().colorsystem().colorspace())
+                return fail(fmtformat("unsupported color space '{}'", name));
+        }
+        return true;
+    };
+    for (int i = firstparam(); i < lastparam(); ++i) {
+        const Symbol& sym = *mastersymbol(i);
+        if (!validate_type(sym))
+            return false;
+        const auto& hints = m_instoverrides[i];
+        if (hints.interpolated() && sym.typespec().is_closure_based()) {
+            shadingsys().errorfmt(
+                "HART: interpolated parameter '{}' cannot be closure-based",
+                sym.name());
+            return false;
+        }
+        if (hints.interactive() && sym.typespec().is_closure_based()) {
+            shadingsys().errorfmt("HART: interactive closure parameter '{}' "
+                                  "is unsupported",
+                                  sym.name());
+            return false;
+        }
+        if (hints.interpolated() && hints.interactive()) {
+            if (sym.symtype() != SymTypeParam
+                || (!sym.typespec().is_float_based()
+                    && !sym.typespec().is_int_based())) {
+                shadingsys().errorfmt(
+                    "HART: interpolated interactive parameter '{}' must be "
+                    "a numeric input",
+                    sym.name());
+                return false;
+            }
+            if (sym.has_init_ops()
+                && hints.valuesource() == Symbol::DefaultVal) {
+                shadingsys().errorfmt(
+                    "HART: interpolated interactive parameter '{}' requires "
+                    "a constant default or an instance value",
+                    sym.name());
+                return false;
+            }
+        }
+        const bool missing_userdata    = hints.interpolated()
+                                         && !shadingsys().renderer()->supports(
+                                             "HARTUserdata");
+        const bool missing_interactive = hints.interactive()
+                                         && !shadingsys().renderer()->supports(
+                                             "HARTInteractive");
+        if (missing_userdata || missing_interactive) {
+            shadingsys().errorfmt(
+                "HART: {} parameter '{}' is unsupported by the renderer in "
+                "shader '{}'",
+                missing_userdata ? "interpolated" : "interactive", sym.name(),
+                shadername());
+            return false;
+        }
+    }
+    // clang-format off
+    static const ustring supported[] = {
+        ustring("nop"),
+        ustring("end"),
+        ustring("useparam"),
+        ustring("isconstant"),
+        ustring("assign"),
+        ustring("add"),
+        ustring("sub"),
+        ustring("mul"),
+        ustring("div"),
+        ustring("neg"),
+        ustring("color"),
+        ustring("sin"),
+        ustring("compref"),
+        ustring("compassign"),
+        ustring("if"),
+        ustring("lt"),
+        ustring("le"),
+        ustring("eq"),
+        ustring("ge"),
+        ustring("gt"),
+        ustring("neq"),
+        ustring("for"),
+        ustring("while"),
+        ustring("dowhile"),
+        ustring("break"),
+        ustring("continue"),
+        ustring("return"),
+        ustring("exit"),
+        ustring("and"),
+        ustring("or"),
+        ustring("bitand"),
+        ustring("bitor"),
+        ustring("xor"),
+        ustring("compl"),
+        ustring("shl"),
+        ustring("shr"),
+        ustring("mod"),
+        ustring("arraycopy"),
+        ustring("arraylength"),
+        ustring("aref"),
+        ustring("aassign"),
+        ustring("Dx"),
+        ustring("Dy"),
+        ustring("point"),
+        ustring("vector"),
+        ustring("normal"),
+        ustring("dot"),
+        ustring("length"),
+        ustring("normalize"),
+        ustring("filterwidth"),
+        ustring("noise"),
+        ustring("snoise"),
+        ustring("abs"),
+        ustring("min"),
+        ustring("max"),
+        ustring("clamp"),
+        ustring("mix"),
+        ustring("step"),
+        ustring("smoothstep"),
+        ustring("floor"),
+        ustring("ceil"),
+        ustring("fmod"),
+        ustring("cos"),
+        ustring("sqrt"),
+        ustring("pow"),
+        ustring("functioncall"),
+        ustring("pnoise"),
+        ustring("psnoise"),
+        ustring("cellnoise"),
+        ustring("hashnoise"),
+        ustring("hash"),
+        ustring("printf"),
+        ustring("warning"),
+        ustring("error"),
+        ustring("texture"),
+        ustring("matrix"),
+        ustring("mxcompref"),
+        ustring("mxcompassign"),
+        ustring("transpose"),
+        ustring("determinant"),
+        ustring("transform"),
+        ustring("transformv"),
+        ustring("transformn"),
+        ustring("getmatrix"),
+        ustring("closure"),
+        ustring("tan"),
+        ustring("asin"),
+        ustring("acos"),
+        ustring("atan"),
+        ustring("atan2"),
+        ustring("sinh"),
+        ustring("cosh"),
+        ustring("tanh"),
+        ustring("sincos"),
+        ustring("log"),
+        ustring("log2"),
+        ustring("log10"),
+        ustring("logb"),
+        ustring("exp"),
+        ustring("exp2"),
+        ustring("expm1"),
+        ustring("erf"),
+        ustring("erfc"),
+        ustring("cbrt"),
+        ustring("inversesqrt"),
+        ustring("round"),
+        ustring("trunc"),
+        ustring("sign"),
+        ustring("isnan"),
+        ustring("isinf"),
+        ustring("isfinite"),
+        ustring("fabs"),
+        ustring("cross"),
+        ustring("distance"),
+        ustring("area"),
+        ustring("calculatenormal"),
+        ustring("spline"),
+        ustring("splineinverse"),
+        ustring("blackbody"),
+        ustring("wavelength_color"),
+        ustring("luminance"),
+        ustring("transformc"),
+        ustring("raytype"),
+        ustring("backfacing"),
+        ustring("surfacearea"),
+        ustring("getattribute"),
+    };
+    // clang-format on
+    static const ustring readable_globals[] = {
+        ustring("u"),    ustring("v"),  ustring("P"),
+        ustring("N"),    ustring("Ng"), ustring("dPdu"),
+        ustring("dPdv"), ustring("I"),  ustring("time"),
+    };
+    for (const Opcode& op : m_master->m_ops) {
+        if (std::find(std::begin(supported), std::end(supported), op.opname())
+            == std::end(supported)) {
+            shadingsys().errorfmt("HART: unsupported operation '{}' in shader "
+                                  "'{}' ({}:{})",
+                                  op.opname(), shadername(), op.sourcefile(),
+                                  op.sourceline());
+            return false;
+        }
+        if (!geometry
+            && (op.opname() == ustring("raytype")
+                || op.opname() == ustring("backfacing")
+                || op.opname() == ustring("surfacearea"))) {
+            shadingsys().errorfmt(
+                "HART: renderer lacks HARTGeometry for '{}' in shader '{}'",
+                op.opname(), shadername());
+            return false;
+        }
+        if (op.opname() == ustring("getattribute") && !validate_attribute(op))
+            return false;
+        const bool spatial = op.opname() == ustring("matrix")
+                             || op.opname() == ustring("getmatrix")
+                             || op.opname() == ustring("transform")
+                             || op.opname() == ustring("transformv")
+                             || op.opname() == ustring("transformn")
+                             || op.opname() == ustring("point")
+                             || op.opname() == ustring("vector")
+                             || op.opname() == ustring("normal");
+        if (spatial && !validate_transform(op))
+            return false;
+        if (op.opname() == ustring("texture") && !validate_texture(op))
+            return false;
+        if (op.opname() == ustring("closure") && !validate_closure(op))
+            return false;
+        if (op.opname() == ustring("hash") && !validate_hash(op))
+            return false;
+        const bool diagnostic = op.opname() == ustring("printf")
+                                || op.opname() == ustring("warning")
+                                || op.opname() == ustring("error");
+        if (diagnostic && !validate_diagnostic(op))
+            return false;
+        if ((op.opname() == ustring("noise") || op.opname() == ustring("pnoise"))
+            && !validate_noise(op))
+            return false;
+        if ((op.opname() == ustring("spline")
+             || op.opname() == ustring("splineinverse"))
+            && !validate_spline(op))
+            return false;
+        if ((op.opname() == ustring("color")
+             || op.opname() == ustring("blackbody")
+             || op.opname() == ustring("wavelength_color")
+             || op.opname() == ustring("luminance")
+             || op.opname() == ustring("transformc"))
+            && !validate_color(op))
+            return false;
+        if (op.opname() == ustring("mxcompref")
+            || op.opname() == ustring("mxcompassign")) {
+            const int first = op.opname() == ustring("mxcompref") ? 2 : 1;
+            for (int a = first; a < first + 2; ++a) {
+                const Symbol& index
+                    = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                if (!index.typespec().is_int()
+                    || (index.is_constant()
+                        && (index.get_int() < 0 || index.get_int() >= 4))
+                    || (!index.is_constant() && !bounds)) {
+                    shadingsys().errorfmt(
+                        "HART: matrix indices must be integers in [0,3]; "
+                        "dynamic indices require HARTArrayBounds "
+                        "in shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+            }
+        }
+        const bool array_ref        = op.opname() == ustring("aref");
+        const bool array_assign     = op.opname() == ustring("aassign");
+        const bool component_ref    = op.opname() == ustring("compref");
+        const bool component_assign = op.opname() == ustring("compassign");
+        const bool matrix_ref       = op.opname() == ustring("mxcompref");
+        const bool matrix_assign    = op.opname() == ustring("mxcompassign");
+        if (array_ref || array_assign || component_ref || component_assign
+            || matrix_ref || matrix_assign) {
+            const int first = array_ref || component_ref || matrix_ref ? 2 : 1;
+            const int count = matrix_ref || matrix_assign ? 2 : 1;
+            const Symbol& aggregate
+                = m_master->m_symbols[m_master->m_args[op.firstarg()
+                                                       + (first == 2 ? 1 : 0)]];
+            const int length = array_ref || array_assign
+                                   ? aggregate.typespec().arraylength()
+                                   : (count == 2 ? 4 : 3);
+            for (int a = first; a < first + count; ++a) {
+                const Symbol& index
+                    = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                if (index.is_constant() && index.get_int() >= 0
+                    && index.get_int() < length)
+                    continue;
+                if (!bounds || !m_master->range_checking()) {
+                    shadingsys().errorfmt(
+                        "HART: checked indexing requires HARTArrayBounds and "
+                        "range_checking in shader '{}' ({}:{})",
+                        shadername(), op.sourcefile(), op.sourceline());
+                    return false;
+                }
+            }
+        }
+        for (int a = 0; a < op.nargs(); ++a) {
+            const Symbol& sym
+                = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+            if (op.opname() == ustring("closure") && sym.typespec().is_string())
+                continue;  // Validated literal constructor name, not a string.
+            if (op.opname() == ustring("texture") && sym.typespec().is_string())
+                continue;
+            if (a == 1
+                && (op.opname() == ustring("spline")
+                    || op.opname() == ustring("splineinverse")))
+                continue;  // Validated immutable basis, not a device string.
+            if ((op.opname() == ustring("color") && op.nargs() == 5 && a == 1)
+                || (op.opname() == ustring("transformc") && (a == 1 || a == 2)))
+                continue;  // Validated literal color spaces, not device strings.
+            if (diagnostic && sym.typespec().is_string_based())
+                continue;  // Literal format and typed argument payload.
+            if (spatial && sym.typespec().is_string())
+                continue;
+            // Inlined function markers carry a name, not a device string.
+            // The body remains subject to the same per-operation checks.
+            if (op.opname() == ustring("functioncall") && op.nargs() == 1
+                && sym.is_constant() && sym.typespec().is_string()
+                && !op.argwrite(a))
+                continue;
+            // Selectors and option names were validated before optimization.
+            if (sym.typespec().is_string()
+                && (op.opname() == ustring("noise")
+                    || op.opname() == ustring("pnoise"))) {
+                continue;
+            }
+            if (!validate_type(sym))
+                return false;
+            if (sym.typespec().is_string_based()
+                && !validate_string_operands(op))
+                return false;
+            if (sym.symtype() == SymTypeGlobal) {
+                if (closures && sym.name() == ustring("Ci"))
+                    continue;
+                const bool readable = std::find(std::begin(readable_globals),
+                                                std::end(readable_globals),
+                                                sym.name())
+                                      != std::end(readable_globals);
+                if (geometry
+                    && ((!op.argwrite(a)
+                         && (sym.name() == ustring("dtime")
+                             || sym.name() == ustring("dPdtime")))
+                        || (readable && sym.name() != ustring("time"))))
+                    continue;
+                if (op.argwrite(a)) {
+                    shadingsys().errorfmt("HART: writing shader global '{}' is "
+                                          "unsupported in shader '{}'",
+                                          sym.name(), shadername());
+                    return false;
+                }
+                if (!readable) {
+                    shadingsys().errorfmt("HART: unsupported shader global '{}' "
+                                          "in shader '{}'",
+                                          sym.name(), shadername());
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 
@@ -843,11 +2004,54 @@ ShaderGroup::setup_interactive_arena(cspan<uint8_t> paramblock)
             // print("group {} has device interactive_params set to {:p}\n",
             //       name(), m_device_interactive_arena.d_get());
         }
+        if (shadingsys().use_hart())
+            upload_hart_interactive(0, paramblock);
     } else {
         m_interactive_arena_size = 0;
         m_interactive_arena.reset();
         m_device_interactive_arena.reset();
     }
+}
+
+
+
+bool
+ShaderGroup::upload_hart_interactive(size_t offset, cspan<uint8_t> data)
+{
+    auto& ss = shadingsys();
+    if (offset > m_interactive_arena_size
+        || data.size() > m_interactive_arena_size - offset || !data.data()) {
+        ss.errorfmt("HART: invalid interactive parameter arena range");
+        return false;
+    }
+    auto* rs = ss.renderer();
+    if (!m_device_interactive_arena) {
+        m_device_interactive_arena_valid = false;
+        m_device_interactive_arena.reset(
+            static_cast<uint8_t*>(rs->device_alloc(m_interactive_arena_size)));
+        if (!m_device_interactive_arena) {
+            ss.errorfmt("HART: failed to allocate interactive parameters");
+            return false;
+        }
+    }
+    // A failed copy may have modified part of the device arena. Recover from
+    // the last committed host mirror, not just the next parameter's bytes.
+    std::vector<uint8_t> recovery;
+    if (!m_device_interactive_arena_valid
+        && (offset || data.size() != m_interactive_arena_size)) {
+        recovery.assign(m_interactive_arena.get(),
+                        m_interactive_arena.get() + m_interactive_arena_size);
+        memcpy(recovery.data() + offset, data.data(), data.size());
+        offset = 0;
+        data   = recovery;
+    }
+    auto* destination = m_device_interactive_arena.d_get() + offset;
+    m_device_interactive_arena_valid
+        = rs->copy_to_device(destination, data.data(), data.size())
+          == destination;
+    if (!m_device_interactive_arena_valid)
+        ss.errorfmt("HART: failed to upload interactive parameters");
+    return m_device_interactive_arena_valid;
 }
 
 

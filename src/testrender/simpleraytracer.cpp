@@ -69,10 +69,11 @@ public:
     virtual void operator()(int errcode, const std::string& msg)
     {
         OIIO::ErrorHandler::operator()(errcode, msg);
-        if (errcode & OIIO::ErrorHandler::EH_ERROR
-            || errcode & OIIO::ErrorHandler::EH_SEVERE)
+        const int category = errcode & 0xffff0000;
+        if (category == OIIO::ErrorHandler::EH_ERROR
+            || category == OIIO::ErrorHandler::EH_SEVERE)
             m_rend.m_had_error = true;
-        if (errcode & OIIO::ErrorHandler::EH_SEVERE)
+        if (category == OIIO::ErrorHandler::EH_SEVERE)
             exit(EXIT_FAILURE);
     }
 
@@ -970,7 +971,17 @@ SimpleRaytracer::subpixel_radiance(float x, float y, Sampler& sampler,
     int prev_id    = -1;
     float bsdf_pdf = inf;  // camera ray has only one possible direction
     MediumStack medium_stack;
-
+    auto invalid_transport = [&](const char* operation) {
+#ifndef __CUDACC__
+        errhandler().severefmt("Invalid {} at pixel ({}, {}), medium depth {}",
+                               operation, x, y, medium_stack.size());
+#else
+        OSL_ASSERT(false
+                   && "Invalid closure or medium state, sample, or capacity");
+        __trap();
+#endif
+        return Color3(std::numeric_limits<float>::quiet_NaN());
+    };
 
     for (int b = 0; b <= max_bounces; b++) {
         ShaderGlobalsType sg;
@@ -996,8 +1007,14 @@ SimpleRaytracer::subpixel_radiance(float x, float y, Sampler& sampler,
             break;
         }
 
-        if (medium_stack.integrate(r, sampler, hit, path_weight, path_radiance,
-                                   bsdf_pdf)) {
+        const auto event = medium_stack.integrate(r, sampler, hit.t,
+                                                  path_weight, bsdf_pdf);
+        if (event == MediumStack::Event::Error)
+            return invalid_transport("medium integration");
+        if (event == MediumStack::Event::Absorbed)
+            break;
+        if (event == MediumStack::Event::Scatter) {
+            prev_id = -1;
             continue;
         }
 
@@ -1039,8 +1056,9 @@ SimpleRaytracer::subpixel_radiance(float x, float y, Sampler& sampler,
 #endif
         ShadingResult result;
         bool last_bounce = b == max_bounces;
-        process_closure(sg, r.roughness, result, medium_stack,
-                        (const ClosureColor*)sg.Ci, last_bounce);
+        if (!process_closure(sg, r.roughness, result, medium_stack,
+                             (const ClosureColor*)sg.Ci, last_bounce))
+            return invalid_transport("surface closure");
 
 #ifndef __CUDACC__
         const size_t lightprims_size = m_lightprims.size();
@@ -1150,9 +1168,11 @@ SimpleRaytracer::subpixel_radiance(float x, float y, Sampler& sampler,
                         execute_shader(light_sg, shaderID, light_closure_pool);
 #endif
                         ShadingResult light_result;
-                        process_closure(light_sg, r.roughness, light_result,
-                                        medium_stack,
-                                        (const ClosureColor*)light_sg.Ci, true);
+                        if (!process_closure(light_sg, r.roughness,
+                                             light_result, medium_stack,
+                                             (const ClosureColor*)light_sg.Ci,
+                                             true))
+                            return invalid_transport("light closure");
                         // accumulate contribution
                         path_radiance += contrib * light_result.Le;
                     }
@@ -1176,17 +1196,21 @@ SimpleRaytracer::subpixel_radiance(float x, float y, Sampler& sampler,
 
         if (transmitted) {
             if (!sg.backfacing) {  // if entering and crossing surface
-                medium_stack.add_medium(result.medium_data);
-            } else {
-                medium_stack.pop_medium();
+                if (!medium_stack.add_medium(result.medium_data))
+                    return invalid_transport("medium entry");
+            } else if (!medium_stack.pop_medium()) {
+                return invalid_transport("medium exit");
             }
         }
 
         if (!(path_weight.x > 0) && !(path_weight.y > 0)
             && !(path_weight.z > 0))
             break;  // filter out all 0's or NaNs
-        prev_id  = hit.id;
-        r.origin = sg.P;
+        prev_id = hit.id;
+        // Neighboring triangles must not register the same medium entry twice.
+        r.origin = transmitted
+                       ? scene.offset_ray_origin(hit.id, sg.P, sg.Ng, p.wi)
+                       : sg.P;
     }
     return path_radiance;
 }

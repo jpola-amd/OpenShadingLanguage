@@ -36,6 +36,7 @@
 #if OSL_USE_OPTIX
 #    include "optixgridrender.h"
 #endif
+#include "hartgridrender.h"
 
 #include "render_state.h"
 #include "simplerend.h"
@@ -89,6 +90,9 @@ static bool print_outputs        = false;
 static bool output_placement     = true;
 static bool use_optix            = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_OPTIX"));
+static bool use_hart                    = false;
+static bool hart_options                = false;
+static HartOptions hart;
 static bool optix_no_inline             = false;
 static bool optix_no_inline_layer_funcs = false;
 static bool optix_no_merge_layer_funcs  = false;
@@ -196,11 +200,10 @@ set_shadingsys_options()
     // not actually write to those values.
     OSL_DEV_ONLY(shadingsys->attribute("clearmemory", 1));
 
-    // Always generate llvm debugging info
-    shadingsys->attribute("llvm_debugging_symbols", 1);
+    // Host debugging/profiling instrumentation is not supported by HART.
+    shadingsys->attribute("llvm_debugging_symbols", int(!use_hart));
 
-    // Always emit llvm Intel profiling events
-    shadingsys->attribute("llvm_profiling_events", 1);
+    shadingsys->attribute("llvm_profiling_events", int(!use_hart));
 
     OSL_DEV_ONLY(llvm_debug = true);
     shadingsys->attribute("llvm_debug", (llvm_debug ? 2 : 0));
@@ -414,6 +417,7 @@ add_shader(cspan<const char*> argv)
     shadingsys->Shader(*shadergroup, "surface", shadername, layername);
     layername.clear();
     params.clear();
+    param_hints.clear();
     return 0;
 }
 
@@ -470,6 +474,7 @@ specify_expr(cspan<const char*> argv)
     shadingsys->Shader(*shadergroup, "surface", shadername, layername);
     layername.clear();
     params.clear();
+    param_hints.clear();
 }
 
 
@@ -490,7 +495,7 @@ parse_float_list(string_view str, float* f, int len)
 
 
 // Utility: Add {paramname, stringval} to the given parameter list.
-static void
+static ParamHints
 add_param(ParamValueList& params, string_view command, string_view paramname,
           string_view stringval)
 {
@@ -528,8 +533,7 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
     if ((type == TypeDesc::UNKNOWN || type == TypeMatrix)
         && parse_float_list(stringval, f, 16)) {
         params.emplace_back(paramname, TypeMatrix, 1, f);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
     // If it is or might be a vector type, look for 3 comma-separated floats
     if ((type == TypeDesc::UNKNOWN || equivalent(type, TypeVector))
@@ -537,24 +541,21 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
         if (type == TypeDesc::UNKNOWN)
             type = TypeVector;
         params.emplace_back(paramname, type, 1, f);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
     // If it is or might be an int, look for an int that takes up the whole
     // string.
     if ((type == TypeDesc::UNKNOWN || type == TypeInt)
         && OIIO::Strutil::string_is<int>(stringval)) {
         params.emplace_back(paramname, OIIO::Strutil::stoi(stringval));
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
     // If it is or might be an float, look for a float that takes up the
     // whole string.
     if ((type == TypeDesc::UNKNOWN || type == TypeFloat)
         && OIIO::Strutil::string_is<float>(stringval)) {
         params.emplace_back(paramname, OIIO::Strutil::stof(stringval));
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // Catch-all for float types and arrays
@@ -566,8 +567,7 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
             OIIO::Strutil::parse_char(stringval, ',');
         }
         params.emplace_back(paramname, type, 1, &vals[0]);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // Catch-all for int types and arrays
@@ -579,8 +579,7 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
             OIIO::Strutil::parse_char(stringval, ',');
         }
         params.emplace_back(paramname, type, 1, &vals[0]);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // String arrays are slightly tricky
@@ -592,14 +591,13 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
         for (auto&& s : splitelements)
             strelements.push_back(ustring(s));
         params.emplace_back(paramname, type, 1, &strelements[0]);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // All remaining cases -- it's a string
     const char* s = ustring(stringval).c_str();
     params.emplace_back(paramname, TypeString, 1, &s);
-    param_hints.push_back(hint);
+    return hint;
 }
 
 
@@ -614,7 +612,9 @@ action_param(cspan<const char*> argv)
         use_reparam = true;
     ParamValueList& params(use_reparam ? reparams : (::params));
 
-    add_param(params, command, argv[1], argv[2]);
+    const ParamHints hint = add_param(params, command, argv[1], argv[2]);
+    if (!use_reparam)
+        param_hints.push_back(hint);
 }
 
 
@@ -639,13 +639,21 @@ action_groupspec(cspan<const char*> argv)
     if (OIIO::Filesystem::exists(groupspec)) {
         // If it names a file, use the contents of the file as the group
         // specification.
-        OIIO::Filesystem::read_text_file(groupspec, groupspec);
+        if (!OIIO::Filesystem::read_text_file(groupspec, groupspec)) {
+            ErrorHandler::default_handler().errorfmt(
+                "Could not read shader group '{}'", argv[1]);
+            exit(EXIT_FAILURE);
+        }
     }
     set_shadingsys_options();
     if (verbose)
         std::cout << "Processing group specification:\n---\n"
                   << groupspec << "\n---\n";
     shadergroup = shadingsys->ShaderGroupBegin(groupname, "surface", groupspec);
+    if (!shadergroup) {
+        ErrorHandler::default_handler().errorfmt("Invalid shader group");
+        exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -705,6 +713,9 @@ getargs(int argc, const char* argv[])
     // they can be later processed in full.
     shader_setup_args.clear();
     shader_setup_args.push_back("testshade");  // seed with 'program'
+    use_hart     = OIIO::Strutil::stoi(OIIO::Sysutil::getenv("TESTSHADE_HART"));
+    hart_options = false;
+    hart         = HartOptions {};
 
     // clang-format off
     OIIO::ArgParse ap;
@@ -719,6 +730,34 @@ getargs(int argc, const char* argv[])
       .help("Set thread count (default = 0: auto-detect #cores)");
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
+    ap.arg("--hart", &use_hart)
+      .help("Run a simple OSL shader or external AMDGPU bitcode through HART "
+            "(or set TESTSHADE_HART=1)");
+    ap.arg("--hart-module %s:FILE", &hart.module)
+      .help("HART grid module: raw LLVM bitcode")
+      .action([&](cspan<const char*> args) { hart.module = args[1]; hart.has_module = hart_options = true; });
+    ap.arg("--hart-callable-module %s:FILE", &hart.callable_module)
+      .help("Optional HART bitcode with testshade init/entry callables")
+      .action([&](cspan<const char*> args) { hart.callable_module = args[1]; hart.has_callables = hart_options = true; });
+    ap.arg("--hart-entry %s:NAME", &hart.entry)
+      .help("HART raygen entry (default: __raygen__testshade)")
+      .action([&](cspan<const char*> args) { hart.entry = args[1]; hart.has_entry = hart_options = true; });
+    ap.arg("--hart-device %d:INDEX", &hart.device)
+      .help("HIP device ordinal (default: 0)")
+      .action([&](cspan<const char*> args) { hart.device = OIIO::Strutil::stoi(args[1]); hart_options = true; });
+    ap.arg("--hart-no-cache", &hart.no_cache)
+      .help("Disable the HART pipeline cache for this run")
+      .action([&](cspan<const char*>) { hart.no_cache = hart_options = true; });
+    ap.arg("--hart-fused", &hart.fused)
+      .help("Use one init+entry callable for a generated HART shader group "
+            "(or set TESTSHADE_FUSED=1 with HART)")
+      .action([&](cspan<const char*>) { hart.fused = hart_options = true; });
+    ap.arg("--hart-local-groupdata %s:BYTES", &hart.local_groupdata)
+      .help("Maximum private group-data bytes for --hart-fused (default: 0)")
+      .action([&](cspan<const char*> args) {
+          hart.local_groupdata = args[1];
+          hart.has_local_groupdata = hart_options = true;
+      });
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
     ap.arg("--debug2", &debug2)
@@ -866,6 +905,9 @@ getargs(int argc, const char* argv[])
 
     // clang-format on
     ap.parse_args(argc, argv);
+    if (use_hart
+        && OIIO::Strutil::stoi(OIIO::Sysutil::getenv("TESTSHADE_FUSED")))
+        hart.fused = hart_options = true;
 }
 
 
@@ -1941,6 +1983,38 @@ test_shade(int argc, const char* argv[])
     // instances are queued up in shader_setup_args for later handling.
     getargs(argc, argv);
 
+    if (use_hart) {
+        if (use_optix) {
+            ErrorHandler::default_handler().errorfmt(
+                "--hart and OptiX execution are mutually exclusive");
+            return EXIT_FAILURE;
+        }
+#if OSL_TESTSHADE_HART
+        hart.runstats = runstats;
+        if ((hart.fused || hart.has_local_groupdata)
+            && (hart.has_module || shader_setup_args.size() == 1)) {
+            ErrorHandler::default_handler().errorfmt(
+                "--hart-fused and --hart-local-groupdata require a generated "
+                "OSL shader group");
+            return EXIT_FAILURE;
+        }
+        if (hart.has_module || shader_setup_args.size() == 1)
+            return testshade_hart(argc, argv);
+        if (!testshade_hart_validate_generated(argc, argv, hart, xres, yres,
+                                               iters))
+            return EXIT_FAILURE;
+#else
+        ErrorHandler::default_handler().errorfmt(
+            "HART support is not enabled in this build");
+        return EXIT_FAILURE;
+#endif
+    }
+    if (hart_options && !use_hart) {
+        ErrorHandler::default_handler().errorfmt(
+            "HART-specific options require --hart");
+        return EXIT_FAILURE;
+    }
+
     // For testing purposes, allow user to set global locale
     if (localename.size()) {
         std::locale::global(std::locale(localename.c_str()));
@@ -1950,8 +2024,16 @@ test_shade(int argc, const char* argv[])
     }
 
     std::unique_ptr<SimpleRenderer> rend;
+    std::string hart_arch;
+#if OSL_TESTSHADE_HART
+    if (use_hart) {
+        rend = testshade_hart_renderer(hart.device, hart_arch, true);
+        if (!rend)
+            return EXIT_FAILURE;
+    } else
+#endif
 #if OSL_USE_OPTIX
-    if (use_optix)
+        if (use_optix)
         rend.reset(new OptixGridRenderer);
     else
 #endif
@@ -1987,6 +2069,19 @@ test_shade(int argc, const char* argv[])
     // make its own TS), and an error handler.
     shadingsys = new ShadingSystem(rend.get(), texturesys, &rend->errhandler());
     rend->init_shadingsys(shadingsys);
+#if OSL_TESTSHADE_HART
+    if (use_hart
+        && (!shadingsys->attribute("hart_arch", hart_arch)
+            || !shadingsys->attribute("max_hart_groupdata_alloc",
+                                      OIIO::Strutil::stoi(
+                                          hart.local_groupdata)))) {
+        rend->errhandler().errorfmt("Cannot select HART architecture '{}'",
+                                    hart_arch);
+        delete shadingsys;
+        shadingsys = nullptr;
+        return EXIT_FAILURE;
+    }
+#endif
 
     // Register the layout of all closures known to this renderer
     // Any closure used by the shader which is not registered, or
@@ -2109,6 +2204,55 @@ test_shade(int argc, const char* argv[])
         }
         std::cout << "\n";
     }
+
+    auto report_groupdata_size = [&]() {
+        if ((!debug1 && !print_groupdata) || batched)
+            return true;
+        int groupdata_size = 0;
+        if (!shadingsys->getattribute(shadergroup.get(), "llvm_groupdata_size",
+                                      groupdata_size)) {
+            rend->errhandler().errorfmt(
+                "Cannot retrieve compiled Groupdata size");
+            return false;
+        }
+        OSL::print("Groupdata size: {}\n", groupdata_size);
+        return true;
+    };
+
+#if OSL_TESTSHADE_HART
+    if (use_hart) {
+        setup_transformations(*rend, Mshad, Mobj);
+        hart.shader_entries = entrylayers;
+        hart.entry_outputs  = entryoutputs;
+        hart.pixelcenters   = pixelcenters;
+        if (!reparams.empty()) {
+            hart.update_parameters = [&]() {
+                for (const auto& value : reparams)
+                    if (!shadingsys->ReParameter(*shadergroup, reparam_layer,
+                                                 value.name(), value.type(),
+                                                 value.data()))
+                        return false;
+                return true;
+            };
+        }
+        std::vector<HartOutputRequest> hart_outputs;
+        for (size_t i = 0; i < outputvars.size(); ++i)
+            hart_outputs.push_back({ outputvars[i], outputfiles[i] });
+        bool ok = testshade_hart_generated(
+            *rend, *shadingsys, *shadergroup, hart, hart_arch, xres, yres,
+            iters, warmup, verbose || debug1,
+            shadingsys->raytype_bit(ustring(raytype_name)), print_outputs,
+            outputfiles.empty() ? string_view("null") : outputfiles[0],
+            dataformatname, Mobj, Mshad, hart_outputs);
+        if (ok)
+            ok = report_groupdata_size();
+        shadergroup.reset();
+        delete shadingsys;
+        shadingsys = nullptr;
+        return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+#endif
+
     if (archivegroup.size())
         shadingsys->archive_shadergroup(shadergroup.get(), archivegroup);
 
@@ -2329,14 +2473,7 @@ test_shade(int argc, const char* argv[])
         std::cout << ustring::getstats() << "\n";
     }
 
-    // TODO: Include batched support
-    if ((debug1 || print_groupdata) && !batched) {
-        int groupdata_size;
-        shadingsys->getattribute(shadergroup.get(), "llvm_groupdata_size",
-                                 TypeDesc::INT, &groupdata_size);
-
-        std::cout << "Groupdata size: " << groupdata_size << "\n";
-    }
+    const bool groupdata_reported = report_groupdata_size();
 
     if (print_group_stats && !batched) {
         static const char* metrics[] = { "active_layers", "network_depth",
@@ -2383,7 +2520,7 @@ test_shade(int argc, const char* argv[])
     shadergroup.reset();  // Must release this before destroying shadingsys
 
     delete shadingsys;
-    int retcode = EXIT_SUCCESS;
+    int retcode = groupdata_reported ? EXIT_SUCCESS : EXIT_FAILURE;
 
     // Double check that there were no uncaught errors in the texture
     // system and image cache.

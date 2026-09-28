@@ -1,0 +1,97 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#define EVALUATE_MATH(TYPE, INPUT)                 \
+    TYPE a = INPUT;                                \
+    if (operation == 12)                           \
+        a *= 0.03125;                              \
+    TYPE b = 0.5 * a;                              \
+    TYPE lo = -1;                                  \
+    TYPE hi = 1;                                   \
+    TYPE weight = 0.5 + 0.125 * a;                 \
+    TYPE divisor = 1 + 0.25 * a;                   \
+    TYPE exponent = 2;                             \
+    if (probe == 1)                                \
+        exponent = 3;                              \
+    else if (probe == 2 || probe == 4)             \
+        exponent = 1.5;                            \
+    else if (probe == 3) {                         \
+        exponent = 2 + 0.125 * a;                  \
+        lo = -1 + 0.125 * a;                       \
+        hi = 1 + 0.25 * a;                         \
+    }                                              \
+    if (probe == 4) {                              \
+        lo = 0;                                    \
+        hi = 0;                                    \
+        divisor = 0;                               \
+    }                                              \
+    TYPE result = 0;                               \
+    if (operation == 0)                            \
+        result = abs(a);                           \
+    else if (operation == 1)                       \
+        result = min(a, b);                        \
+    else if (operation == 2)                       \
+        result = max(a, b);                        \
+    else if (operation == 3)                       \
+        result = clamp(a, lo, hi);                 \
+    else if (operation == 4) {                     \
+        if (probe == 4)                            \
+            result = mix(a, b, 0.25);              \
+        else                                       \
+            result = mix(a, b, weight);            \
+    } else if (operation == 5)                     \
+        result = step(b, a);                       \
+    else if (operation == 6)                       \
+        result = smoothstep(lo, hi, a);            \
+    else if (operation == 7)                       \
+        result = floor(a);                         \
+    else if (operation == 8)                       \
+        result = ceil(a);                          \
+    else if (operation == 9) {                     \
+        if (probe == 3)                            \
+            result = fmod(a, -1.0);                \
+        else                                       \
+            result = fmod(a, divisor);             \
+    } else if (operation == 10)                    \
+        result = cos(a);                           \
+    else if (operation == 11)                      \
+        result = sqrt(a);                          \
+    else if (probe == 4)                           \
+        result = pow(a, 1.5);                      \
+    else                                           \
+        result = pow(a, exponent);                 \
+    Cout = color(result);
+
+shader hart_math(int constant_inputs = 0, output color Cout = 0)
+{
+    // A 65x33 grid packs 13 operations, five probes, and float/color/vector
+    // rows. Binary-exact coordinates put probes on discontinuities, not near
+    // them. Probe selection is discrete, but the operands retain derivatives.
+    int column = int(64 * u);
+    int operation = column / 5;
+    int probe = column - 5 * operation;
+    int kind = int(32 * v) / 11;
+    float s = 8 * (u - 5 * operation / 64.0)
+              + 16 * (v - 11 * kind / 32.0) - 2.75;
+    if (constant_inputs)
+        s = -0.5;
+    // The spare probe also checks integer operations and their zero derivatives.
+    if (probe == 4 && operation < 4) {
+        int a = int(2 * s);
+        if (operation == 0)
+            Cout = color(abs(a));
+        else if (operation == 1)
+            Cout = color(min(a, -a));
+        else if (operation == 2)
+            Cout = color(max(a, -a));
+        else
+            Cout = color(clamp(a, -2, 2));
+    } else if (kind == 0) {
+        EVALUATE_MATH(float, s)
+    } else if (kind == 1) {
+        EVALUATE_MATH(color, color(s + 0.25, -0.5 * (s + 0.125), 2 * s))
+    } else {
+        EVALUATE_MATH(vector, vector(s + 0.25, -0.5 * (s + 0.125), 2 * s))
+    }
+}

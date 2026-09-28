@@ -1,0 +1,112 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#define IMPLICIT(file, ...) texture(file, s, t, __VA_ARGS__)
+#define EXPLICIT(file, ...) \
+    texture(file, s, t, dsdx, dtdx, dsdy, dtdy, __VA_ARGS__)
+#define SAMPLE_OPTIONS(function, file, result)                            \
+    if (mode == 0)                                                       \
+        result = function(file, "interp", "closest", "wrap", "black");    \
+    else if (mode == 1)                                                  \
+        result = function(file, "interp", "linear", "wrap", "black");     \
+    else if (mode == 2)                                                  \
+        result = function(file, "interp", "closest", "wrap", "clamp");    \
+    else if (mode == 3)                                                  \
+        result = function(file, "interp", "linear", "wrap", "clamp");     \
+    else if (mode == 4)                                                  \
+        result = function(file, "interp", "closest", "wrap", "periodic"); \
+    else if (mode == 5)                                                  \
+        result = function(file, "interp", "linear", "wrap", "periodic");  \
+    else if (mode == 6)                                                  \
+        result = function(file, "interp", "closest",                     \
+                          "swrap", "clamp", "twrap", "periodic");        \
+    else                                                                \
+        result = function(file, "interp", "linear",                      \
+                          "swrap", "clamp", "twrap", "periodic");
+
+#define SAMPLE_TYPE(TYPE, file)              \
+    TYPE result = 0;                         \
+    if (explicit_lookup) {                   \
+        SAMPLE_OPTIONS(EXPLICIT, file, result) \
+    } else {                                 \
+        SAMPLE_OPTIONS(IMPLICIT, file, result) \
+    }                                        \
+    rgb = color(result);
+
+shader hart_texture_samples(color value = 0, int connected = 0,
+                            int image = 0, int report = 0,
+                            float coordinate_scale = 1,
+                            output color Cout = 0)
+{
+    // 65x17: eight coordinate/footprint bands, eight literal sampler modes,
+    // and both return types. All grid coordinates and UV arithmetic are exact.
+    int column = int(64 * u);
+    int row = int(16 * v);
+    int band = column / 8;
+    int probe = column - 8 * band;
+    int mode = row - 8 * (row / 8);
+    int scalar = int(row >= 8);
+    float s0 = -0.125, t0 = 0.375;
+    if (probe == 1) { s0 = 0.3125; t0 = -0.25; }
+    else if (probe == 2) { s0 = 0; t0 = 0; }
+    else if (probe == 3) { s0 = 0.0625; t0 = 0.125; }
+    else if (probe == 4) { s0 = 0.5; t0 = 0.5; }
+    else if (probe == 5) { s0 = 0.9375; t0 = 0.875; }
+    else if (probe == 6) { s0 = 1; t0 = 1; }
+    else if (probe == 7) { s0 = 1.125; t0 = 1.25; }
+    float s = s0 + (band == 7 ? 16 : 1) * (u - column / 64.0);
+    float t = t0 + (band == 7 ? 4 : 1) * (v - row / 16.0);
+    if (band == 8) {
+        s = 0.3125;
+        t = 0.375;
+    }
+    if (connected) {
+        s = value[0];
+        t = value[1];
+        band = 0;
+        mode = 3;
+        scalar = 0;
+        probe = int(8 * u);
+    }
+    s *= coordinate_scale;
+    t *= coordinate_scale;
+    float dsdx = Dx(s), dtdx = Dx(t), dsdy = Dy(s), dtdy = Dy(t);
+    int explicit_lookup = int(band >= 1 && band <= 6);
+    if (band == 2) {
+        dsdx = 0; dtdx = 0; dsdy = 0; dtdy = 0;
+    } else if (band == 3) {
+        dsdx = 0.25; dtdy = 0.25;
+    } else if (band == 4) {
+        dsdx = 0.375; dtdy = 0.5;
+    } else if (band == 5) {
+        dsdx = 2; dtdy = 2;
+    } else if (band == 6) {
+        dsdx = 0.125; dtdx = 0.375; dsdy = -0.125; dtdy = 0.25;
+    }
+    color rgb = 0;
+    int selected_image = image;
+    if (image < 0)
+        selected_image = int(2 * v + 0.5);
+    if (selected_image == 0) {
+        if (scalar) { SAMPLE_TYPE(float, "hart_texture_rgb.pfm") }
+        else { SAMPLE_TYPE(color, "hart_texture_rgb.pfm") }
+    } else if (selected_image == 1) {
+        if (scalar) { SAMPLE_TYPE(float, "hart_texture_mono.pfm") }
+        else { SAMPLE_TYPE(color, "hart_texture_mono.pfm") }
+    } else {
+        if (scalar) { SAMPLE_TYPE(float, "hart_texture_constant.pfm") }
+        else { SAMPLE_TYPE(color, "hart_texture_constant.pfm") }
+    }
+    if (report == 0)
+        Cout = rgb;
+    else {
+        int component = probe - 3 * (probe / 3);
+        float sample = rgb[0];
+        if (component == 1)
+            sample = rgb[1];
+        else if (component == 2)
+            sample = rgb[2];
+        Cout = color(sample, Dx(sample), Dy(sample));
+    }
+}

@@ -1,0 +1,12 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_string_source(string text = "alpha", output string value = "",
+                         output string words[3] = {"", "", ""})
+{
+    value = u > .5 ? text : "red";
+    words[0] = value;
+    words[1] = "literal";
+    words[2] = v > .5 ? "" : text;
+}

@@ -1,0 +1,26 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_surface_globals(int field = -1, output color Cout = 0)
+{
+    int selected = field;
+    if (selected < 0)
+        selected = (u > 0.25) + 2 * (v > 0.25) + 4 * (u > v);
+    if (selected == 0)
+        Cout = color(P);
+    else if (selected == 1)
+        Cout = color(Dx(P));
+    else if (selected == 2)
+        Cout = color(Dy(P));
+    else if (selected == 3)
+        Cout = color(N);
+    else if (selected == 4)
+        Cout = color(Ng);
+    else if (selected == 5)
+        Cout = color(dPdu);
+    else if (selected == 6)
+        Cout = color(dPdv);
+    else
+        Cout = color(Dx(N) + Dy(Ng) + Dx(dPdu) + Dy(dPdv));
+}

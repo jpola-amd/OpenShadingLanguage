@@ -28,6 +28,9 @@
 #if OSL_USE_OPTIX
 #    include "optixraytracer.h"
 #endif
+#if OSL_TESTRENDER_HART
+#    include "hartraytracer.h"
+#endif
 
 using namespace OSL;
 
@@ -61,6 +64,11 @@ static std::string shaderpath;
 static bool shadingsys_options_set = false;
 static bool use_optix              = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_OPTIX"));
+static bool use_hart = OIIO::Strutil::stoi(
+    OIIO::Sysutil::getenv("TESTSHADE_HART"));
+static bool hart_fused    = false;
+static bool hart_no_cache = false;
+static int hart_device = 0, hart_local_groupdata = 0, hart_bounces = 4;
 static bool optix_no_inline             = false;
 static bool optix_no_inline_layer_funcs = false;
 static bool optix_no_merge_layer_funcs  = false;
@@ -119,8 +127,8 @@ set_shadingsys_options()
     if (texoptions.size())
         shadingsys->texturesys()->attribute("options", texoptions);
     // Always generate llvm debugging info and profiling events
-    shadingsys->attribute("llvm_debugging_symbols", 1);
-    shadingsys->attribute("llvm_profiling_events", 1);
+    shadingsys->attribute("llvm_debugging_symbols", use_hart ? 0 : 1);
+    shadingsys->attribute("llvm_profiling_events", use_hart ? 0 : 1);
 
     // We rely on the default set of "raytypes" tags. To use a custom set,
     // this is where we would do:
@@ -155,6 +163,22 @@ getargs(int argc, const char* argv[])
       .help("Set resolution");
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
+    ap.arg("--hart", &use_hart)
+      .help("Use experimental HART surface and volume path tracing "
+            "(or set TESTSHADE_HART=1)");
+    ap.arg("--hart-device %d:DEVICE", &hart_device)
+      .help("HART device ordinal (default: 0)");
+    ap.arg("--hart-no-cache", &hart_no_cache)
+      .help("Disable the HART pipeline cache");
+    ap.arg("--hart-fused", &hart_fused)
+      .help("Use fused HART shader callables "
+            "(or set TESTSHADE_FUSED=1 with HART)");
+    ap.arg("--hart-local-groupdata %d:BYTES", &hart_local_groupdata)
+      .help("Maximum callable-local HART Groupdata bytes (requires --hart-fused)");
+    ap.arg("--hart-bounces %d:N", &hart_bounces)
+      .help("HART surface/volume event limit, 0 through 64 (default: 4)");
+    ap.arg("--max-bounces %d:N", &max_bounces)
+      .help("CPU/OptiX path depth limit (default: 1000000)");
     ap.arg("--debug", &debug1)
       .help("Lots of debugging info");
     ap.arg("--debug2", &debug2)
@@ -231,6 +255,35 @@ getargs(int argc, const char* argv[])
 
     // clang-format on
     ap.parse_args(argc, argv);
+    if (use_hart
+        && OIIO::Strutil::stoi(OIIO::Sysutil::getenv("TESTSHADE_FUSED")))
+        hart_fused = true;
+    if (max_bounces < 0) {
+        print(stderr, "--max-bounces must be nonnegative\n");
+        exit(EXIT_FAILURE);
+    }
+    bool hart_options = false;
+    for (int i = 1; i < argc; ++i)
+        hart_options |= OIIO::Strutil::starts_with(argv[i], "--hart-");
+    if ((use_hart && use_optix) || (!use_hart && hart_options)
+        || hart_device < 0 || hart_local_groupdata < 0
+        || (hart_local_groupdata && !hart_fused)
+        || (use_hart
+            && (hart_bounces < 0 || hart_bounces > 64 || xres <= 0 || yres <= 0
+                || aa <= 0 || aa > 64 || iters <= 0))) {
+        print(stderr, "Invalid HART options: select only --hart, use positive "
+                      "dimensions/iterations, aa 1..64, bounces 0..64 and "
+                      "nonnegative device/storage; local storage requires "
+                      "--hart-fused.\n");
+        exit(EXIT_FAILURE);
+    }
+#if !OSL_TESTRENDER_HART
+    if (use_hart) {
+        print(stderr,
+              "testrender was built without HART LLVM bitcode support\n");
+        exit(EXIT_FAILURE);
+    }
+#endif
     if (scenefile.empty()) {
         std::cerr << "testrender: Must specify an xml scene file to open\n\n";
         ap.print_help();
@@ -280,8 +333,20 @@ main(int argc, const char* argv[])
         aa = aaoverride;
 
     SimpleRaytracer* rend = nullptr;
+#if OSL_TESTRENDER_HART
+    if (use_hart) {
+        auto* hart = new HartRaytracer;
+        rend       = hart;
+        if (!hart->initialize(hart_device, hart_fused,
+                              size_t(hart_local_groupdata), !hart_no_cache,
+                              runstats)) {
+            delete rend;
+            return EXIT_FAILURE;
+        }
+    } else
+#endif
 #if OSL_USE_OPTIX
-    if (use_optix)
+        if (use_optix)
         rend = new OptixRaytracer;
     else
 #endif
@@ -290,7 +355,7 @@ main(int argc, const char* argv[])
     // Other renderer and global options
     if (debug1 || verbose)
         rend->errhandler().verbosity(ErrorHandler::VERBOSE);
-    rend->attribute("max_bounces", max_bounces);
+    rend->attribute("max_bounces", use_hart ? hart_bounces : max_bounces);
     rend->attribute("rr_depth", rr_depth);
     rend->attribute("aa", aa);
     rend->attribute("no_jitter", (int)no_jitter);
@@ -309,6 +374,22 @@ main(int argc, const char* argv[])
     // make its own TS), and an error handler.
     shadingsys       = new ShadingSystem(rend, nullptr, &rend->errhandler());
     rend->shadingsys = shadingsys;
+    auto hart_failed = [&]() {
+#if OSL_TESTRENDER_HART
+        return use_hart
+               && (rend->had_error()
+                   || static_cast<HartRaytracer*>(rend)->failed());
+#else
+        return false;
+#endif
+    };
+    auto finish = [&](int result) {
+        rend->clear();
+        const bool failed = hart_failed();
+        delete shadingsys;
+        delete rend;
+        return failed ? EXIT_FAILURE : result;
+    };
 
     // Register the layout of all closures known to this renderer
     // Any closure used by the shader which is not registered, or
@@ -327,8 +408,11 @@ main(int argc, const char* argv[])
     // Loads a scene, creating camera, geometry and assigning shaders
     rend->camera.resolution(xres, yres);
     rend->parse_scene_xml(scenefile);
-
+    if (hart_failed())
+        return finish(EXIT_FAILURE);
     rend->prepare_render();
+    if (hart_failed())
+        return finish(EXIT_FAILURE);
 
     rend->pixelbuf.reset(ImageSpec(xres, yres, 3, TypeDesc::FLOAT));
 
@@ -336,14 +420,26 @@ main(int argc, const char* argv[])
 
     if (warmup)
         rend->warmup();
+    if (hart_failed())
+        return finish(EXIT_FAILURE);
     double warmuptime = timer.lap();
 
+#if OSL_TESTRENDER_HART
+    if (use_hart && runstats)
+        static_cast<HartRaytracer*>(rend)->reset_launch_statistics();
+#endif
+
     // Launch the kernel to render the scene
-    for (int i = 0; i < iters; ++i)
+    for (int i = 0; i < iters; ++i) {
         rend->render(xres, yres);
+        if (hart_failed())
+            return finish(EXIT_FAILURE);
+    }
     double runtime = timer.lap();
 
     rend->finalize_pixel_buffer();
+    if (hart_failed())
+        return finish(EXIT_FAILURE);
 
     // Write image to disk
     if (Strutil::iends_with(imagefile, ".jpg")
@@ -361,6 +457,16 @@ main(int argc, const char* argv[])
         rend->errhandler().errorfmt("Unable to write output image: {}",
                                     rend->pixelbuf.geterror());
     double writetime = timer.lap();
+
+#if OSL_TESTRENDER_HART
+    if (use_hart && runstats) {
+        static_cast<HartRaytracer*>(rend)->print_statistics();
+        print("HART native frames: {} iterations, {:.6f} ms total, {:.6f} ms "
+              "mean, {:.6f} ms warmup\n",
+              iters, runtime * 1000.0, runtime * 1000.0 / iters,
+              warmup ? warmuptime * 1000.0 : 0.0);
+    }
+#endif
 
     // Print some debugging info
     if (debug1 || runstats || profile) {
@@ -412,8 +518,5 @@ main(int argc, const char* argv[])
     }
 
     // We're done with the shading system now, destroy it
-    rend->clear();
-    delete shadingsys;
-    delete rend;
-    return EXIT_SUCCESS;
+    return finish(EXIT_SUCCESS);
 }

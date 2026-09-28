@@ -12,6 +12,10 @@ if (OSL_BUILD_BATCHED)
         batched_simplerend.cpp)
 endif()
 
+if (OSL_USE_HART)
+    list (APPEND testshade_srcs hartgridrender.cpp harttexture.cpp)
+endif ()
+
 if (OSL_USE_OPTIX)
     list (APPEND testshade_srcs optixgridrender.cpp)
     set ( testshade_cuda_srcs
@@ -73,15 +77,60 @@ list(APPEND include_dirs ${CMAKE_BINARY_DIR}/include)
 list(APPEND include_dirs ${IMATH_INCLUDES})
 list(APPEND include_dirs ${OpenImageIO_INCLUDES})
 
+if (OSL_USE_HART)
+    set (hart_generated_declarations "")
+    set (hart_generated_entries "")
+    set (hart_generated_grids)
+    set (hart_generated_grid_cpp)
+    if (USE_LLVM_BITCODE)
+        get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
+        list (APPEND hart_include_dirs ${include_dirs})
+        list (REMOVE_DUPLICATES hart_include_dirs)
+        set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartgeneratedparams.h")
+        set (hart_grid_architectures ${HART_TARGET_ARCHITECTURES})
+        list (REMOVE_DUPLICATES hart_grid_architectures)
+        foreach (arch IN LISTS hart_grid_architectures)
+            # UVs feed discrete selectors; approximate division can miss 1 at
+            # the last grid point. Keep shadeop fast-math settings unchanged.
+            MAKE_HART_BITCODE ("hart/generated_grid.hip" "_hart_${arch}" "${arch}"
+                              generated_grid_bc "-fno-reciprocal-math;-fno-approx-func"
+                              "${hart_include_dirs}")
+            set (symbol "testshade_hart_raygen_${arch}")
+            set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/generated_grid.bc.cpp")
+            MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${generated_grid_bc}")
+            list (APPEND testshade_srcs "${embedded}")
+            list (APPEND hart_generated_grid_cpp "${embedded}")
+            list (APPEND hart_generated_grids "${generated_grid_bc}")
+            string (APPEND hart_generated_declarations
+                "extern unsigned char ${symbol}_block[];\nextern int ${symbol}_size;\n")
+            string (APPEND hart_generated_entries
+                "    { \"${arch}\", ${symbol}_block, &${symbol}_size },\n")
+        endforeach ()
+    endif ()
+    file (WRITE "${CMAKE_CURRENT_BINARY_DIR}/hart_generated_bitcode.h"
+        "${hart_generated_declarations}"
+        "struct HartEmbeddedRaygen { const char* arch; const unsigned char* data; const int* size; };\n"
+        "static const HartEmbeddedRaygen hart_generated_raygens[] = {\n"
+        "${hart_generated_entries}    { nullptr, nullptr, nullptr }\n};\n")
+endif ()
+
 EMBED_LLVM_BITCODE_IN_CPP ( "${rs_srcs}" "_host" "testshade_llvm_compiled_rs" testshade_srcs "-DOSL_HOST_RS_BITCODE=1" "${include_dirs}")
 
 add_executable ( testshade ${testshade_srcs} testshademain.cpp )
 
 target_include_directories (testshade BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+target_include_directories (testshade PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_link_libraries (testshade
                        PRIVATE
                            oslexec oslquery oslcomp)
+target_compile_definitions (testshade PRIVATE OSL_TESTSHADE_HART=$<BOOL:${OSL_USE_HART}>)
+osl_hart_target (testshade)
+if (OSL_USE_HART)
+    target_link_libraries (testshade PRIVATE
+        ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+endif ()
+osl_hart_runtime_target (testshade)
 if (OSL_USE_OPTIX)
     add_dependencies(testshade testshade_ptx)
 endif ()
@@ -120,7 +169,14 @@ if (NOT CODECOV)
     target_link_libraries (libtestshade
                            PRIVATE
                                oslexec oslquery oslcomp)
+    target_compile_definitions (libtestshade PRIVATE OSL_TESTSHADE_HART=$<BOOL:${OSL_USE_HART}>)
+    osl_hart_target (libtestshade)
+    if (OSL_USE_HART)
+        target_link_libraries (libtestshade PRIVATE
+            ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+    endif ()
     target_include_directories (libtestshade BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+    target_include_directories (libtestshade PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     set_target_properties (libtestshade PROPERTIES PREFIX "")
 
     install_targets ( libtestshade )
@@ -134,4 +190,462 @@ if (NOT CODECOV)
                                ${CMAKE_DL_LIBS} )
     install (TARGETS testshade_dso RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} )
     osl_optix_target(libtestshade)
+endif ()
+
+if (OSL_USE_HART AND USE_LLVM_BITCODE)
+    get_target_property (hart_include_dirs amd::hart INTERFACE_INCLUDE_DIRECTORIES)
+    list (APPEND hart_include_dirs ${include_dirs})
+    list (REMOVE_DUPLICATES hart_include_dirs)
+    set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hartgridparams.h"
+                      "${CMAKE_CURRENT_SOURCE_DIR}/hart/callable_smoke.h")
+    set (hart_grid_bitcode)
+    set (hart_callable_grids)
+    set (hart_callable_bitcode)
+    get_target_property (shadeops_binary_dir osl_hart_bitcode BINARY_DIR)
+    set (hart_grid_architectures ${HART_TARGET_ARCHITECTURES})
+    list (REMOVE_DUPLICATES hart_grid_architectures)
+    foreach (arch IN LISTS hart_grid_architectures)
+        MAKE_HART_BITCODE ("hart/grid_smoke.hip" "_hart_${arch}" "${arch}"
+                          grid_bc "" "${hart_include_dirs}")
+        list (APPEND hart_grid_bitcode "${grid_bc}")
+        MAKE_HART_BITCODE ("hart/callable_grid.hip" "_hart_${arch}" "${arch}"
+                          callable_grid_bc "" "${hart_include_dirs}")
+        MAKE_HART_BITCODE ("hart/callable_shader.hip" "_hart_${arch}" "${arch}"
+                          callable_shader_bc "" "${hart_include_dirs}")
+        set (shadeops_bc "${shadeops_binary_dir}/hart/${arch}/shadeops_hart.bc")
+        set (callable_bc "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/callable_shadeops_hart_${arch}.bc")
+        add_custom_command (OUTPUT "${callable_bc}"
+            COMMAND "${LLVM_LINK_TOOL}" --only-needed
+                "${callable_shader_bc}" "${shadeops_bc}" -o "${callable_bc}"
+            DEPENDS "${callable_shader_bc}" "${shadeops_bc}" "${LLVM_LINK_TOOL}"
+            VERBATIM)
+        list (APPEND hart_callable_grids "${callable_grid_bc}")
+        list (APPEND hart_callable_bitcode "${callable_bc}")
+    endforeach ()
+    add_custom_target (testshade_hart_bitcode ALL
+        DEPENDS ${hart_grid_bitcode} ${hart_callable_grids} ${hart_callable_bitcode})
+    add_dependencies (testshade_hart_bitcode osl_hart_bitcode)
+    add_dependencies (testshade testshade_hart_bitcode)
+    if (BUILD_TESTING)
+        add_test (NAME hart-grid-bitcode
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLLVM_OPT_TOOL=${LLVM_OPT_TOOL}"
+                "-DBITCODE_FILES=${hart_grid_bitcode};${hart_callable_grids}"
+                "-DGENERATED_GRID_FILES=${hart_generated_grids}"
+                "-DCALLABLE_FILES=${hart_callable_bitcode}"
+                -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid-bitcode.cmake")
+        if ("$ENV{TESTSUITE_HART}")
+            list (GET hart_grid_bitcode 0 hart_grid_test_module)
+            list (GET hart_callable_grids 0 hart_callable_test_grid)
+            list (GET hart_callable_bitcode 0 hart_callable_test_module)
+            add_test (NAME hart-grid-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"
+                    "$<TARGET_FILE:testshade>" --module "${hart_grid_test_module}"
+                    --callable-grid "${hart_callable_test_grid}"
+                    --callable-module "${hart_callable_test_module}"
+                    --llvm-opt "${LLVM_OPT_TOOL}")
+            set_tests_properties (hart-grid-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-generated-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-generated-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-loops-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --loops)
+            set_tests_properties (hart-loops-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-control-flow-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --control-flow)
+            set_tests_properties (hart-control-flow-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-aggregate-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --aggregates)
+            set_tests_properties (hart-aggregate-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-string-values-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --strings)
+            set_tests_properties (hart-string-values-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-string-selectors-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --selectors)
+            set_tests_properties (hart-string-selectors-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-diagnostics-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --diagnostics)
+            set_tests_properties (hart-diagnostics-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-diagnostic-only-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-diagnostic-only.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-diagnostic-only-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-source-buffer-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-source-buffer.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-source-buffer-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-serialized-groups-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-serialized-groups.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-serialized-groups-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-grid-closures-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid-closures.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-grid-closures-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-isconstant-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-isconstant.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-isconstant-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-spline-division-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-spline-division.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-spline-division-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            if (TARGET OpenImageIO::oiiotool)
+                set (hart_output_oiiotool "$<TARGET_FILE:OpenImageIO::oiiotool>")
+            else ()
+                set (hart_output_oiiotool "oiiotool")
+            endif ()
+            add_test (NAME hart-outputs-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-outputs.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>"
+                    --oiiotool "${hart_output_oiiotool}")
+            set_tests_properties (hart-outputs-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-grid-options-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid-options.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>"
+                    --oiiotool "${hart_output_oiiotool}" --gpu)
+            set_tests_properties (hart-grid-options-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-entries-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-entries.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-entries-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-derivatives-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --derivatives)
+            set_tests_properties (hart-derivatives-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-surface-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --surface)
+            set_tests_properties (hart-surface-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-filterwidth-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --filterwidth)
+            set_tests_properties (hart-filterwidth-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-noise-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --noise)
+            set_tests_properties (hart-noise-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-noise-families-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --noise-families)
+            set_tests_properties (hart-noise-families-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-interactive-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-interactive.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-interactive-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-userdata-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-userdata.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-userdata-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-interactive-userdata-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>"
+                    --gpu --interactive-userdata)
+            set_tests_properties (hart-interactive-userdata-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-geometry-state-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-geometry-state.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
+            set_tests_properties (hart-geometry-state-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-gabor-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --gabor)
+            set_tests_properties (hart-gabor-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-math-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --math)
+            set_tests_properties (hart-math-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-numeric-math-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --numeric-math)
+            set_tests_properties (hart-numeric-math-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-spline-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --splines)
+            set_tests_properties (hart-spline-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-color-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --colors)
+            set_tests_properties (hart-color-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-procedural-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --procedural)
+            set_tests_properties (hart-procedural-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-texture-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --textures)
+            set_tests_properties (hart-texture-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-texture-alpha-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --texture-alpha)
+            set_tests_properties (hart-texture-alpha-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-texture-channels-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --texture-channels)
+            set_tests_properties (hart-texture-channels-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-texture-materials-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --texture-materials)
+            set_tests_properties (hart-texture-materials-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-matrix-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --matrices)
+            set_tests_properties (hart-matrix-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-spaces-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --spaces)
+            set_tests_properties (hart-spaces-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-geometry-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --geometry)
+            set_tests_properties (hart-geometry-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-groups-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --groups)
+            set_tests_properties (hart-groups-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-topology-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --topology)
+            set_tests_properties (hart-topology-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-materials-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --materials)
+            set_tests_properties (hart-materials-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-fused-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --fused)
+            set_tests_properties (hart-fused-runtime PROPERTIES LABELS "hart;gpu")
+            add_test (NAME hart-fused-local-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu --fused-local)
+            set_tests_properties (hart-fused-local-runtime PROPERTIES LABELS "hart;gpu")
+        endif ()
+    endif ()
+endif ()
+
+if (BUILD_TESTING AND OSL_USE_HART)
+    if (OSL_BUILD_TESTS)
+        add_executable (hart_texture_test hart_texture_test.cpp harttexture.cpp)
+        target_include_directories (hart_texture_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+        target_link_libraries (hart_texture_test PRIVATE oslexec OpenImageIO::OpenImageIO hip::host)
+        add_dependencies (hart_texture_test testshade)
+        set_target_properties (hart_texture_test PROPERTIES FOLDER "Unit Tests")
+        if (USE_LLVM_BITCODE)
+            add_executable (hart_closure_test hart_closure_test.cpp
+                hartgridrender.cpp harttexture.cpp simplerend.cpp ${hart_generated_grid_cpp})
+            target_include_directories (hart_closure_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+            target_include_directories (hart_closure_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+            target_link_libraries (hart_closure_test PRIVATE oslexec oslquery oslcomp
+                ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+            osl_hart_target (hart_closure_test)
+            add_dependencies (hart_closure_test testshade)
+            set_target_properties (hart_closure_test PROPERTIES FOLDER "Unit Tests")
+            if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+                foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    add_test (NAME hart-closures-${mode} COMMAND "${Python3_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-closures.py"
+                        "$<TARGET_FILE:hart_closure_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                        ${mode})
+                    set_tests_properties (hart-closures-${mode} PROPERTIES
+                        LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                endforeach ()
+            endif ()
+            add_executable (hart_transform_test hart_transform_test.cpp
+                hartgridrender.cpp harttexture.cpp simplerend.cpp ${hart_generated_grid_cpp})
+            target_include_directories (hart_transform_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+            target_include_directories (hart_transform_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+            target_link_libraries (hart_transform_test PRIVATE oslexec oslquery oslcomp
+                ${LLVM_LIBRARIES} ${LLVM_LDFLAGS} ${LLVM_SYSTEM_LIBRARIES})
+            osl_hart_target (hart_transform_test)
+            add_dependencies (hart_transform_test testshade)
+            if (TARGET hart_renderer_test_bitcode)
+                add_dependencies (hart_transform_test hart_renderer_test_bitcode)
+            endif ()
+            set_target_properties (hart_transform_test PROPERTIES FOLDER "Unit Tests")
+            if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+                foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    add_test (NAME hart-grid-lifecycle-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-lifecycle.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" ${mode})
+                    set_tests_properties (hart-grid-lifecycle-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE TIMEOUT 660
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-space-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind spaces)
+                    set_tests_properties (hart-space-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-attribute-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind attributes)
+                    set_tests_properties (hart-attribute-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    if (TARGET hart_renderer_test_bitcode)
+                        add_test (NAME hart-renderer-library-${mode}
+                            COMMAND "${Python3_EXECUTABLE}"
+                                "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                                "$<TARGET_FILE:hart_transform_test>"
+                                "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                                --mode ${mode} --kind library
+                                --library-dir "${PROJECT_BINARY_DIR}/src/liboslexec/hart")
+                        set_tests_properties (hart-renderer-library-${mode} PROPERTIES
+                            LABELS "hart;gpu" RUN_SERIAL TRUE
+                            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    endif ()
+                    add_test (NAME hart-output-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind outputs)
+                    set_tests_properties (hart-output-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-interactive-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind interactive)
+                    set_tests_properties (hart-interactive-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-userdata-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind userdata)
+                    set_tests_properties (hart-userdata-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-raytype-rebind-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                            --mode ${mode} --kind raytypes)
+                    set_tests_properties (hart-raytype-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    add_test (NAME hart-color-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                        "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                        --mode ${mode} --kind color)
+                    set_tests_properties (hart-color-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                endforeach ()
+                add_test (NAME hart-transform-rebind COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                    "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")
+                set_tests_properties (hart-transform-rebind PROPERTIES
+                    LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                foreach (mode IN ITEMS fused fused-local)
+                    add_test (NAME hart-transform-rebind-${mode} COMMAND "${Python3_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"
+                        "$<TARGET_FILE:hart_transform_test>" "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h"
+                        --mode ${mode})
+                    set_tests_properties (hart-transform-rebind-${mode} PROPERTIES
+                        LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                endforeach ()
+            endif ()
+        endif ()
+        if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+            add_test (NAME hart-texture-resources COMMAND hart_texture_test)
+            set_tests_properties (hart-texture-resources PROPERTIES
+                LABELS "hart;gpu" WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+        endif ()
+    endif ()
+    add_test (NAME hart-grid-cli
+        COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-grid.py"
+            "$<TARGET_FILE:testshade>" --llvm-opt "${LLVM_OPT_TOOL}")
+    add_test (NAME hart-generated-cli
+        COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+            "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
 endif ()

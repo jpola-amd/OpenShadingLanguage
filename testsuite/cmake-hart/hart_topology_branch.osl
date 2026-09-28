@@ -1,0 +1,11 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_topology_branch(float root = 0, int side = 0, output float value = 0)
+{
+    if (side == 0)
+        value = 0.5 * root + u * u;
+    else
+        value = -0.25 * root + v * v;
+}

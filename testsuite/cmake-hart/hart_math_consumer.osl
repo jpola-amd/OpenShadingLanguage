@@ -1,0 +1,16 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_math_consumer(color value = 0, output color Cout = 0)
+{
+    int column = int(64 * u);
+    int probe = column - 5 * (column / 5);
+    int component = probe - 3 * (probe / 3);
+    float sample = value[0];
+    if (component == 1)
+        sample = value[1];
+    else if (component == 2)
+        sample = value[2];
+    Cout = color(sample, Dx(sample), Dy(sample));
+}

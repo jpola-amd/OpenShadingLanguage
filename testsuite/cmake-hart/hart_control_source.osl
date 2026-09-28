@@ -1,0 +1,11 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_control_source(output float value = 0)
+{
+    value = u+v;
+    if (v > 0.5)
+        value = texture("hart_texture_rgb.pfm", 3.0e38*(2+u), v,
+                        "interp", "linear", "wrap", "clamp");
+}

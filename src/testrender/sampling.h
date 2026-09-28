@@ -121,6 +121,19 @@ struct MIS {
     // the "other" function being a weight or eval
     enum MISMode { WEIGHT_WEIGHT, WEIGHT_EVAL, EVAL_WEIGHT };
 
+    static inline OSL_HOSTDEVICE float pdf_ratio(float a, float b)
+    {
+#ifdef __HIPCC__
+        // Normalize subnormal PDF pairs before reciprocal-math lowering.
+        if (b < std::numeric_limits<float>::min()) {
+            int exponent;
+            const float mantissa = frexpf(b, &exponent);
+            return ldexpf(a, -exponent) / mantissa;
+        }
+#endif
+        return a / b;
+    }
+
     // Evaluates the weight factor for doing MIS when computing a product of two
     // functions such as light * brdf.
     // Provides options depending how the functions being multiplied together are
@@ -137,10 +150,10 @@ struct MIS {
 
         float r, mis;
         if (sampled_pdf > other_pdf) {
-            r   = other_pdf / sampled_pdf;
+            r   = pdf_ratio(other_pdf, sampled_pdf);
             mis = 1 / (1 + r * r);
         } else if (sampled_pdf < other_pdf) {
-            r   = sampled_pdf / other_pdf;
+            r   = pdf_ratio(sampled_pdf, other_pdf);
             mis = 1 - 1 / (1 + r * r);
         } else {
             // avoid (possible, but extremely rare) inf/inf cases
@@ -194,9 +207,9 @@ struct MIS {
             ow *= 1 / b;
             float mis;
             if (*pdf < opdf)
-                mis = 1 / (1 + *pdf / opdf);
+                mis = 1 / (1 + pdf_ratio(*pdf, opdf));
             else if (opdf < *pdf)
-                mis = 1 - 1 / (1 + opdf / *pdf);
+                mis = 1 - 1 / (1 + pdf_ratio(opdf, *pdf));
             else
                 mis = 0.5f;  // avoid (rare) inf/inf
 

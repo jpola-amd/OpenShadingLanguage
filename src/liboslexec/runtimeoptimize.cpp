@@ -41,6 +41,8 @@ static ustring u_setmessage("setmessage");
 static ustring u_getmessage("getmessage");
 static ustring u_getattribute("getattribute");
 static ustring u_backfacing("backfacing");
+static ustring u_raytype("raytype");
+static ustring u_surfacearea("surfacearea");
 static ustring u_calculatenormal("calculatenormal");
 static ustring u_flipHandedness("flipHandedness");
 static ustring u_N("N");
@@ -125,7 +127,7 @@ RuntimeOptimizer::RuntimeOptimizer(ShadingSystemImpl& shadingsys,
     // aren't yet set up to support use of debugging symbols for PTX.
     // FIXME: some day, we are going to want debugging symbols for PTX, and
     // will need some refactoring of the debugging symbol code.
-    if (shadingsys.renderer()->supports("OptiX"))
+    if (shadingsys.use_gpu())
         m_keep_no_return_function_calls = false;
 }
 
@@ -898,7 +900,8 @@ RuntimeOptimizer::simplify_params()
         // editable
         if (s->interpolated() || s->interactive())
             continue;
-        if (s->typespec().is_structure() || s->typespec().is_closure_based())
+        if (s->typespec().is_structure_based()
+            || s->typespec().is_closure_based())
             continue;  // We don't mess with struct placeholders or closures
 
         if (s->valuesource() == Symbol::InstanceVal) {
@@ -2774,11 +2777,11 @@ RuntimeOptimizer::track_variable_dependencies()
 inline bool
 coalescable(const Symbol& s)
 {
-    return (s.symtype() == SymTypeTemp &&    // only coalesce temporaries
-            s.everused() &&                  // only if they're used
-            s.dealias() == &s &&             // only if not already aliased
-            !s.typespec().is_structure() &&  // only if not a struct
-            s.fieldid() < 0);                //    or a struct field
+    return (s.symtype() == SymTypeTemp &&  // only coalesce temporaries
+            s.everused() &&                // only if they're used
+            s.dealias() == &s &&           // only if not already aliased
+            !s.typespec().is_structure_based() &&  // only if not a struct
+            s.fieldid() < 0);                      //    or a struct field
 }
 
 
@@ -3315,13 +3318,26 @@ RuntimeOptimizer::run()
                 size_t totalsize = typesize * (s.has_derivs() ? 3 : 1);
                 size_t alignment = typesize > 4 ? 8 : 4;
                 offset = OIIO::round_to_multiple_of_pow2(offset, alignment);
+                if (shadingsys().use_hart()
+                    && (offset > size_t(std::numeric_limits<int>::max())
+                        || typesize > (size_t(std::numeric_limits<int>::max())
+                                       - offset)
+                                          / (s.has_derivs() ? 3 : 1))) {
+                    shadingsys().errorfmt(
+                        "HART: interactive parameter arena exceeds INT_MAX");
+                    group().invalidate_device_interactive_arena();
+                    return;
+                }
                 interactive_data.resize(offset + totalsize);
                 // Copy from the instance value to the interactive block
                 // If the value is a string, copy its hash.
-                if (s.typespec().is_string()) {
-                    ustring string_data = *reinterpret_cast<ustring*>(s.data());
-                    ustringhash string_hash(string_data);
-                    memcpy(&interactive_data[offset], &string_hash, typesize);
+                if (s.typespec().is_string_based()) {
+                    const auto* strings = static_cast<const ustring*>(s.data());
+                    for (size_t i = 0; i < typesize / sizeof(ustring); ++i) {
+                        const auto hash = ustringhash_from(strings[i]);
+                        memcpy(&interactive_data[offset] + i * sizeof(hash),
+                               &hash, sizeof(hash));
+                    }
                 } else
                     memcpy(&interactive_data[offset], s.data(), typesize);
                 if (totalsize > typesize)
@@ -3388,8 +3404,9 @@ RuntimeOptimizer::run()
                 } else {
                     m_unknown_closures_needed = true;
                 }
-            } else if (op.opname() == u_backfacing) {
-                m_globals_needed.insert(u_backfacing);
+            } else if (op.opname() == u_backfacing || op.opname() == u_raytype
+                       || op.opname() == u_surfacearea) {
+                m_globals_needed.insert(op.opname());
             } else if (op.opname() == u_calculatenormal) {
                 m_globals_needed.insert(u_flipHandedness);
             } else if (op.opname() == u_getattribute) {

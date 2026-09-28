@@ -49,6 +49,10 @@ namespace pvt {  // OSL::pvt
 inline bool
 equal_consts(const Symbol& A, const Symbol& B)
 {
+    // Null-backed and interned empty strings have different host pointers,
+    // but scalar execution compares their hashes.
+    if (A.typespec().is_string() && B.typespec().is_string())
+        return A.get_string().hash() == B.get_string().hash();
     return (
         &A == &B
         || (equivalent(A.typespec(), B.typespec())
@@ -1950,13 +1954,16 @@ DECLFOLDER(constfold_triple)
     Symbol& A(*rop.inst()->argsymbol(op.firstarg() + 1 + using_space));
     Symbol& B(*rop.inst()->argsymbol(op.firstarg() + 2 + using_space));
     Symbol& C(*rop.inst()->argsymbol(op.firstarg() + 3 + using_space));
-    if (using_space) {
+    if (using_space
+        && !(rop.shadingsys().use_hart() && op.opname() == ustring("color"))) {
         // If we're using a space name and it's equivalent to "common",
         // just pretend it doesn't exist.
         Symbol& Space(*rop.inst()->argsymbol(op.firstarg() + 1));
         if (Space.is_constant()
             && (Space.get_string() == Strings::common
-                || Space.get_string() == rop.shadingsys().commonspace_synonym()))
+                || (!rop.shadingsys().use_hart()
+                    && Space.get_string()
+                           == rop.shadingsys().commonspace_synonym())))
             using_space = false;
     }
     if (A.is_constant() && A.typespec().is_float() && B.is_constant()
@@ -1994,23 +2001,28 @@ DECLFOLDER(constfold_matrix)
         // and the other is the designated common space synonym.
         Symbol& From(*rop.inst()->argsymbol(op.firstarg() + 1));
         Symbol& To(*rop.inst()->argsymbol(op.firstarg() + 2));
-        ustring from = From.is_constant() ? From.get_string()
-                                          : ustring("$unknown1$");
-        ustring to = To.is_constant() ? To.get_string() : ustring("$unknown2$");
+        const bool constant_names = From.is_constant() && To.is_constant();
+        ustring from      = From.is_constant() ? From.get_string() : ustring();
+        ustring to        = To.is_constant() ? To.get_string() : ustring();
         ustring commonsyn = rop.inst()->shadingsys().commonspace_synonym();
-        if (&From == &To || from == to
-            || ((from == Strings::common && to == commonsyn)
-                || (from == commonsyn && to == Strings::common))) {
+        if (&From == &To
+            || (constant_names
+                && (from == to
+                    || (!rop.shadingsys().use_hart()
+                        && ((from == Strings::common && to == commonsyn)
+                            || (from == commonsyn && to == Strings::common)))))) {
             static Matrix44 ident(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0,
                                   1);
             rop.turn_into_assign(op, rop.add_constant(ident),
                                  "matrix(spaceA,spaceA) => identity matrix");
             return 1;
         }
+        if (rop.shadingsys().use_hart())
+            return 0;  // Named matrices and the common alias are launch bindings.
         // Try to simplify R=matrix(from,to) in cases of an constant (but
         // different) names -- do the matrix retrieval now, if not time-
         // varying matrices.
-        if (!(From.is_constant() && To.is_constant()))
+        if (!constant_names)
             return 0;
         // Shader and object spaces will vary from execution to execution,
         // so we can't optimize those away.
@@ -2048,7 +2060,8 @@ DECLFOLDER(constfold_matrix)
             && Val.get_float() == 1.0f) {
             ustring from = From.get_string();
             if (from == Strings::common
-                || from == rop.inst()->shadingsys().commonspace_synonym()) {
+                || (!rop.shadingsys().use_hart()
+                    && from == rop.inst()->shadingsys().commonspace_synonym())) {
                 static Matrix44 ident(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0,
                                       0, 1);
                 rop.turn_into_assign(op, rop.add_constant(ident),
@@ -2104,6 +2117,8 @@ DECLFOLDER(constfold_getmatrix)
     ustring from      = From.get_string();
     ustring to        = To.get_string();
     ustring commonsyn = rop.inst()->shadingsys().commonspace_synonym();
+    if (rop.shadingsys().use_hart() && from != to)
+        return 0;
 
     // Shader and object spaces will vary from execution to execution,
     // so we can't optimize those away.
@@ -2168,11 +2183,13 @@ DECLFOLDER(constfold_transform)
             OSL_DASSERT(M.typespec().is_string() && T.typespec().is_string());
             ustring from = M.get_string();
             ustring to   = T.get_string();
-            ustring syn  = rop.shadingsys().commonspace_synonym();
-            if (from == syn)
-                from = Strings::common;
-            if (to == syn)
-                to = Strings::common;
+            if (!rop.shadingsys().use_hart()) {
+                ustring syn = rop.shadingsys().commonspace_synonym();
+                if (from == syn)
+                    from = Strings::common;
+                if (to == syn)
+                    to = Strings::common;
+            }
             if (from == to) {
                 rop.turn_into_assign(op, rop.inst()->arg(op.firstarg() + 3),
                                      "transform by identity");
@@ -2200,12 +2217,28 @@ DECLFOLDER(constfold_transformc)
             from = Strings::rgb;
         if (to == Strings::RGB)
             to = Strings::rgb;
+        const auto independent_space = [](ustring space) {
+            return space == Strings::rgb || space == Strings::linear
+                   || space == Strings::hsv || space == Strings::hsl
+                   || space == Strings::YIQ;
+        };
         if (from == to) {
+            // A current-system alias must still be checked after HART rebinds
+            // the color system; unsupported aliases must not become identity.
+            if (rop.shadingsys().use_hart() && !independent_space(from)
+                && from != Strings::XYZ && from != Strings::xyY
+                && from != Strings::sRGB)
+                return 0;
             rop.turn_into_assign(op, rop.inst()->arg(op.firstarg() + 3),
                                  "transformc by identity");
             return 1;
         }
         if (C.is_constant()) {
+            // XYZ/xyY matrices, sRGB's current-system alias, and other current
+            // RGB names depend on the launch-time ColorSystem, even for const C.
+            if (rop.shadingsys().use_hart()
+                && (!independent_space(from) || !independent_space(to)))
+                return 0;
             Color3 Cin(C.get_float(0), C.get_float(1), C.get_float(2));
             Color3 result = rop.shadingsys().colorsystem().transformc(
                 from, to, Cin, rop.shaderglobals()->context, nullptr);
@@ -2327,6 +2360,9 @@ DECLFOLDER(constfold_getattribute)
     }
 
     if (!found) {
+        // Mutable renderer attributes must come from launch-time device state.
+        if (rop.shadingsys().use_hart())
+            return 0;
         // If the object name is not supplied, it implies that we are
         // supposed to search the shaded object first, then if that fails,
         // the scene-wide namespace.  We can't do that yet, have to wait
@@ -2813,6 +2849,15 @@ DECLFOLDER(constfold_noise)
         --arg;  // forget that arg
         Name = NULL;
         name = op.opname();
+    }
+
+    // Preserve HART selector/option validation after parameter specialization.
+    if (rop.shadingsys().use_hart() && Name) {
+        if (!hart_supports_noise(name, op.opname() == Strings::pnoise))
+            return 0;
+        for (int a = arg; a < op.nargs(); ++a)
+            if (rop.opargsym(op, a)->typespec().is_string())
+                return 0;
     }
 
     // Noise with name that is not a constant at osl-compile-time was marked

@@ -1,0 +1,4 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:9, point 0): x = 1
+HART shader 'test' (test.osl:13, point 0): f[] = { 4, 4, 4 }
+HART shader 'test' (test.osl:17, point 0): c[] = { 0.1 0.2 0.3, 0.1 0.2 0.3, 0.1 0.2 0.3 }

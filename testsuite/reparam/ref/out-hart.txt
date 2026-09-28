@@ -1,0 +1,7 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:9, point 0): test: f = 1
+HART shader 'test' (test.osl:10, point 0): test: user = 2
+HART shader 'test' (test.osl:11, point 0): test: third = 3
+HART shader 'test' (test.osl:9, point 0): test: f = 10
+HART shader 'test' (test.osl:10, point 0): test: user = 2
+HART shader 'test' (test.osl:11, point 0): test: third = 30

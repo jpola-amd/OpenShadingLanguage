@@ -1,0 +1,13 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_surface_producer(int planar = 0, output vector value = 0)
+{
+    float z = P[2] + P[0] * P[1];
+    if (planar)
+        z = 0;
+    point p = point(P[0], 2 * P[1], z);
+    normal n = normal(p[0], p[1], p[2]);
+    value = vector(n[0], n[1], n[2]);
+}

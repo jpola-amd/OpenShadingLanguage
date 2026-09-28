@@ -319,7 +319,7 @@ struct BSDF : public AbstractBSDF {
 struct CompositeBSDF {
     OSL_HOSTDEVICE CompositeBSDF() : num_bsdfs(0), num_bytes(0) {}
 
-    OSL_HOSTDEVICE void prepare(const Vec3& wo, const Color3& path_weight,
+    OSL_HOSTDEVICE bool prepare(const Vec3& wo, const Color3& path_weight,
                                 bool absorb)
     {
         float total = 0;
@@ -327,7 +327,11 @@ struct CompositeBSDF {
             pdfs[i] = weights[i].dot(path_weight
                                      * bsdfs[i]->get_albedo_vrtl(wo))
                       / (path_weight.x + path_weight.y + path_weight.z);
-#ifndef __CUDACC__
+#ifdef __HIPCC__
+            if (!std::isfinite(pdfs[i]) || pdfs[i] < 0)
+                return false;
+#endif
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
             // TODO: Figure out what to do with weights/albedos with negative
             //       components (e.g., as might happen when bipolar noise is
             //       used as a color).
@@ -340,6 +344,10 @@ struct CompositeBSDF {
 #endif
             total += pdfs[i];
         }
+#ifdef __HIPCC__
+        if (!std::isfinite(total))
+            return false;
+#endif
         if ((!absorb && total > 0) || total > 1) {
             for (int i = 0; i < num_bsdfs; i++) {
 #ifndef __CUDACC__
@@ -351,6 +359,7 @@ struct CompositeBSDF {
 #endif
             }
         }
+        return true;
     }
 
     OSL_HOSTDEVICE Color3 get_albedo(const Vec3& wo) const
@@ -405,16 +414,19 @@ struct CompositeBSDF {
     template<typename BSDF_Type, typename... BSDF_Args>
     OSL_HOSTDEVICE bool add_bsdf(const Color3& w, BSDF_Args&&... args)
     {
-        // make sure we have enough space
+        static_assert(alignof(BSDF_Type) <= 16,
+                      "The BSDF arena must satisfy each lobe's alignment");
         if (num_bsdfs >= MaxEntries)
             return false;
-        if (num_bytes + sizeof(BSDF_Type) > MaxSize)
+        const int alignment = alignof(BSDF_Type);
+        const int offset    = (num_bytes + alignment - 1) & ~(alignment - 1);
+        if (offset + sizeof(BSDF_Type) > MaxSize)
             return false;
         weights[num_bsdfs] = w;
-        bsdfs[num_bsdfs]   = new (pool + num_bytes)
+        bsdfs[num_bsdfs]   = new (pool + offset)
             BSDF_Type(std::forward<BSDF_Args>(args)...);
         num_bsdfs++;
-        num_bytes += sizeof(BSDF_Type);
+        num_bytes = offset + sizeof(BSDF_Type);
         return true;
     }
 
@@ -426,13 +438,17 @@ private:
     OSL_HOSTDEVICE BSDF::Sample eval(const BSDF* bsdf, const Vec3& wo,
                                      const Vec3& wi) const;
 
+#ifdef __HIPCC__
+    enum { MaxEntries = 32 };
+#else
     enum { MaxEntries = 8 };
+#endif
     enum { MaxSize = 256 * sizeof(float) };
 
     Color3 weights[MaxEntries];
     float pdfs[MaxEntries];
     BSDF* bsdfs[MaxEntries];
-    char pool[MaxSize];
+    alignas(16) char pool[MaxSize];
     int num_bsdfs, num_bytes;
 };
 
@@ -451,12 +467,36 @@ struct MediumParams {
 
     OSL_HOSTDEVICE bool is_special_priority() const { return priority == 0; }
 
+    static OSL_HOSTDEVICE bool finite_vector(const Vec3& value)
+    {
+        return std::isfinite(value.x) && std::isfinite(value.y)
+               && std::isfinite(value.z);
+    }
+
+    static OSL_HOSTDEVICE bool nonnegative(const Color3& value)
+    {
+        return finite_vector(value) && value.x >= 0 && value.y >= 0
+               && value.z >= 0;
+    }
+
+    OSL_HOSTDEVICE bool valid() const
+    {
+        return nonnegative(sigma_t) && nonnegative(sigma_s)
+               && sigma_s.x <= sigma_t.x && sigma_s.y <= sigma_t.y
+               && sigma_s.z <= sigma_t.z && std::isfinite(medium_g)
+               && fabsf(medium_g) < 1 && std::isfinite(refraction_ior)
+               && refraction_ior > 0;
+    }
+
     OSL_HOSTDEVICE BSDF::Sample sample_phase_func(const Vec3& wo, float rx,
                                                   float ry, float rz) const;
 };
 
 struct MediumStack {
-    OSL_HOSTDEVICE MediumStack() : depth(0), pool_size(0) {}
+    enum class Event { Surface, Scatter, Absorbed, Error };
+
+    OSL_HOSTDEVICE MediumStack()
+        : depth(0), pool_size(0), num_overlapping(0) { }
 
     OSL_HOSTDEVICE const MediumParams* get_current_params() const
     {
@@ -470,15 +510,19 @@ struct MediumStack {
 
     OSL_HOSTDEVICE int size() const { return depth; }
 
-    OSL_HOSTDEVICE void compute_current_params()
+    OSL_HOSTDEVICE bool compute_current_params()
     {
         // compute data for overlapping mediums
         // called if a new medium was added to the stack
         MediumParams new_params;
-        num_overlapping = 0;
+        int overlapping                 = 0;
+        float probabilities[MaxEntries] = { };
+        int indices[MaxEntries]         = { };
 
         for (int i = 0; i < depth; i++) {
             const MediumParams& params_i = *mediums[i];
+            if (!params_i.valid())
+                return false;
 
             if (i == 0) {
                 // current params has to have the same priority as mediums[0]
@@ -487,27 +531,34 @@ struct MediumStack {
             if (params_i.priority != new_params.priority) {
                 continue;
             }
-            overlapping_medium_indices[num_overlapping] = i;
+            indices[overlapping] = i;
             new_params.sigma_t += params_i.sigma_t;
             new_params.sigma_s += params_i.sigma_s;
+            if (!new_params.valid())
+                return false;
 
-            float avg_sigma_s_i = (params_i.sigma_s.x + params_i.sigma_s.y
-                                   + params_i.sigma_s.z)
-                                  / 3.0f;
-            cdf[num_overlapping]
-                = (num_overlapping > 0 ? cdf[num_overlapping - 1] : 0.0f)
-                  + avg_sigma_s_i;
-            num_overlapping++;
+            overlapping++;
         }
 
-        if (num_overlapping > 1 && !new_params.is_vaccum()) {
-            float total_cdf = cdf[num_overlapping - 1];
-            if (total_cdf > 0.0f) {
-                for (int i = 0; i < num_overlapping; i++) {
-                    cdf[i] /= total_cdf;
-                }
-            }
+        // Rescale before averaging so tiny coefficients do not vanish and
+        // finite RGB sums do not overflow.
+        const float scale
+            = std::max(new_params.sigma_s.x,
+                       std::max(new_params.sigma_s.y, new_params.sigma_s.z));
+        float total_cdf = 0;
+        for (int i = 0; i < overlapping; ++i) {
+            const auto& sigma_s = mediums[indices[i]]->sigma_s;
+            if (scale > 0)
+                total_cdf += (sigma_s.x / scale + sigma_s.y / scale
+                              + sigma_s.z / scale)
+                             / 3.0f;
+            probabilities[i] = total_cdf;
         }
+        if (!std::isfinite(total_cdf))
+            return false;
+        if (total_cdf > 0)
+            for (int i = 0; i < overlapping; ++i)
+                probabilities[i] /= total_cdf;
 
         // clamp sigma_s to be less than sigma_t
         new_params.sigma_s
@@ -515,59 +566,82 @@ struct MediumStack {
                 std::min(new_params.sigma_s.y, new_params.sigma_t.y),
                 std::min(new_params.sigma_s.z, new_params.sigma_t.z) };
 
-        current_params = new_params;
+        current_params  = new_params;
+        num_overlapping = overlapping;
+        for (int i = 0; i < overlapping; ++i) {
+            cdf[i]                        = probabilities[i];
+            overlapping_medium_indices[i] = indices[i];
+        }
+        return true;
     }
 
-    OSL_HOSTDEVICE bool integrate(Ray& r, Sampler& sampler, Intersection& hit,
-                                  Color3& path_weight, Color3& path_radiance,
-                                  float& bsdf_pdf)
+    OSL_HOSTDEVICE Event integrate(Ray& r, Sampler& sampler, float distance,
+                                   Color3& path_weight, float& bsdf_pdf)
     {
-        if (depth <= 0) {
-            return false;
-        }
+        if (depth < 0 || depth > MaxEntries || depth != pool_size)
+            return Event::Error;
+        if (depth == 0)
+            return Event::Surface;
+        if (!current_params.valid())
+            return Event::Error;
+        if (current_params.is_vaccum())
+            return Event::Surface;
+        if (!MediumParams::nonnegative(path_weight) || std::isnan(distance)
+            || distance < 0 || std::isnan(bsdf_pdf) || bsdf_pdf < 0
+            || !MediumParams::finite_vector(r.origin)
+            || !MediumParams::finite_vector(r.direction)
+            || !std::isfinite(r.direction.length2())
+            || r.direction.length2() <= 0)
+            return Event::Error;
+        if (path_weight == Color3(0))
+            return Event::Absorbed;
 
-        if (current_params.is_vaccum()) {
-            return false;
-        }
-
-        Vec3 weighted_sigma_s = path_weight * current_params.sigma_s
-                                / current_params.sigma_t;
-        float channel_weights[3] = { weighted_sigma_s.x, weighted_sigma_s.y,
-                                     weighted_sigma_s.z };
+        float channel_weights[3];
+        for (int c = 0; c < 3; ++c)
+            channel_weights[c] = current_params.sigma_t[c] > 0
+                                     ? path_weight[c]
+                                           * (current_params.sigma_s[c]
+                                              / current_params.sigma_t[c])
+                                     : 0;
 
         float total = channel_weights[0] + channel_weights[1]
                       + channel_weights[2];
-        if (total <= 0.0f) {
+        if (!std::isfinite(total))
+            return Event::Error;
+        if (total == 0.0f) {
             // pure absorption: apply transmittance to the surface and continue
-            Color3 tr = transmittance(current_params.sigma_t, hit.t);
+            Color3 tr = transmittance(current_params.sigma_t, distance);
             path_weight *= tr;
-            return false;
+            return path_weight == Color3(0) ? Event::Absorbed : Event::Surface;
         }
-        float inv_total = 1.0f / total;
-        channel_weights[0] *= inv_total;
-        channel_weights[1] *= inv_total;
-        channel_weights[2] *= inv_total;
+        channel_weights[0] /= total;
+        channel_weights[1] /= total;
+        channel_weights[2] /= total;
 
         // Used for channel selection, distance, and cdf sampling
         Vec3 rand = sampler.get();
 
         // pick a channel using the cdf of channel_weights
-        int channel;
-        float rand_channel = rand.y;
-        if (rand_channel < channel_weights[0]) {
-            channel = 0;
-        } else if (rand_channel < channel_weights[0] + channel_weights[1]) {
-            channel = 1;
-        } else {
-            channel = 2;
-        }
+        int channel      = -1;
+        float cumulative = 0;
+        for (int c = 0; c < 3; ++c)
+            if (channel_weights[c] > 0) {
+                channel = c;
+                cumulative += channel_weights[c];
+                if (rand.y < cumulative)
+                    break;
+            }
+        if (channel < 0 || current_params.sigma_t[channel] <= 0)
+            return Event::Error;
 
         // sample distance along the ray using the selected channel's sigma_t
         float sigma_t_channel = current_params.sigma_t[channel];
         float t_volume        = -logf(1.0f - rand.x) / sigma_t_channel;
 
-        bool scatter = t_volume < hit.t;
-        float t      = scatter ? t_volume : hit.t;
+        if (std::isnan(t_volume) || t_volume < 0)
+            return Event::Error;
+        bool scatter = t_volume < distance;
+        float t      = scatter ? t_volume : distance;
 
         Color3 tr = transmittance(current_params.sigma_t, t);
 
@@ -576,20 +650,25 @@ struct MediumStack {
                     + density.y * channel_weights[1]
                     + density.z * channel_weights[2];
 
-        if (pdf <= 0.0f) {
-            return false;
-        }
+        if (!std::isfinite(pdf) || pdf <= 0)
+            return Event::Error;
 
-        if (scatter) {
-            path_weight *= (tr * current_params.sigma_s) / pdf;
-        } else {
-            path_weight *= (tr / pdf);
-            return false;
+        Color3 next_weight = path_weight;
+        for (int c = 0; c < 3; ++c)
+            next_weight[c]
+                *= (scatter ? tr[c] * current_params.sigma_s[c] : tr[c]) / pdf;
+        if (!MediumParams::nonnegative(next_weight))
+            return Event::Error;
+        if (!scatter) {
+            path_weight = next_weight;
+            return path_weight == Color3(0) ? Event::Absorbed : Event::Surface;
         }
 
         // scattering pick a new direction
-        r.origin = r.point(t_volume);
+        const Vec3 origin = r.point(t_volume);
 
+        if (num_overlapping <= 0 || num_overlapping > depth)
+            return Event::Error;
         int index = 0;
         if (num_overlapping > 1) {
             for (index = 0; index < num_overlapping - 1; ++index) {
@@ -600,24 +679,35 @@ struct MediumStack {
         }
 
         int medium_index = overlapping_medium_indices[index];
+        if (medium_index < 0 || medium_index >= depth)
+            return Event::Error;
 
         Vec3 rand_phase           = sampler.get();
         BSDF::Sample phase_sample = mediums[medium_index]->sample_phase_func(
             -r.direction, rand_phase.x, rand_phase.y, rand_phase.z);
 
-        if (phase_sample.pdf > 0.0f) {
-            path_weight *= phase_sample.weight;
-            r.direction = phase_sample.wi;
-            bsdf_pdf    = phase_sample.pdf;
-            return true;
-        }
-
-        return false;
+        if (!std::isfinite(phase_sample.pdf) || phase_sample.pdf <= 0
+            || !MediumParams::nonnegative(phase_sample.weight)
+            || !MediumParams::finite_vector(phase_sample.wi)
+            || !std::isfinite(phase_sample.roughness)
+            || !std::isfinite(phase_sample.wi.length2())
+            || phase_sample.wi.length2() <= 0
+            || !MediumParams::finite_vector(origin))
+            return Event::Error;
+        next_weight *= phase_sample.weight;
+        if (!MediumParams::nonnegative(next_weight))
+            return Event::Error;
+        path_weight = next_weight;
+        r.origin    = origin;
+        r.direction = phase_sample.wi;
+        bsdf_pdf    = phase_sample.pdf;
+        return path_weight == Color3(0) ? Event::Absorbed : Event::Scatter;
     }
 
     OSL_HOSTDEVICE bool add_medium(MediumParams new_params)
     {
-        if (depth >= MaxEntries || pool_size >= MaxEntries)
+        if (!new_params.valid() || depth < 0 || depth != pool_size
+            || depth >= MaxEntries)
             return false;
 
         MediumParams* p = &pool[pool_size++];
@@ -641,41 +731,52 @@ struct MediumStack {
         entry_order[depth]  = p;
 
         depth++;
-        compute_current_params();
-
+        if (!compute_current_params()) {
+            --depth;
+            --pool_size;
+            for (int j = insert_pos; j < depth; ++j)
+                mediums[j] = mediums[j + 1];
+            return false;
+        }
         return true;
     }
 
-    OSL_HOSTDEVICE void pop_medium()
+    OSL_HOSTDEVICE bool pop_medium()
     {
-        if (depth <= 0)
-            return;
-
-        depth--;
+        if (depth < 0 || depth > MaxEntries || depth != pool_size)
+            return false;
+        if (depth == 0)
+            return true;
 
         // find the most recently added medium
-        MediumParams* p  = entry_order[depth];
+        MediumParams* p  = entry_order[depth - 1];
         int sorted_index = -1;
-        for (int i = 0; i <= depth; ++i) {
+        for (int i = 0; i < depth; ++i) {
             if (mediums[i] == p) {
                 sorted_index = i;
                 break;
             }
         }
 
-        if (sorted_index < 0)
-            return;  // shouldn't happen
+        if (sorted_index < 0 || p != &pool[pool_size - 1])
+            return false;
 
+        --depth;
+        --pool_size;
         // shift pointers down to fill the gap
         for (int j = sorted_index; j < depth; ++j) {
             mediums[j] = mediums[j + 1];
         }
 
-        // reclaim pool if this was the last allocated entry
-        if (p == &pool[pool_size - 1])
-            pool_size--;
-
-        compute_current_params();
+        if (!compute_current_params()) {
+            for (int j = depth; j > sorted_index; --j)
+                mediums[j] = mediums[j - 1];
+            mediums[sorted_index] = p;
+            ++depth;
+            ++pool_size;
+            return false;
+        }
+        return true;
     }
 
     OSL_HOSTDEVICE bool
@@ -700,8 +801,9 @@ struct MediumStack {
     OSL_HOSTDEVICE Color3 transmittance(const Color3& sigma_t,
                                         float distance) const
     {  // Beer-Lambert law
-        return Color3(expf(-sigma_t.x * distance), expf(-sigma_t.y * distance),
-                      expf(-sigma_t.z * distance));
+        return Color3(sigma_t.x == 0 ? 1 : expf(-sigma_t.x * distance),
+                      sigma_t.y == 0 ? 1 : expf(-sigma_t.y * distance),
+                      sigma_t.z == 0 ? 1 : expf(-sigma_t.z * distance));
     }
 
     /// Never try to copy this struct because it would invalidate the medium pointers
@@ -737,7 +839,7 @@ struct ShadingResult {
 
 void
 register_closures(ShadingSystem* shadingsys);
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
 process_closure(const OSL::ShaderGlobals& sg, float path_roughness,
                 ShadingResult& result, MediumStack& medium_stack,
                 const ClosureColor* Ci, bool light_only);

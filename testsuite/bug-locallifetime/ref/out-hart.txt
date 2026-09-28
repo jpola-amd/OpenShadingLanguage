@@ -1,0 +1,2 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:29, point 0): Ran 2 iterations

@@ -42,7 +42,7 @@ struct Background {
     OSL_HOSTDEVICE
     ~Background()
     {
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
         delete[] values;
         delete[] rows;
         delete[] cols;
@@ -51,7 +51,7 @@ struct Background {
 
     template<typename F, typename T> void prepare(int resolution, F cb, T* data)
     {
-        // These values are set via set_variables() in CUDA
+        // These values are set via set_variables() on the device.
         res = resolution;
         if (res < 32)
             res = 32;  // validate
@@ -62,32 +62,11 @@ struct Background {
         cols        = new float[res * res];
 
         for (int y = 0, i = 0; y < res; y++) {
-            for (int x = 0; x < res; x++, i++) {
+            for (int x = 0; x < res; x++, i++)
                 values[i] = cb(map(x + 0.5f, y + 0.5f), data);
-                cols[i]   = std::max(std::max(values[i].x, values[i].y),
-                                     values[i].z)
-                          + ((x > 0) ? cols[i - 1] : 0.0f);
-            }
-            rows[y] = cols[i - 1] + ((y > 0) ? rows[y - 1] : 0.0f);
-            // normalize the pdf for this scanline (if it was non-zero)
-            if (cols[i - 1] > 0)
-                for (int x = 0; x < res; x++)
-                    cols[i - res + x] /= cols[i - 1];
         }
-        // normalize the pdf across all scanlines
-        for (int y = 0; y < res; y++) {
-            rows[y] /= rows[res - 1];
-        }
-
-        // both eval and sample below return a "weight" that is
-        // value[i] / row*col_pdf, so might as well bake it into the table
-        for (int y = 0, i = 0; y < res; y++) {
-            float row_pdf = rows[y] - (y > 0 ? rows[y - 1] : 0.0f);
-            for (int x = 0; x < res; x++, i++) {
-                float col_pdf = cols[i] - (x > 0 ? cols[i - 1] : 0.0f);
-                values[i] /= row_pdf * col_pdf * invjacobian;
-            }
-        }
+        prepare_cdf(res, { values, size_t(res) * res }, { rows, size_t(res) },
+                    { cols, size_t(res) * res });
 #if 0  // DEBUG: visualize importance table
         using namespace OIIO;
         ImageOutput* out = ImageOutput::create("bg.exr");
@@ -96,6 +75,51 @@ struct Background {
             out->write_image(TypeFloat, &values[0]);
         delete out;
 #endif
+    }
+
+    // Build the same importance table from already shaded (e.g. GPU) values.
+    static void prepare_cdf(int res, span<Vec3> values, span<float> rows,
+                            span<float> cols)
+    {
+        OSL_DASSERT(res >= 32 && values.size() == size_t(res) * res
+                    && rows.size() == size_t(res)
+                    && cols.size() == values.size());
+        const float invjacobian = float(res) * res / float(4 * M_PI);
+        for (int y = 0, i = 0; y < res; y++) {
+            for (int x = 0; x < res; x++, i++) {
+                cols[i] = std::max(std::max(values[i].x, values[i].y),
+                                   values[i].z)
+                          + ((x > 0) ? cols[i - 1] : 0.0f);
+            }
+            rows[y] = cols[i - 1] + ((y > 0) ? rows[y - 1] : 0.0f);
+            // normalize the pdf for this scanline (if it was non-zero)
+            if (cols[i - 1] != 0)
+                for (int x = 0; x < res; x++)
+                    cols[i - res + x] /= cols[i - 1];
+            else
+                // Zero-energy rows still need a valid conditional CDF.
+                for (int x = 0; x < res; x++)
+                    cols[i - res + x] = float(x + 1) / res;
+        }
+        // Any normalized distribution can sample a genuinely black map.
+        const float total = rows[res - 1];
+        for (int y = 0; y < res; y++) {
+            rows[y] = total == 0 ? float(y + 1) / res : rows[y] / total;
+        }
+
+        // both eval and sample below return a "weight" that is
+        // value[i] / row*col_pdf, so might as well bake it into the table
+        for (int y = 0, i = 0; y < res; y++) {
+            float row_pdf = rows[y] - (y > 0 ? rows[y - 1] : 0.0f);
+            for (int x = 0; x < res; x++, i++) {
+                float col_pdf   = cols[i] - (x > 0 ? cols[i - 1] : 0.0f);
+                const float pdf = row_pdf * col_pdf * invjacobian;
+                // Preserve black texels without forming 0/0. Invalid nonblack
+                // weights must remain visible to the caller's finite checks.
+                if (values[i] != Vec3(0))
+                    values[i] /= pdf;
+            }
+        }
     }
 
     OSL_HOSTDEVICE
@@ -138,20 +162,27 @@ struct Background {
         return values[y * res + x];
     }
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
     OSL_HOSTDEVICE
     void set_variables(Vec3* values_in, float* rows_in, float* cols_in,
                        int res_in)
     {
-        values      = values_in;
-        rows        = rows_in;
-        cols        = cols_in;
-        res         = res_in;
+        values = values_in;
+        rows   = rows_in;
+        cols   = cols_in;
+        res    = res_in;
+#    if defined(__HIPCC__)
+        invres      = 1.0f / res;
+        invjacobian = float(res) * res / float(4 * M_PI);
+#    else
         invres      = __frcp_rn(res);
         invjacobian = __fdiv_rn(res * res, float(4 * M_PI));
+#    endif
         assert(res >= 32);
     }
+#endif
 
+#ifdef __CUDACC__
     template<typename F>
     OSL_HOSTDEVICE void prepare_cuda(int stride, int idx, F cb)
     {
@@ -190,11 +221,14 @@ struct Background {
             }
             rows[y] = cols[i - 1] + ((y > 0) ? rows[y - 1] : 0.0f);
             // normalize the pdf for this scanline (if it was non-zero)
-            if (cols[i - 1] > 0) {
+            if (cols[i - 1] != 0) {
                 for (int x = 0; x < res; x++) {
                     cols[i - res + x] = __fdiv_rn(cols[i - res + x],
                                                   cols[i - 1]);
                 }
+            } else {
+                for (int x = 0; x < res; x++)
+                    cols[i - res + x] = __fdiv_rn(float(x + 1), float(res));
             }
         }
     }
@@ -203,8 +237,10 @@ struct Background {
     OSL_HOSTDEVICE void prepare_cuda_03(int stride, int idx)
     {
         // normalize the pdf across all scanlines
+        const float total = rows[res - 1];
         for (int y = idx; y < res; y += stride) {
-            rows[y] = __fdiv_rn(rows[y], rows[res - 1]);
+            rows[y] = total == 0 ? __fdiv_rn(float(y + 1), float(res))
+                                 : __fdiv_rn(rows[y], total);
         }
 
         // both eval and sample below return a "weight" that is
@@ -220,15 +256,16 @@ struct Background {
                 float col_pdf       = cols[i] - (x > 0 ? cols[i - 1] : 0.0f);
                 const float divisor = __fmul_rn(__fmul_rn(row_pdf, col_pdf),
                                                 invjacobian);
-                values[i].x         = __fdiv_rn(values[i].x, divisor);
-                values[i].y         = __fdiv_rn(values[i].y, divisor);
-                values[i].z         = __fdiv_rn(values[i].z, divisor);
+                if (values[i] != Vec3(0)) {
+                    values[i].x = __fdiv_rn(values[i].x, divisor);
+                    values[i].y = __fdiv_rn(values[i].y, divisor);
+                    values[i].z = __fdiv_rn(values[i].z, divisor);
+                }
             }
         }
     }
 #endif
 
-private:
     OSL_HOSTDEVICE Dual2<Vec3> map(float x, float y) const
     {
         // pixel coordinates of entry (x,y)
@@ -242,6 +279,7 @@ private:
         return make_Vec3(sin_phi * ct, sin_phi * st, cos_phi);
     }
 
+private:
     static OSL_HOSTDEVICE float sample_cdf(const float* data, unsigned int n,
                                            float x, unsigned int* idx,
                                            float* pdf)

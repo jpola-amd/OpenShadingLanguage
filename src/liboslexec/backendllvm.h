@@ -70,8 +70,9 @@ public:
     llvm::Function* build_llvm_init();
 
     // Create llvm functions for OptiX callables
-    std::vector<llvm::Function*> build_llvm_optix_callables();
+    std::vector<llvm::Function*> build_llvm_gpu_callables();
     llvm::Function* build_llvm_fused_callable();
+    void llvm_call_group_entries(cspan<llvm::Value*> args);
 
     /// Build up LLVM IR code for the given range [begin,end) or
     /// opcodes, putting them (initially) into basic block bb (or the
@@ -531,7 +532,16 @@ public:
 
     /// Return whether or not we are compiling for an OptiX-based renderer.
     bool use_optix() { return m_use_optix; }
+    bool use_hart() const { return shadingsys().use_hart(); }
+    bool use_gpu() const { return shadingsys().use_gpu(); }
     bool use_optix_cache() { return shadingsys().use_optix_cache(); }
+
+    // Userdata resolves per point; only its fallback lives in the shared arena.
+    bool hart_interactive_default(const Symbol& sym) const
+    {
+        return use_hart() && sym.symtype() == SymTypeParam && sym.interpolated()
+               && sym.interactive() && !sym.connected();
+    }
 
     /// Return if we should compile against free function versions of Renderer Service.
     bool use_rs_bitcode() { return m_use_rs_bitcode; }
@@ -595,6 +605,7 @@ private:
     llvm::PointerType* m_llvm_type_setup_closure_func;
     int m_llvm_local_mem;   // Amount of memory we use for locals
     bool m_name_llvm_syms;  // Whether to name LLVM symbols
+    bool m_llvm_codegen_failed = false;
 
     // A mapping from symbol names to llvm::GlobalVariables
     std::map<std::string, llvm::GlobalVariable*> m_const_map;

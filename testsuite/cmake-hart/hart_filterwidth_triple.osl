@@ -1,0 +1,20 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_filterwidth_triple(int kind = 0, output color Cout = 0)
+{
+    vector q = vector(P[0] + P[1], P[0] - P[1], P[0] * P[1]);
+    if (kind == 0)
+        Cout = color(filterwidth(q));
+    else if (kind == 1)
+        Cout = filterwidth(color(q));
+    else if (kind == 2)
+        Cout = color(filterwidth(point(q)));
+    else if (kind == 3)
+        Cout = color(filterwidth(normal(q)));
+    else if (kind == 4)
+        Cout = color(filterwidth(N));
+    else
+        Cout = color(filterwidth(P));
+}

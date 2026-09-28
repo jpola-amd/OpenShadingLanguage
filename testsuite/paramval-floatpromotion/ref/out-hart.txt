@@ -1,0 +1,3 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:8, point 0): a=10 10 10
+HART shader 'test' (test.osl:9, point 0): p=42 21 7

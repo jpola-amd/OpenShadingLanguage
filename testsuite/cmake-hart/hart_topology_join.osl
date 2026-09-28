@@ -1,0 +1,33 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_topology_join(float left = 0, float right = 0, float root = 0,
+                         int mode = -1, int reuse_all = 0, output color Cout = 0)
+{
+    int selected_mode = mode;
+    if (selected_mode < 0)
+        selected_mode = min(int(4 * v), 3);
+    int take_left = u > v;
+    if (selected_mode == 1)
+        take_left = 1;
+    else if (selected_mode == 2)
+        take_left = 0;
+    else if (selected_mode == 3)
+        take_left = u == v;
+
+    float chosen = 0;
+    if (take_left)
+        chosen = left;
+    else
+        chosen = right;
+    float result = chosen + 0.25 * root;
+    // Re-read the selected connection after reconvergence.
+    if (take_left)
+        result += 0.5 * left;
+    else
+        result += 0.5 * right;
+    if (reuse_all)
+        result += 0.125 * (left + right);
+    Cout = color(result, Dx(result), Dy(result));
+}

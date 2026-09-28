@@ -1,0 +1,25 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#ifndef FIRSTCHANNEL_CASE
+#define FIRSTCHANNEL_CASE 0
+#endif
+
+shader hart_texture_alpha_rejected(int enabled = 1, int channel = 1,
+                                   output color Cout = 0)
+{
+    if (enabled)
+        Cout = texture("hart_texture_alpha_4.exr", u, v,
+                       "interp", "linear", "wrap", "clamp", "firstchannel",
+#if FIRSTCHANNEL_CASE == 0
+                       -1
+#elif FIRSTCHANNEL_CASE == 1
+                       channel
+#elif FIRSTCHANNEL_CASE == 2
+                       int(3 * u)
+#else
+                       1.0
+#endif
+                       );
+}

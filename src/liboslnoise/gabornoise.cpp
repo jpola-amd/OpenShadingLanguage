@@ -48,7 +48,7 @@ struct GaborParams {
         float TWO_to_bandwidth = exp2f(bandwidth);
 #endif
 
-#ifndef __CUDA_ARCH__
+#if !OSL_GPU_DEVICE
         //static const float SQRT_PI_OVER_LN2 = sqrtf (M_PI / M_LN2);
         // To match GCC result of sqrtf (M_PI / M_LN2)
         static constexpr float SQRT_PI_OVER_LN2 = 2.128934e+00f;
@@ -261,6 +261,60 @@ gabor_setup_filter(const Dual2<Vec3>& P, GaborParams& gp)
         // errors later if we filter.  Yes, it's kind of arbitrary.
     }
 }
+
+
+
+#if defined(__HIPCC__)
+OSL_HOSTDEVICE bool
+hart_gabor_valid(const Dual2<Vec3>& p, const NoiseParams& opt,
+                 const Vec3& period, bool periodic)
+{
+    auto finite = [](const Vec3& v) {
+        return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+    };
+    if (!finite(p.val()) || !finite(p.dx()) || !finite(p.dy())
+        || !finite(opt.direction) || !std::isfinite(opt.direction.length2())
+        || !std::isfinite(opt.bandwidth) || !std::isfinite(opt.impulses)
+        || (periodic && !finite(period)))
+        return false;
+    GaborParams gp(opt);
+    const Dual2<Vec3> grid = p * gp.radius_inv;
+    if (!finite(grid.val()) || !finite(grid.dx()) || !finite(grid.dy())
+        || !std::isfinite(gp.a) || gp.a <= 0
+        || !std::isfinite(gp.lambda * gp.radius3)
+        || !std::isfinite(gp.sqrt_lambda_inv))
+        return false;
+    // Check every possible seed coordinate, including periodic wrapping,
+    // before fast_rng converts a cell coordinate to a signed integer.
+    for (int c = 0; c < 3; ++c) {
+        const float base = floorf(grid.val()[c]);
+        for (int offset = -1; offset <= 1; ++offset) {
+            float cell = base + offset;
+            if (periodic)
+                cell = wrap(cell, period[c]);
+            if (!std::isfinite(cell) || cell < -2147483648.0f
+                || cell >= 2147483648.0f)
+                return false;
+        }
+    }
+    if (gp.do_filter) {
+        gabor_setup_filter(p, gp);
+        if (gp.do_filter) {
+            if (!finite(gp.N) || !std::isfinite(gp.det_filter))
+                return false;
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    if (!std::isfinite(gp.local[i][j]))
+                        return false;
+            for (int i = 0; i < 2; ++i)
+                for (int j = 0; j < 2; ++j)
+                    if (!std::isfinite(gp.filter[i][j]))
+                        return false;
+        }
+    }
+    return true;
+}
+#endif
 
 
 

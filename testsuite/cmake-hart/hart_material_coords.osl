@@ -1,0 +1,12 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_material_coords(point position = point(0), int transform_only = 0,
+                            output point value = point(0))
+{
+    if (transform_only)
+        value = transform(matrix("shader", "object"), position);
+    else
+        value = point(0.25 + 0.375 * u, 0.125 + 0.5 * v, 0.5);
+}

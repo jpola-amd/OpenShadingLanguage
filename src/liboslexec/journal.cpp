@@ -17,7 +17,8 @@ OSL_NAMESPACE_BEGIN
 // hopefully will make it easier to track down where things are going awry.
 template<typename OutIt, typename... Args>
 OSL_NODISCARD inline auto
-fmtformat_to_n_safe(OutIt& out, size_t n, string_view fmt, Args&&... args)
+fmtformat_to_n_safe(OutIt& out, size_t n, bool& valid, string_view fmt,
+                    Args&&... args)
 {
     // DOES NOT EXIST AS PUBLIC API
     // return OIIO::Strutil::fmt::format_to_n(out, n, fmt, std::forward<Args>(args)...);
@@ -25,15 +26,19 @@ fmtformat_to_n_safe(OutIt& out, size_t n, string_view fmt, Args&&... args)
     // TODO:  Add format_to_n as a public API in OIIO
     try {
 #if OSL_CPLUSPLUS_VERSION >= 20 || FMT_VERSION >= 100000
-        std::string str = fmtformat(fmt, std::forward<Args>(args)...);
-        return ::fmt::format_to_n(out, n, "{}", str);
+        auto result = ::fmt::format_to_n(
+            out, n, ::fmt::runtime(::fmt::string_view(fmt.data(), fmt.size())),
+            std::forward<Args>(args)...);
 #else
-        return ::fmt::format_to_n(out, n,
-                                  ::fmt::string_view { fmt.begin(),
-                                                       fmt.length() },
-                                  std::forward<Args>(args)...);
+        auto result = ::fmt::format_to_n(out, n,
+                                         ::fmt::string_view { fmt.begin(),
+                                                              fmt.length() },
+                                         std::forward<Args>(args)...);
 #endif
+        valid &= result.size <= n;
+        return result;
     } catch (const std::exception& e) {
+        valid = false;
         return ::fmt::format_to_n(out, n,
                                   "MIS-FORMAT: format \"{}\" threw \"{}\"", fmt,
                                   e.what());
@@ -47,20 +52,35 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                const EncodedType* arg_types, const uint8_t* arg_values,
                std::string& built_str)
 {
+    bool valid;
+    return decode_message(format_hash, arg_count, arg_types, arg_values,
+                          built_str, valid);
+}
+
+
+
+int
+decode_message(uint64_t format_hash, int32_t arg_count,
+               const EncodedType* arg_types, const uint8_t* arg_values,
+               std::string& built_str, bool& valid)
+{
     // set max size of each output string
     // replacement region buffer
     char rr_buf[128];
     built_str.clear();
+    valid = true;
 
     const char* format = OSL::ustring::from_hash(format_hash).c_str();
-    OSL_ASSERT(format != nullptr
-               && "The string should have been a valid ustring");
+    if (!format) {
+        valid = format_hash == 0 && arg_count == 0;
+        return 0;
+    }
     const int len = static_cast<int>(strlen(format));
 
     int arg_index                  = 0;
     int arg_offset                 = 0;
     constexpr size_t rs_max_length = 1024;
-    char replacement_str[rs_max_length];
+    char replacement_str[rs_max_length + 1];
     for (int j = 0; j < len;) {
         // If we encounter a '%', then we'll copy the format string to 'fmt_string'
         // and provide that to printf() directly along with a pointer to the argument
@@ -92,6 +112,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
 
             if (!is_rr_complete) {
                 built_str += replacement_region;
+                valid &= rr_len == 1;  // Escaped opening brace.
             } else {
                 if (arg_index < arg_count) {
                     EncodedType arg_type = arg_types[arg_index];
@@ -112,7 +133,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                                sizeof(arg_value));
                         const char* arg_string = arg_value.c_str();
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length + 1,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_string);
                         *result.out = '\0';
@@ -122,7 +143,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -132,7 +153,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -142,7 +163,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -152,7 +173,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -162,7 +183,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -172,7 +193,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -183,7 +204,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -194,7 +215,7 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                         memcpy(&arg_value, &arg_values[arg_offset],
                                sizeof(arg_value));
                         auto result = fmtformat_to_n_safe(replacement_str,
-                                                          rs_max_length,
+                                                          rs_max_length, valid,
                                                           replacement_region,
                                                           arg_value);
                         *result.out = '\0';
@@ -209,7 +230,8 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                     arg_offset += pvt::size_of_encoded_type(arg_type);
                     ++arg_index;
                     built_str += replacement_str;
-                }
+                } else
+                    valid = false;
             }
         } else {
             //if we are not "{" for printf; all others contain {} as part of the message
@@ -218,10 +240,12 @@ decode_message(uint64_t format_hash, int32_t arg_count,
                 // }} should just be output as }
                 // so skip the next character
                 ++j;
-            }
+            } else if (cur_char == '}')
+                valid = false;
         }  //else within for
 
     }  //initial for loop
+    valid &= arg_index == arg_count;
     return arg_offset;
 }
 

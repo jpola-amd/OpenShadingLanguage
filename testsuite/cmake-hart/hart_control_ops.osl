@@ -1,0 +1,35 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_control_ops(output color Cout = 0)
+{
+    int s = min(31, int(32*u));
+    int a = -123456789 + s;
+    int b = 0x01347bdf + int(16*v);
+    if (v < 0.125) {
+        Cout = color((a & b) & 65535, ((a | b) >> 16) & 65535,
+                     (a ^ b) & 65535);
+    } else if (v < 0.375) {
+        Cout = color((~a) & 65535, ((a << s) >> 16) & 65535,
+                     (a >> s) & 65535);
+    } else if (v < 0.625) {
+        int x = s-16;
+        int y = s%5-2;
+        Cout = color((x && y) + 2*(x || y) + 4*(!x) + 8*(!y),
+                     (x<y) + 2*(x<=y) + 4*(x>y) + 8*(x>=y)
+                     + 16*(x==y) + 32*(x!=y), x%y);
+    } else if (v < 0.875) {
+        int k = s-16;
+        int x = k++;
+        int y = --k;
+        int z = ++k;
+        int w = k--;
+        Cout = color(x+2*y+3*z+4*w, k, k==x);
+    } else {
+        Cout = color(((-1 >> s)==-1) + 2*((0x80000000 >> 31)==-1)
+                     + 4*((1 << 31)==0x80000000),
+                     ((a & 0)==0) + 2*((a | 0)==a) + 4*((a ^ a)==0),
+                     a%1+10);
+    }
+}

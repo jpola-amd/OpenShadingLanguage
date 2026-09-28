@@ -1,0 +1,33 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test_named_comp.h:28, point 0): point:
+HART shader 'test' (test_named_comp.h:32, point 0):   R = point(0 1 2) has components 0, 1, 2
+HART shader 'test' (test_named_comp.h:37, point 0):   After R.x = 0.25, R = (0.25 1 2)
+HART shader 'test' (test_named_comp.h:39, point 0):   After R.y = 0.50, R = (0.25 0.5 2)
+HART shader 'test' (test_named_comp.h:41, point 0):   After R.z = 0.75, R = (0.25 0.5 0.75)
+HART shader 'test' (test_named_comp.h:44, point 0):   Via function params, R comps = 0.25 0.5 0.75
+HART shader 'test' (test_named_comp.h:47, point 0):   After function params, R = 42 0.5 0.75
+HART shader 'test' (test_named_comp.h:54, point 0):   Setting array components separately, arr[1] = 1.5 2 2.5
+HART shader 'test' (test_named_comp.h:28, point 0): vector:
+HART shader 'test' (test_named_comp.h:32, point 0):   R = vector(0 1 2) has components 0, 1, 2
+HART shader 'test' (test_named_comp.h:37, point 0):   After R.x = 0.25, R = (0.25 1 2)
+HART shader 'test' (test_named_comp.h:39, point 0):   After R.y = 0.50, R = (0.25 0.5 2)
+HART shader 'test' (test_named_comp.h:41, point 0):   After R.z = 0.75, R = (0.25 0.5 0.75)
+HART shader 'test' (test_named_comp.h:44, point 0):   Via function params, R comps = 0.25 0.5 0.75
+HART shader 'test' (test_named_comp.h:47, point 0):   After function params, R = 42 0.5 0.75
+HART shader 'test' (test_named_comp.h:54, point 0):   Setting array components separately, arr[1] = 1.5 2 2.5
+HART shader 'test' (test_named_comp.h:28, point 0): normal:
+HART shader 'test' (test_named_comp.h:32, point 0):   R = normal(0 1 2) has components 0, 1, 2
+HART shader 'test' (test_named_comp.h:37, point 0):   After R.x = 0.25, R = (0.25 1 2)
+HART shader 'test' (test_named_comp.h:39, point 0):   After R.y = 0.50, R = (0.25 0.5 2)
+HART shader 'test' (test_named_comp.h:41, point 0):   After R.z = 0.75, R = (0.25 0.5 0.75)
+HART shader 'test' (test_named_comp.h:44, point 0):   Via function params, R comps = 0.25 0.5 0.75
+HART shader 'test' (test_named_comp.h:47, point 0):   After function params, R = 42 0.5 0.75
+HART shader 'test' (test_named_comp.h:54, point 0):   Setting array components separately, arr[1] = 1.5 2 2.5
+HART shader 'test' (test_named_comp.h:28, point 0): color:
+HART shader 'test' (test_named_comp.h:32, point 0):   R = color(0 1 2) has components 0, 1, 2
+HART shader 'test' (test_named_comp.h:37, point 0):   After R.r = 0.25, R = (0.25 1 2)
+HART shader 'test' (test_named_comp.h:39, point 0):   After R.g = 0.50, R = (0.25 0.5 2)
+HART shader 'test' (test_named_comp.h:41, point 0):   After R.b = 0.75, R = (0.25 0.5 0.75)
+HART shader 'test' (test_named_comp.h:44, point 0):   Via function params, R comps = 0.25 0.5 0.75
+HART shader 'test' (test_named_comp.h:47, point 0):   After function params, R = 42 0.5 0.75
+HART shader 'test' (test_named_comp.h:54, point 0):   Setting array components separately, arr[1] = 1.5 2 2.5

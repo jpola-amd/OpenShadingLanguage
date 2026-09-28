@@ -151,7 +151,7 @@ struct SpiThinLayer : public bsdl::spi::ThinLayerLobe<BSDLLobe> {
     }
 };
 
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
 // Helper to register BSDL closures
 struct BSDLtoOSL {
     template<typename BSDF> void visit()
@@ -470,14 +470,17 @@ struct Ward final : public BSDF, WardParams {
  * is sufficient).
  */
 struct GGXDist {
-    static OSL_HOSTDEVICE float F(const float tan_m2)
+    static OSL_HOSTDEVICE float D(float cos_theta2, float slope2,
+                                  float alpha_product)
     {
-        return 1 / (float(M_PI) * (1 + tan_m2) * (1 + tan_m2));
+        const float q = cos_theta2 + slope2;
+        return 1 / (float(M_PI) * alpha_product * q * q);
     }
 
-    static OSL_HOSTDEVICE float Lambda(const float a2)
+    static OSL_HOSTDEVICE float Lambda(const float a)
     {
-        return 0.5f * (-1.0f + sqrtf(1.0f + 1.0f / a2));
+        // Keep the cotangent unsquared at grazing angles.
+        return 0.5f * (hypotf(1.0f, 1.0f / a) - 1.0f);
     }
 
     static OSL_HOSTDEVICE Vec2 sampleSlope(float cos_theta, float randu,
@@ -508,14 +511,21 @@ struct GGXDist {
 };
 
 struct BeckmannDist {
-    static OSL_HOSTDEVICE float F(const float tan_m2)
+    static OSL_HOSTDEVICE float D(float cos_theta2, float slope2,
+                                  float alpha_product)
     {
-        return float(1 / M_PI) * OIIO::fast_exp(-tan_m2);
+        const float tan_m2 = slope2 / cos_theta2;
+        if (std::isinf(tan_m2) && tan_m2 > 0)
+            return 0;
+        // Avoid both a clamped fast_exp tail and division by an underflowed
+        // projected area. The logarithmic density has the correct zero limit.
+        return expf(-tan_m2 - logf(float(M_PI) * alpha_product)
+                    - 2 * logf(cos_theta2));
     }
 
-    static OSL_HOSTDEVICE float Lambda(const float a2)
+    static OSL_HOSTDEVICE float Lambda(const float a)
     {
-        const float a = sqrtf(a2);
+        const float a2 = a * a;
         return a < 1.6f ? (1.0f - 1.259f * a + 0.396f * a2)
                               / (3.535f * a + 2.181f * a2)
                         : 0.0f;
@@ -715,11 +725,8 @@ private:
 
     OSL_HOSTDEVICE float evalLambda(const Vec3 w) const
     {
-        float cosTheta2 = SQR(w.z);
-        /* Have these two multiplied by sinTheta^2 for convenience */
-        float cosPhi2st2 = SQR(w.x * xalpha);
-        float sinPhi2st2 = SQR(w.y * yalpha);
-        return Distribution::Lambda(cosTheta2 / (cosPhi2st2 + sinPhi2st2));
+        const float a = fabsf(w.z) / hypotf(w.x * xalpha, w.y * yalpha);
+        return Distribution::Lambda(a);
     }
 
     static OSL_HOSTDEVICE float evalG2(float Lambda_i, float Lambda_o)
@@ -741,12 +748,9 @@ private:
             float cosPhi2st2 = SQR(Hr.x / xalpha);
             float sinPhi2st2 = SQR(Hr.y / yalpha);
             float cosThetaM2 = SQR(cosThetaM);
-            float cosThetaM4 = SQR(cosThetaM2);
-
-            float tanThetaM2 = (cosPhi2st2 + sinPhi2st2) / cosThetaM2;
-
-            const float val = Distribution::F(tanThetaM2)
-                              / (xalpha * yalpha * cosThetaM4);
+            const float val  = Distribution::D(cosThetaM2,
+                                               cosPhi2st2 + sinPhi2st2,
+                                               xalpha * yalpha);
 #ifndef __CUDACC__
             return val;
 #else
@@ -771,7 +775,8 @@ private:
 #endif
 
         // figure out angles for the incoming vector
-        float cos_theta = std::max(swo.z, 0.0f);
+        // Normalization can round the cosine just above one.
+        float cos_theta = std::clamp(swo.z, 0.0f, 1.0f);
         float cos_phi   = 1;
         float sin_phi   = 0;
         /* Normal incidence special case gets phi 0 */
@@ -996,11 +1001,10 @@ private:
 
     OSL_HOSTDEVICE float evalLambda(const Vec3 w) const
     {
-        float cosTheta2 = SQR(w.z);
-        /* Have these two multiplied by sinTheta^2 for convenience */
-        float cosPhi2st2 = SQR(w.x * MxMicrofacetParams::roughness_x);
-        float sinPhi2st2 = SQR(w.y * MxMicrofacetParams::roughness_y);
-        return Distribution::Lambda(cosTheta2 / (cosPhi2st2 + sinPhi2st2));
+        const float a = fabsf(w.z)
+                        / hypotf(w.x * MxMicrofacetParams::roughness_x,
+                                 w.y * MxMicrofacetParams::roughness_y);
+        return Distribution::Lambda(a);
     }
 
     static OSL_HOSTDEVICE float evalG2(float Lambda_i, float Lambda_o)
@@ -1022,14 +1026,10 @@ private:
             float cosPhi2st2 = SQR(Hr.x / MxMicrofacetParams::roughness_x);
             float sinPhi2st2 = SQR(Hr.y / MxMicrofacetParams::roughness_y);
             float cosThetaM2 = SQR(cosThetaM);
-            float cosThetaM4 = SQR(cosThetaM2);
-
-            float tanThetaM2 = (cosPhi2st2 + sinPhi2st2) / cosThetaM2;
-
-            const float val = Distribution::F(tanThetaM2)
-                              / (MxMicrofacetParams::roughness_x
-                                 * MxMicrofacetParams::roughness_y
-                                 * cosThetaM4);
+            const float val
+                = Distribution::D(cosThetaM2, cosPhi2st2 + sinPhi2st2,
+                                  MxMicrofacetParams::roughness_x
+                                      * MxMicrofacetParams::roughness_y);
 #ifndef __CUDACC__
             return val;
 #else
@@ -1050,7 +1050,7 @@ private:
         swo = swo.normalize();
 
         // figure out angles for the incoming vector
-        float cos_theta = std::max(swo.z, 0.0f);
+        float cos_theta = std::clamp(swo.z, 0.0f, 1.0f);
         float cos_phi   = 1;
         float sin_phi   = 0;
         /* Normal incidence special case gets phi 0 */
@@ -1182,7 +1182,7 @@ struct HenyeyGreenstein : public bsdl::spi::VolumeLobe<BSDLLobe> {
 };
 
 
-BSDF::Sample
+OSL_HOSTDEVICE BSDF::Sample
 MediumParams::sample_phase_func(const Vec3& wo, float rx, float ry,
                                 float rz) const
 {
@@ -1225,19 +1225,19 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
             break;
         default: {
             const ClosureComponent* comp = closure->as_comp();
-            Color3 w                     = comp->w;
+            branch_weight *= comp->w;
             switch (comp->id) {
             case MX_LAYER_ID: {
                 const MxLayerParams* srcparams = comp->as<MxLayerParams>();
                 closure                        = srcparams->top;
                 ptr_stack[stack_idx]           = srcparams->base;
-                weight_stack[stack_idx++]      = branch_weight * w;
+                weight_stack[stack_idx++]      = branch_weight;
                 break;
             }
             case REFLECTION_ID:
             case FRESNEL_REFLECTION_ID: {
                 Reflection bsdf(*comp->as<ReflectionParams>());
-                branch_weight *= w * bsdf.get_albedo(-sg.I);
+                branch_weight *= bsdf.get_albedo(-sg.I);
                 closure = nullptr;
                 break;
             }
@@ -1245,7 +1245,7 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
                 const MxDielectric::Data& params
                     = *comp->as<MxDielectric::Data>();
                 MxDielectric d(params, -sg.I, sg.backfacing, path_roughness);
-                branch_weight *= w * (Color3(1) - d.filter_o(-sg.I).toRGB(0));
+                branch_weight *= Color3(1) - d.filter_o(-sg.I).toRGB(0);
                 closure = nullptr;
                 break;
             }
@@ -1259,13 +1259,13 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
                 }
                 MxGeneralizedSchlick d(params, -sg.I, sg.backfacing,
                                        path_roughness);
-                branch_weight *= w * (Color3(1) - d.filter_o(-sg.I).toRGB(0));
+                branch_weight *= Color3(1) - d.filter_o(-sg.I).toRGB(0);
                 break;
             }
             case MxSheen::closureid(): {
                 const MxSheen::Data& params = *comp->as<MxSheen::Data>();
                 MxSheen d(params, -sg.I, sg.backfacing, path_roughness);
-                branch_weight *= w * (Color3(1) - d.filter_o(-sg.I).toRGB(0));
+                branch_weight *= Color3(1) - d.filter_o(-sg.I).toRGB(0);
                 closure = nullptr;
                 break;
             }
@@ -1286,13 +1286,42 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
     return accumulated_weight;
 }
 
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
+valid_medium_params(const MxAnisotropicVdfParams& params)
+{
+    return MediumParams::nonnegative(params.albedo)
+           && MediumParams::nonnegative(params.extinction)
+           && std::isfinite(params.anisotropy) && fabsf(params.anisotropy) < 1;
+}
+
+
+
+OSL_HOSTDEVICE bool
+valid_medium_params(const MxMediumVdfParams& params)
+{
+    const bool vacuum = is_black(params.albedo)
+                        && is_black(params.transmission_color);
+    return MediumParams::nonnegative(params.albedo)
+           && MediumParams::nonnegative(params.transmission_color)
+           && params.transmission_color.x <= 1
+           && params.transmission_color.y <= 1
+           && params.transmission_color.z <= 1
+           && std::isfinite(params.transmission_depth)
+           && (vacuum ? params.transmission_depth >= 0
+                      : params.transmission_depth > 0)
+           && std::isfinite(params.anisotropy) && fabsf(params.anisotropy) < 1
+           && std::isfinite(params.ior) && params.ior > 0;
+}
+
+
+
+OSL_HOSTDEVICE bool
 process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                        ShadingResult& result, MediumStack& medium_stack,
                        const ClosureColor* closure, const Color3& w)
 {
     if (!closure)
-        return;
+        return true;
 
     // Non-recursive traversal stack
     const int STACK_SIZE = 16;
@@ -1309,15 +1338,20 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             break;
         }
         case ClosureColor::ADD: {
+            if (stack_idx >= STACK_SIZE)
+                return false;
             weight_stack[stack_idx] = weight;
             ptr_stack[stack_idx++]  = closure->as_add()->closureB;
             closure                 = closure->as_add()->closureA;
             break;
         }
         case MX_LAYER_ID: {
+            if (stack_idx >= STACK_SIZE)
+                return false;
             const ClosureComponent* comp = closure->as_comp();
             const MxLayerParams* params  = comp->as<MxLayerParams>();
-            Color3 base_w                = weight
+            weight *= comp->w;
+            Color3 base_w = weight
                             * (Color3(1)
                                - clamp(evaluate_layer_opacity(sg, path_roughness,
                                                               params->top),
@@ -1331,9 +1365,11 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             const ClosureComponent* comp = closure->as_comp();
             Color3 cw                    = weight * comp->w;
             const auto& params           = *comp->as<MxAnisotropicVdfParams>();
-            result.medium_data.sigma_t   = cw * params.extinction;
-            result.medium_data.sigma_s   = params.albedo
-                                         * result.medium_data.sigma_t;
+            if (!valid_medium_params(params) || !MediumParams::nonnegative(cw))
+                return false;
+            result.medium_data.sigma_t  = cw * params.extinction;
+            result.medium_data.sigma_s  = clamp(params.albedo, 0.f, 1.f)
+                                          * result.medium_data.sigma_t;
             result.medium_data.medium_g = params.anisotropy;
             result.medium_data.priority = 0;  // always intersect
 
@@ -1345,6 +1381,8 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                              result.medium_data.sigma_t.y),
                     std::min(result.medium_data.sigma_s.z,
                              result.medium_data.sigma_t.z) };
+            if (!result.medium_data.valid())
+                return false;
 
             closure = nullptr;
             break;
@@ -1353,6 +1391,8 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             const ClosureComponent* comp = closure->as_comp();
             Color3 cw                    = weight * comp->w;
             const auto& params           = *comp->as<MxMediumVdfParams>();
+            if (!valid_medium_params(params) || !MediumParams::nonnegative(cw))
+                return false;
 
             // when both albedo and transmission_color are black, this is
             // a vacuum medium used only to carry the IOR for dielectric
@@ -1371,8 +1411,13 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                              -OIIO::fast_log(fmaxf(t_color.y, epsilon)),
                              -OIIO::fast_log(fmaxf(t_color.z, epsilon)));
 
-                result.medium_data.sigma_t *= cw / params.transmission_depth;
-                result.medium_data.sigma_s = params.albedo
+                // Divide last so clear or zero-weight channels stay zero even
+                // when the reciprocal depth is not representable.
+                for (int c = 0; c < 3; ++c)
+                    result.medium_data.sigma_t[c]
+                        = (result.medium_data.sigma_t[c] * cw[c])
+                          / params.transmission_depth;
+                result.medium_data.sigma_s = clamp(params.albedo, 0.f, 1.f)
                                              * result.medium_data.sigma_t;
 
                 // clamp sigma_s to be less than sigma_t
@@ -1391,6 +1436,8 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                                                     ? 1.0f / params.ior
                                                     : params.ior;
             result.medium_data.priority       = params.priority;
+            if (!result.medium_data.valid())
+                return false;
 
             closure = nullptr;
             break;
@@ -1448,20 +1495,21 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             weight  = weight_stack[stack_idx];
         }
     }
+    return result.medium_data.valid();
 }
 
 // recursively walk through the closure tree, creating bsdfs as we go
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
 process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
                      ShadingResult& result, MediumStack& medium_stack,
                      const ClosureColor* closure, const Color3& w,
                      bool light_only)
 {
-    static const ustringhash uh_ggx("ggx");
-    static const ustringhash uh_beckmann("beckmann");
-    static const ustringhash uh_default("default");
+    static constexpr ustringhash uh_ggx(strhash("ggx"));
+    static constexpr ustringhash uh_beckmann(strhash("beckmann"));
+    static constexpr ustringhash uh_default(strhash("default"));
     if (!closure)
-        return;
+        return true;
 
     // Non-recursive traversal stack
     const int STACK_SIZE = 16;
@@ -1650,7 +1698,7 @@ process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
                 case MX_LAYER_ID: {
                     const MxLayerParams* srcparams = comp->as<MxLayerParams>();
                     Color3 base_w
-                        = weight
+                        = cw
                           * (Color3(1, 1, 1)
                              - clamp(evaluate_layer_opacity(sg, path_roughness,
                                                             srcparams->top),
@@ -1678,7 +1726,10 @@ process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
                     break;
                 }
                 }
-#ifndef __CUDACC__
+#if defined(__HIPCC__)
+                if (!ok)
+                    return false;
+#elif !defined(__CUDACC__)
                 OSL_ASSERT(ok && "Invalid closure invoked in surface shader");
 #else
                 // TODO: We should never get here, but we sometimes do, e.g. in
@@ -1695,19 +1746,21 @@ process_bsdf_closure(const ShaderGlobalsType& sg, float path_roughness,
             weight  = weight_stack[stack_idx];
         }
     }
+    return true;
 }
 
 
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
 process_closure(const ShaderGlobalsType& sg, float path_roughness,
                 ShadingResult& result, MediumStack& medium_stack,
                 const ClosureColor* Ci, bool light_only)
 {
-    if (!light_only)
-        process_medium_closure(sg, path_roughness, result, medium_stack, Ci,
-                               Color3(1));
-    process_bsdf_closure(sg, path_roughness, result, medium_stack, Ci,
-                         Color3(1), light_only);
+    // Invalid medium records must also fail emission-only evaluations.
+    if (!process_medium_closure(sg, path_roughness, result, medium_stack, Ci,
+                                Color3(1)))
+        return false;
+    return process_bsdf_closure(sg, path_roughness, result, medium_stack, Ci,
+                                Color3(1), light_only);
 }
 
 OSL_HOSTDEVICE Vec3

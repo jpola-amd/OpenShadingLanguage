@@ -68,7 +68,7 @@ else :
 
 refdir = "ref/"
 mytest = os.path.split(os.path.abspath(os.getcwd()))[-1]
-if str(mytest).endswith('.opt') or str(mytest).endswith('.optix') :
+if str(mytest).endswith(('.opt', '.optix', '.hart', '.hart.fused')) :
     mytest = mytest.split('.')[0]
 test_source_dir = os.getenv('OSL_TESTSUITE_SRC',
                             os.path.join(OSL_TESTSUITE_ROOT, mytest))
@@ -101,6 +101,7 @@ idiff_postfilecmd = ""
 skip_diff = int(os.environ.get("OSL_TESTSUITE_SKIP_DIFF", "0"))
 
 filter_re = None
+relative_source_paths = False
 cleanup_on_success = False
 if int(os.getenv('TESTSUITE_CLEANUP_ON_SUCCESS', '0')) :
     cleanup_on_success = True
@@ -163,7 +164,20 @@ def text_diff (fromfile, tofile, diff_file=None, filter_re=None):
     except:
         print ("Unexpected error:", sys.exc_info()[0])
         return -1
-        
+
+    if relative_source_paths:
+        root = os.path.abspath(os.curdir) + os.sep
+        def relative_source(line):
+            context = re.match(r"^HART shader '[^']+' \(", line)
+            if context:
+                start = context.end()
+                for prefix in (root, root.replace("\\", "\\\\")):
+                    if line.startswith(prefix, start):
+                        return line[:start] + line[start + len(prefix):]
+            return line
+        fromlines = [relative_source(line) for line in fromlines]
+        tolines = [relative_source(line) for line in tolines]
+
     diff = difflib.unified_diff(fromlines, tolines, fromfile, tofile,
                                 fromdate, todate)
     # Diff is a generator, but since we need a way to tell if it is
@@ -260,6 +274,20 @@ def oiiodiff (fileA, fileB, extraargs="", silent=True, concat=True) :
     return command
 
 
+def hart_command_options () :
+    if not int(os.environ.get('TESTSHADE_HART') or 0) :
+        return ""
+    for backend in ('TESTSHADE_OPTIX', 'TESTSHADE_BATCHED',
+                    'TESTSHADE_RS_BITCODE') :
+        if int(os.environ.get(backend) or 0) :
+            raise RuntimeError(
+                "TESTSHADE_HART and {} are mutually exclusive".format(backend))
+    options = "--hart "
+    if int(os.environ.get('TESTSHADE_FUSED') or 0) :
+        options += "--hart-fused "
+    return options
+
+
 # Construct a command that run testshade with the specified arguments,
 # appending output to the file "out.txt".
 def testshade (args) :
@@ -267,19 +295,27 @@ def testshade (args) :
         testshadename = os.environ['OSL_TESTSHADE_NAME'] + " "
     else :
         testshadename = osl_app("testshade")
-    return (testshadename + args + redirect + " ;\n")
+    return (testshadename + hart_command_options() + args + redirect + " ;\n")
 
 
 # Construct a command that run testrender with the specified arguments,
 # appending output to the file "out.txt".
 def testrender (args) :
     os.environ["optix_log_level"] = "0"
-    return (osl_app("testrender") + " " + args + redirect + " ;\n")
+    options = hart_command_options()
+    if options :
+        # Use the native limit instead of the four-bounce preview default.
+        # Explicit scene max_bounces options still take precedence.
+        options += "--hart-bounces 64 "
+    return (osl_app("testrender") + " " + options
+            + args + redirect + " ;\n")
 
 
 # Construct a command that run testoptix with the specified arguments,
 # appending output to the file "out.txt".
 def testoptix (args) :
+    if hart_command_options() :
+        raise RuntimeError("testoptix cannot run with TESTSHADE_HART")
     # Disable OptiX logging to prevent messages from the library from
     # appearing in the program output.
     os.environ["optix_log_level"] = "0"
@@ -346,11 +382,31 @@ def runtest (command, outputs, failureok=0, failthresh=0, failpercent=0, regress
             # We will first compare out to ref/out, and if that fails, we
             # will compare it to everything else with the same extension in
             # the ref directory.  That allows us to have multiple matching
-            # variants for different platforms, etc.
+            # variants for different platforms, etc. A dedicated HART reference
+            # is exclusive so diagnostic metadata cannot disappear unnoticed.
             if regression != None:
                 testfiles = ["baseline/"+out]
-            else :                     
+            else :
                 testfiles = ["ref/"+out] + glob.glob (os.path.join ("ref", "*"+extension))
+                hartref = os.path.join("ref", os.path.splitext(out)[0]
+                                       + "-hart" + extension)
+                hart_noopt_ref = os.path.join("ref", os.path.splitext(out)[0]
+                                              + "-noopt-hart" + extension)
+                hart_fused_ref = os.path.join("ref", os.path.splitext(out)[0]
+                                              + "-fused-hart" + extension)
+                if (os.environ.get('TESTSHADE_OPT') == "0"
+                        and os.path.isfile(hart_noopt_ref)) :
+                    hartref = hart_noopt_ref
+                elif (os.environ.get('TESTSHADE_OPT') != "0"
+                        and int(os.environ.get('TESTSHADE_FUSED') or 0)
+                        and os.path.isfile(hart_fused_ref)) :
+                    hartref = hart_fused_ref
+                if (int(os.environ.get('TESTSHADE_HART') or 0)
+                        and os.path.isfile(hartref)) :
+                    testfiles = [hartref]
+                else :
+                    testfiles = [f for f in testfiles
+                                 if not os.path.splitext(f)[0].endswith("-hart")]
             for testfile in (testfiles) :
                 # print ("comparing " + out + " to " + testfile)
                 if extension == ".tif" or extension == ".exr" :

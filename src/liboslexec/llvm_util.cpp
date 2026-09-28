@@ -1640,8 +1640,10 @@ LLVM_Util::make_jit_execengine(std::string* err, TargetISA requestedISA,
         OSL_ASSERT(m_llvm_module != nullptr);
         OSL_DEV_ONLY(std::cout << "debugging symbols" << std::endl);
 
-        module()->addModuleFlag(llvm::Module::Error, "Debug Info Version",
-                                llvm::DEBUG_METADATA_VERSION);
+        // Clang may already emit this flag in the shadeops bitcode.
+        if (!module()->getModuleFlag("Debug Info Version"))
+            module()->addModuleFlag(llvm::Module::Error, "Debug Info Version",
+                                    llvm::DEBUG_METADATA_VERSION);
 
         OSL_MAYBE_UNUSED unsigned int modulesDebugInfoVersion = 0;
         if (auto* Val = llvm::mdconst::dyn_extract_or_null<llvm::ConstantInt>(
@@ -2579,6 +2581,8 @@ LLVM_Util::prune_and_internalize_module(
             // keep any globals whose mangled name contains the rti_internal
             // substring.
             if (!anyMaterializedUses(global)
+                && global.getName() != "llvm.used"
+                && global.getName() != "llvm.compiler.used"
                 && (global.getName().find("rti_internal_")
                     == llvm::StringRef::npos)) {
                 unneeded_globals.push_back(&global);
@@ -5794,7 +5798,17 @@ LLVM_Util::op_store(llvm::Value* val, llvm::Value* ptr)
     // Something bad might happen, and we think it is worth leaving checks.
     // NOTE: this is no longer as useful with opaque pointers, we can only
     // check that ptr is a pointer.
-    if (ptr->getType() != type_ptr(val->getType())) {
+    const auto* ptr_type = llvm::dyn_cast<llvm::PointerType>(ptr->getType());
+#if OSL_LLVM_VERSION >= 210
+    const bool compatible = ptr_type != nullptr;
+#else
+    const bool compatible
+        = ptr_type
+          && ptr_type
+                 == llvm::PointerType::get(val->getType(),
+                                           ptr_type->getAddressSpace());
+#endif
+    if (!compatible) {
         std::cerr << "We have a type mismatch! op_store ptr->getType()="
                   << std::flush;
         ptr->getType()->print(llvm::errs());
@@ -5853,6 +5867,15 @@ void
 LLVM_Util::op_unmasked_store(llvm::Value* val, llvm::Value* ptr)
 {
     builder().CreateStore(val, ptr);
+}
+
+
+
+void
+LLVM_Util::op_unmasked_store(llvm::Value* val, llvm::Value* ptr,
+                            unsigned alignment)
+{
+    builder().CreateAlignedStore(val, ptr, llvm::Align(alignment));
 }
 
 

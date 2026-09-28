@@ -1,0 +1,49 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+float helper(int count, float x, output int visited)
+{
+    visited = 0;
+    for (int i = 0; i < count; ++i) {
+        ++visited;
+        if (i == 2)
+            return x+2;
+    }
+    return x-1;
+}
+
+shader hart_control_flow(float value = 42, output color Cout = 0)
+{
+    int count = int(4*u);
+    int outer = 0;
+    int sum = 0;
+    do {
+        ++outer;
+        if (outer == 2)
+            continue;
+        for (int inner = 0; inner < 5; ++inner) {
+            if (inner == 3)
+                break;
+            if (inner == 1)
+                continue;
+            sum += 10*outer + inner;
+        }
+    } while (outer < count);
+    if (v > 0.5) {
+        Cout = color(sum, 0, -1);
+        exit();
+    }
+    int visited = 0;
+    float h = helper(count, value, visited);
+    int j = 0;
+    while (j < 4) {
+        ++j;
+        if (j == 2)
+            continue;
+        if (j > count)
+            break;
+        sum += j;
+    }
+    Cout = color(sum, h + 2*Dx(h) + 4*Dy(h), visited+10);
+}

@@ -1,0 +1,49 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+struct StringPair {
+    string first;
+    string second;
+};
+
+struct StringRecord {
+    StringPair names;
+    int index;
+    color weight;
+};
+
+shader hart_string_values(
+    string text = "alpha",
+    string names[] = {"red", "green", "blue", "", "red"},
+    output color Cout = 0)
+{
+    int count = arraylength(names);
+    int i = (int(8*u+.5) + 9*int(4*v+.5)) % count;
+    string original = names[i];
+    string selected = v > .5 ? text : original;
+    string copied[9] = {"", "", "", "", "", "", "", "", ""};
+    copied = names;
+    copied[(i+1)%count] = text;
+    StringRecord records[2];
+    records[0].names.first = original;
+    records[0].names.second = text;
+    records[0].index = i;
+    records[0].weight = color(u,v,1);
+    records[1] = records[0];
+    records[0].names.first = "overwritten";
+    int red = (original == "red") + 2*(selected == text)
+              + 4*(selected != "red") + 8*(original == "")
+              + 16*(original != "");
+    int green = arraylength(copied);
+    for (int j = 0; j < count; ++j)
+        green += copied[j] == ((j == (i+1)%count) ? text : names[j]);
+    for (int j = count; j < 9; ++j)
+        green += copied[j] == "";
+    int blue = (records[1].names.first == original)
+               + 2*(records[1].names.second == text)
+               + 4*(records[1].index == i)
+               + 8*(records[0].names.first == "overwritten")
+               + 16*(records[1].weight == color(u,v,1));
+    Cout = color(red,green,blue);
+}

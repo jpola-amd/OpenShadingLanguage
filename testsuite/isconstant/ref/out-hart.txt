@@ -1,0 +1,4 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:9, point 0): Is param A const? 1
+HART shader 'test' (test.osl:10, point 0): Is 2*A const? 1
+HART shader 'test' (test.osl:11, point 0): Is noise(P) const? 0

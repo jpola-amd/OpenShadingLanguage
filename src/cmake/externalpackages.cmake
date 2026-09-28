@@ -169,7 +169,9 @@ if (OSL_USE_OPTIX)
         endif ()
         # Is it really a good idea to completely reset CUDA_LIBRARIES here?
         set(CUDA_LIBRARIES ${cudart_lib})
-        set(CUDA_EXTRA_LIBS ${CUDA_EXTRA_LIBS} dl rt)
+        if (NOT WIN32)
+            set(CUDA_EXTRA_LIBS ${CUDA_EXTRA_LIBS} dl rt)
+        endif ()
         set (CMAKE_FIND_LIBRARY_SUFFIXES ${save_lib_path})
         unset (save_lib_path)
     endif()
@@ -187,7 +189,7 @@ if (OSL_USE_OPTIX)
     function (osl_optix_target TARGET)
         target_include_directories (${TARGET} BEFORE PRIVATE ${CUDA_INCLUDES} ${OPTIX_INCLUDES})
         ## XXX: Should -DPTX_PATH point to (or include) CMAKE_CURRENT_BINARY_DIR so tests can run before installation ?
-        target_compile_definitions (${TARGET} PRIVATE PTX_PATH="${OSL_PTX_INSTALL_DIR}")
+        target_compile_definitions (${TARGET} PRIVATE PTX_PATH="${OSL_PTX_FULL_INSTALL_DIR}")
         target_link_libraries (${TARGET} PRIVATE ${CUDA_LIBRARIES} ${CUDA_EXTRA_LIBS} ${OPTIX_LIBRARIES} ${OPTIX_EXTRA_LIBS})
     endfunction()
 else ()
@@ -195,6 +197,11 @@ else ()
     function (osl_optix_target TARGET)
     endfunction()
 endif ()
+
+
+# HART/ROCm setup (independent of CUDA/OptiX).
+include (hart_macros)
+osl_find_hart ()
 
 
 ###########################################################################

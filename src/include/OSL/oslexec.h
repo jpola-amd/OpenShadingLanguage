@@ -52,7 +52,7 @@ class ShadingSystemImpl;
 
 
 namespace Strings {
-#ifdef __CUDA_ARCH__
+#if OSL_GPU_DEVICE
 #    define STRDECL(str, var_name)
 #else
 // Any strings referenced inside of a libsoslexec/wide/*.cpp
@@ -207,6 +207,13 @@ public:
     /// 2. Attributes that should be set by applications/renderers that
     /// incorporate OSL:
     ///    string commonspace     Name of "common" coord system ("world")
+    ///    string hart_arch       AMDGPU architecture for a renderer supporting
+    ///                              "HART". Set before group optimization.
+    ///                              Cannot change after selection. ("")
+    ///    int max_hart_groupdata_alloc
+    ///                           Maximum private group-data bytes in a fused
+    ///                              HART callable. Nonnegative; 0 disables.
+    ///                              Affects subsequently compiled groups. (0)
     ///    string[] raytypes      Array of ray type names
     ///    string[] renderer_outputs
     ///                           Array of names of renderer outputs (AOVs)
@@ -487,6 +494,8 @@ public:
     /// in value.  Attributes that are currently documented include:
     ///   string groupname           The name of the shader group.
     ///   int num_layers             The number of layers in the group.
+    ///   int is_optimized           Whether optimization has finished, without
+    ///                              triggering optimization or code generation.
     ///   string[] layer_names       The names of the layers in the group.
     ///   int num_textures_needed    The number of texture names that are
     ///                                known to be potentially needed by the
@@ -552,9 +561,32 @@ public:
     ///   int raytype_queries        Bit field of all possible rayquery
     ///   int num_entry_layers       Number of named entry point layers.
     ///   string entry_layers[]      List of entry point layers.
+    ///                              HART declarations must precede optimization
+    ///                              and also set the default execution order.
+    ///   int num_hart_entry_layers  Length of the HART execution sequence.
+    ///   string hart_entry_layers[] Ordered HART entry calls, including repeats.
+    ///                              Defaults to the declared entry_layers order,
+    ///                              or the implicit last layer. May be set before
+    ///                              compilation to select declared entries.
+    ///                              Init runs once before this whole sequence;
+    ///                              the compiled sequence is immutable.
     ///   string pickle              Retrieves a serialized representation
     ///                                 of the shader group declaration.
     ///   int llvm_groupdata_size    Size of the GroupData struct.
+    ///   string group_init_name     GPU init callable name.
+    ///   string group_entry_name    GPU entry callable name.
+    ///   string group_fused_name    GPU callable combining init and entry.
+    ///   int llvm_groupdata_alignment
+    ///                             Required HART GroupData alignment in bytes.
+    ///                             Available after successful compilation.
+    ///   ptr hart_bitcode          Borrowed const void* to compiled HART LLVM
+    ///                             bitcode; valid for the group's lifetime.
+    ///   uint64 hart_bitcode_size  Byte count of hart_bitcode, including zeros.
+    ///                             Both HART queries return false before
+    ///                             successful compilation. No CPU fallback.
+    ///   int hart_groupdata_alloc  Logical private group-data bytes in the
+    ///                             compiled fused callable (0 uses caller
+    ///                             storage). False before successful compilation.
     ///   ptr interactive_params     Pointer to the memory block containing
     ///                                 host-side interactive parameter values
     ///                                 for this shader group.
@@ -562,6 +594,9 @@ public:
     ///                              Pointer to the memory block containing
     ///                                 device-side interactive parameter values
     ///                                 for this shader group.
+    ///                              HART returns false and null after an
+    ///                              allocation/upload failure. A successful
+    ///                              ReParameter repairs the binding.
     ///
     /// Note: the attributes referred to as "string" are actually on the app
     /// side as ustring or const char* (they have the same data layout), NOT
@@ -746,6 +781,14 @@ public:
     /// fail if the shader has already been irrevocably optimized/compiled,
     /// unless the particular parameter is marked as either interpolated=1
     /// or interactive=1.
+    /// HART requires HARTInteractive renderer support and device_alloc,
+    /// device_free, and copy_to_device hooks. Numeric and string parameters
+    /// retain their compiled type and array length. The group owns device
+    /// storage; bind device_interactive_params as the sixth callable argument.
+    /// Finish all launches before updating parameters or destroying the group,
+    /// and destroy groups before their renderer. Updates do not recompile the
+    /// artifact. A failed upload leaves the host mirror unchanged and invalidates
+    /// the device binding until a successful update restores it.
     bool ReParameter(ShaderGroup& group, string_view layername,
                      string_view paramname, TypeDesc type, const void* val);
     // Shortcuts for param passing a single int, float, or string.
@@ -761,10 +804,7 @@ public:
     }
     bool ReParameter(ShaderGroup& group, string_view layername,
                      string_view paramname, const std::string& val)
-    {
-        const char* s = val.c_str();
-        return ReParameter(group, layername, paramname, TypeDesc::STRING, &s);
-    }
+    { return ReParameter(group, layername, paramname, ustring(val)); }
     bool ReParameter(ShaderGroup& group, string_view layername,
                      string_view paramname, ustring val)
     {
@@ -1067,11 +1107,12 @@ public:
     /// to the optimizer, and will be determined strictly at execution time.
     void set_raytypes(ShaderGroup* group, int raytypes_on, int raytypes_off);
 
-    /// Clear any known mappings of symbol locations.
+    /// Clear any known mappings of symbol locations. Compiled HART groups
+    /// reject changes because these locations are baked into their code.
     void clear_symlocs();
     void clear_symlocs(ShaderGroup* group);
 
-    /// Add symbol location mappings.
+    /// Add symbol location mappings. Compiled HART groups reject changes.
     void add_symlocs(cspan<SymLocationDesc> symlocs);
     void add_symlocs(ShaderGroup* group, cspan<SymLocationDesc> symlocs);
 

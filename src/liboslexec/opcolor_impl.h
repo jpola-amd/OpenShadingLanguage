@@ -51,7 +51,7 @@ clamp_zero(Color3& c)
 // Choose to access 1d array vs 2d to allow better code generation of gathers
 namespace {  // anon namespace to avoid duplicate OptiX symbols
 // clang-format off
-#ifdef __CUDACC__
+#if OSL_GPU_COMPILER
 OSL_CONSTANT_DATA const float cie_colour_match[81*3] =
 #else
 OSL_CONSTANT_DATA const float cie_colour_match[81 * 3] OSL_ALIGNAS(64) =
@@ -94,6 +94,11 @@ OSL_CONSTANT_DATA const float cie_colour_match[81 * 3] OSL_ALIGNAS(64) =
 OSL_HOSTDEVICE static Color3
 wavelength_color_XYZ(float lambda_nm)
 {
+#if defined(__HIPCC__)
+    // Preserve first-bin extrapolation, but never convert NaN/Inf to an index.
+    if (!(lambda_nm > 375.0f && lambda_nm < 780.0f))
+        return Color3(0.0f);
+#endif
     float ii = (lambda_nm - 380.0f) / 5.0f;  // scaled 0..80
     int i    = (int)ii;
     // NOTE: bitwise OR to avoid branchiness logical OR introduces.

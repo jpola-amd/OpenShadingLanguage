@@ -1,0 +1,19 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+int hazard(float x)
+{
+    return int(texture("hart_texture_rgb.pfm", 3.0e38*(2+x), v,
+                       "interp", "linear", "wrap", "clamp"));
+}
+
+shader hart_control_short(int force = 0, output color Cout = 0)
+{
+    int n = int(4*u);
+    int a = (n < 0) and hazard(u);
+    int b = (n >= 0) or hazard(u);
+    if (force)
+        a = (n >= 0) && hazard(u);
+    Cout = color(a, b, not b);
+}

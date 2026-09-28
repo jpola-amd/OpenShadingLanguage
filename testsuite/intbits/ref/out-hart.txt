@@ -1,0 +1,10 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:11, point 0):   7 & 2 = 2
+HART shader 'test' (test.osl:12, point 0):   7 & 8 = 0
+HART shader 'test' (test.osl:13, point 0):   7 | 2 = 7
+HART shader 'test' (test.osl:14, point 0):   7 | 8 = 15
+HART shader 'test' (test.osl:15, point 0):   7 ^ 2 = 5
+HART shader 'test' (test.osl:16, point 0):   7 ^ 8 = 15
+HART shader 'test' (test.osl:17, point 0):   7 << 2 = 28
+HART shader 'test' (test.osl:18, point 0):   7 >> 2 = 1
+HART shader 'test' (test.osl:19, point 0):   ~ 7 = -8

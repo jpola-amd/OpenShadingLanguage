@@ -21,6 +21,15 @@
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
 
+#if OSL_USE_HART
+#    include "hart_bitcode.h"
+#    include <llvm/ADT/StringExtras.h>
+#    include <llvm/Bitcode/BitcodeWriter.h>
+#    include <llvm/IR/Verifier.h>
+#    include <llvm/Support/Error.h>
+#    include <llvm/Support/SHA256.h>
+#endif
+
 #if OSL_USE_OPTIX
 #    include <llvm/Linker/Linker.h>
 #endif
@@ -200,8 +209,10 @@ std::string
 layer_function_name(const ShaderGroup& group, const ShaderInstance& inst,
                     bool api)
 {
-    bool use_optix     = inst.shadingsys().use_optix();
-    const char* prefix = use_optix && api ? "__direct_callable__" : "";
+    const auto& ss     = inst.shadingsys();
+    const char* prefix = ((ss.use_hart() || ss.use_optix()) && api)
+                             ? "__direct_callable__"
+                             : "";
     return fmtformat("{}osl_layer_group_{}_name_{}", prefix, group.name(),
                      inst.layername());
 }
@@ -210,8 +221,10 @@ std::string
 init_function_name(const ShadingSystemImpl& shadingsys,
                    const ShaderGroup& group, bool api)
 {
-    bool use_optix     = shadingsys.use_optix();
-    const char* prefix = use_optix && api ? "__direct_callable__" : "";
+    const char* prefix = ((shadingsys.use_hart() || shadingsys.use_optix())
+                          && api)
+                             ? "__direct_callable__"
+                             : "";
 
     return fmtformat("{}osl_init_group_{}", prefix, group.name());
 }
@@ -362,7 +375,7 @@ BackendLLVM::llvm_type_groupdata()
         FOREACH_PARAM(Symbol & sym, inst)
         {
             TypeSpec ts = sym.typespec();
-            if (ts.is_structure())  // skip the struct symbol itself
+            if (ts.is_structure_based())  // skip the struct symbol itself
                 continue;
 
             if (can_treat_param_as_local(sym))
@@ -409,6 +422,22 @@ BackendLLVM::llvm_type_groupdata()
 
     m_llvm_type_groupdata = ll.type_struct(fields, "Groupdata");
     OSL_ASSERT(fields.size() == m_groupdata_field_names.size());
+    if (use_hart()) {
+        const auto& layout    = ll.module()->getDataLayout();
+        const auto* structure = layout.getStructLayout(
+            llvm::cast<llvm::StructType>(m_llvm_type_groupdata));
+        group().llvm_groupdata_size(structure->getSizeInBytes());
+        group().m_llvm_groupdata_alignment = int(
+            layout.getABITypeAlign(m_llvm_type_groupdata).value());
+        for (int layer = 0; layer < group().nlayers(); ++layer) {
+            for (auto& sym : group()[layer]->symbols()) {
+                const auto param = m_param_order_map.find(&sym);
+                if (param != m_param_order_map.end())
+                    sym.dataoffset(
+                        int(structure->getElementOffset(param->second)));
+            }
+        }
+    }
 
     return m_llvm_type_groupdata;
 }
@@ -711,12 +740,15 @@ BackendLLVM::llvm_create_constant(const Symbol& sym)
                 const_element = ll.constant(sym.get_int(linear_index));
             }
             if (sym.typespec().is_string_based()) {
-                // TODO:  right now stored as char *, but change to int64 when we can
-                const_element = reinterpret_cast<llvm::Constant*>(
-                    ll.constant_ptr(
-                        OSL::bitcast<char*>(
-                            ustring(sym.get_string(linear_index)).hash()),
-                        ll.type_char_ptr()));
+                const uint64_t hash = sym.get_string(linear_index).hash();
+                if (use_hart()) {
+                    const_element = ll.constant64(hash);
+                } else {
+                    // Legacy CPU/CUDA constant storage uses pointer-shaped hashes.
+                    const_element = reinterpret_cast<llvm::Constant*>(
+                        ll.constant_ptr(OSL::bitcast<char*>(hash),
+                                        ll.type_char_ptr()));
+                }
             }
             OSL_ASSERT(const_element && "unhandled type");
             elements.push_back(const_element);
@@ -823,6 +855,13 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
         symloc = group().find_symloc(sym.name(), inst()->layername(),
                                      SymArena::UserData);
         if (symloc) {
+            if (use_hart()) {
+                shadingcontext()->errorfmt(
+                    "HART userdata pre-placement is unsupported; use renderer "
+                    "table bindings");
+                m_llvm_codegen_failed = true;
+                return;
+            }
             // We had a userdata pre-placement record for this variable.
             // Just copy from the correct offset location!
 
@@ -840,9 +879,11 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
             if (sym.has_derivs() && !symloc->derivs)
                 ll.op_memset(ll.offset_ptr(dstptr, size), 0, 2 * size);
         } else if (renderer()->supports("build_interpolated_getter")) {
+            const bool userdata_derivs
+                = group().m_userdata_derivs[userdata_index];
             InterpolatedGetterSpec spec;
             renderer()->build_interpolated_getter(group(), symname, type,
-                                                  sym.has_derivs(), spec);
+                                                  userdata_derivs, spec);
             if (!spec.function_name().empty()) {
                 std::vector<llvm::Value*> args;
                 args.reserve(spec.arg_count() + 1);
@@ -861,7 +902,7 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
                             args.push_back(shadeindex());
                             break;
                         case InterpolatedSpecBuiltinArg::Derivatives:
-                            args.push_back(ll.constant_bool(sym.has_derivs()));
+                            args.push_back(ll.constant_bool(userdata_derivs));
                             break;
                         case InterpolatedSpecBuiltinArg::Type:
                             args.push_back(ll.constant(type));
@@ -904,7 +945,7 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
                     // *userdata_initialized = status;
                     ll.op_store(ll.op_int_to_int8(status),
                                 userdata_initializedPtr);
-                    if (!use_optix() && shadingsys().m_statslevel != 0) {
+                    if (!use_gpu() && shadingsys().m_statslevel != 0) {
                         // sg->context->incr_get_userdata_calls();
                         ll.call_function("osl_incr_get_userdata_calls",
                                          sg_void_ptr());
@@ -987,7 +1028,27 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
     // Only generate init_ops or default assignment when userdata pre-placement
     // is not found
     if (symloc == nullptr) {
-        if (sym.has_init_ops() && sym.valuesource() == Symbol::DefaultVal) {
+        if (hart_interactive_default(sym)) {
+            const int offset = group().interactive_param_offset(layer(),
+                                                                sym.name());
+            if (offset < 0 || size_t(offset) > group().m_interactive_arena_size
+                || size_t(sym.size())
+                       > group().m_interactive_arena_size - size_t(offset)) {
+                shadingcontext()->errorfmt(
+                    "HART: invalid interactive default arena range for '{}'",
+                    sym.name());
+                m_llvm_codegen_failed = true;
+                if (after_userdata_block)
+                    ll.op_branch(after_userdata_block);
+                return;
+            }
+            llvm::Value* source = ll.offset_ptr(m_llvm_interactive_params_ptr,
+                                                offset);
+            ll.op_memcpy(llvm_void_ptr(sym), source, sym.size());
+            if (sym.has_derivs())
+                llvm_zero_derivs(sym);
+        } else if (sym.has_init_ops()
+                   && sym.valuesource() == Symbol::DefaultVal) {
             // Handle init ops.
             build_llvm_code(sym.initbegin(), sym.initend());
         } else {
@@ -1258,8 +1319,12 @@ BackendLLVM::build_llvm_code(int beginop, int endop, llvm::BasicBlock* bb)
                 ll.debug_set_location(op.sourcefile(),
                                       std::max(op.sourceline(), 1));
             bool ok = (*opd->llvmgen)(*this, opnum);
-            if (!ok)
+            if (!ok) {
+                // The end marker's dummy generator also returns false.
+                if (op.opname() != op_end)
+                    m_llvm_codegen_failed = true;
                 return false;
+            }
             if (shadingsys().debug_nan() /* debug NaN/Inf */
                 && op.farthest_jump() < 0 /* Jumping ops don't need it */) {
                 llvm_generate_debugnan(op);
@@ -1270,6 +1335,7 @@ BackendLLVM::build_llvm_code(int beginop, int endop, llvm::BasicBlock* bb)
             shadingcontext()->errorfmt(
                 "LLVMOSL: Unsupported op {} in layer {}\n", op.opname(),
                 inst()->layername());
+            m_llvm_codegen_failed = true;
             return false;
         }
 
@@ -1390,8 +1456,8 @@ BackendLLVM::build_llvm_init()
     return ll.current_function();
 }
 
-// OptiX Callables:
-//  Builds three OptiX callables: an init wrapper, an entry layer wrapper,
+// GPU Callables:
+//  Builds three callables: an init wrapper, an entry layer wrapper,
 //  and a "fused" callable that wraps both and owns the groupdata params buffer.
 //
 //  Clients can either call both init + entry, or use the fused callable.
@@ -1401,7 +1467,7 @@ BackendLLVM::build_llvm_init()
 //  direct callables.
 //
 std::vector<llvm::Function*>
-BackendLLVM::build_llvm_optix_callables()
+BackendLLVM::build_llvm_gpu_callables()
 {
     std::vector<llvm::Function*> funcs;
 
@@ -1431,9 +1497,7 @@ BackendLLVM::build_llvm_optix_callables()
             ll.current_function_arg(4), ll.current_function_arg(5),
         };
 
-        // Call layer
-        std::string layer_name = layer_function_name(group(), *inst);
-        ll.call_function(layer_name.c_str(), args);
+        llvm_call_group_entries(args);
 
         ll.op_return();
         ll.end_builder();
@@ -1482,7 +1546,7 @@ BackendLLVM::build_llvm_optix_callables()
 
 //
 // Fused callable:
-//  Alternative OptiX API to the init + entry callables.
+//  Alternative GPU API to the init + entry callables.
 //
 //  Calls init and the entry layer functions itself, so that OSL can own
 //  the groupdata params buffer.
@@ -1516,10 +1580,24 @@ BackendLLVM::build_llvm_fused_callable(void)
     // renderer-supplied pointer
     llvm::Value* llvm_groupdata_ptr = ll.current_function_arg(1);
 
-    if ((int)group().llvm_groupdata_size()
-        <= shadingsys().m_max_optix_groupdata_alloc)
+    if (use_optix()
+        && (int)group().llvm_groupdata_size()
+               <= shadingsys().m_max_optix_groupdata_alloc)
         llvm_groupdata_ptr = ll.op_alloca(m_llvm_type_groupdata, 1,
                                           "groupdata_buffer", 8);
+    if (use_hart()) {
+        const int bytes                = group().llvm_groupdata_size();
+        group().m_hart_groupdata_alloc = 0;
+        if (shadingsys().m_max_hart_groupdata_alloc > 0
+            && bytes <= shadingsys().m_max_hart_groupdata_alloc) {
+            auto* local = ll.op_alloca(m_llvm_type_groupdata, 1,
+                                       "groupdata_buffer",
+                                       group().m_llvm_groupdata_alignment);
+            llvm_groupdata_ptr = ll.ptr_cast(local, llvm_type_groupdata_ptr());
+            group().m_hart_groupdata_alloc = bytes;
+            m_llvm_local_mem += bytes;
+        }
+    }
 
     llvm::Value* args[] = {
         ll.current_function_arg(0), llvm_groupdata_ptr,
@@ -1531,18 +1609,32 @@ BackendLLVM::build_llvm_fused_callable(void)
     std::string init_name = init_function_name(shadingsys(), group());
     ll.call_function(init_name.c_str(), args);
 
-    int nlayers          = group().nlayers();
-    ShaderInstance* inst = group()[nlayers - 1];
-
-    // Call entry
-    std::string layer_name = layer_function_name(group(), *inst);
-    ll.call_function(layer_name.c_str(), args);
+    llvm_call_group_entries(args);
 
     ll.op_return();
     ll.end_builder();
 
     return ll.current_function();
 }
+
+
+
+void
+BackendLLVM::llvm_call_group_entries(cspan<llvm::Value*> args)
+{
+    if (use_hart() && !group().m_hart_entry_layers.empty()) {
+        for (int layer : group().m_hart_entry_layers)
+            ll.call_function(
+                layer_function_name(group(), *group()[layer]).c_str(), args);
+    } else {
+        ll.call_function(layer_function_name(group(),
+                                             *group()[group().nlayers() - 1])
+                             .c_str(),
+                         args);
+    }
+}
+
+
 
 llvm::Function*
 BackendLLVM::build_llvm_instance(bool groupentry)
@@ -1647,7 +1739,7 @@ BackendLLVM::build_llvm_instance(bool groupentry)
             continue;
         }
         // Skip structure placeholders
-        if (s.typespec().is_structure())
+        if (s.typespec().is_structure_based())
             continue;
         // Allocate space for locals, temps, aggregate constants, and some output params
         if (s.symtype() == SymTypeLocal || s.symtype() == SymTypeTemp
@@ -1687,7 +1779,7 @@ BackendLLVM::build_llvm_instance(bool groupentry)
     FOREACH_PARAM(Symbol & s, inst())
     {
         // Skip structure placeholders
-        if (s.typespec().is_structure())
+        if (s.typespec().is_structure_based())
             continue;
         // Skip if it's never read and isn't connected
         if (!s.everread() && !s.connected_down() && !s.connected()
@@ -1695,11 +1787,11 @@ BackendLLVM::build_llvm_instance(bool groupentry)
             continue;
         // Skip if it's an interpolated (userdata) parameter and we're
         // initializing them lazily, or if it's an interactively-adjusted
-        // parameter.
+        // parameter. HART's combined parameters still resolve per point.
         if ((s.symtype() == SymTypeParam || s.symtype() == SymTypeOutputParam)
             && !s.typespec().is_closure() && !s.connected()
             && !s.connected_down()
-            && (s.interactive()
+            && ((s.interactive() && !hart_interactive_default(s))
                 || (s.interpolated() && shadingsys().lazy_userdata())))
             continue;
         // Set initial value for params (may contain init ops)
@@ -1818,11 +1910,31 @@ BackendLLVM::build_llvm_instance(bool groupentry)
 
         if (!equivalent(s.typespec(), symloc->type)
             || s.typespec().is_closure()) {
+            if (use_hart()) {
+                shadingcontext()->errorfmt(
+                    "HART output '{}.{}' type '{}' does not match location type '{}'",
+                    inst()->layername(), s.name(), s.typespec(), symloc->type);
+                m_llvm_codegen_failed = true;
+                continue;
+            }
             std::cout << "No output copy for " << s.typespec() << ' '
                       << s.name()
                       << " because of type mismatch vs symloc=" << symloc->type
                       << "\n";
             continue;  // types didn't match
+        }
+
+        if (use_hart()
+            && (symloc->type.arraylen < 0 || !symloc->type.size()
+                || symloc->type.size() > size_t(std::numeric_limits<int>::max())
+                                             / (symloc->derivs ? 3 : 1)
+                || symloc->stride < int64_t(symloc->type.size())
+                                        * (symloc->derivs ? 3 : 1))) {
+            shadingcontext()->errorfmt(
+                "Invalid HART output location size or stride for '{}.{}'",
+                inst()->layername(), s.name());
+            m_llvm_codegen_failed = true;
+            continue;
         }
 
         int size = int(symloc->type.size());
@@ -1884,8 +1996,7 @@ BackendLLVM::initialize_llvm_group()
     // Set up optimization passes. Don't target the host if we're building
     // for OptiX.
     ll.setup_optimization_passes(shadingsys().llvm_optimize(),
-                                 shadingsys().llvm_target_host()
-                                     && !use_optix());
+                                 shadingsys().llvm_target_host() && !use_gpu());
 
     // Clear the shaderglobals and groupdata types -- they will be
     // created on demand.
@@ -1899,7 +2010,7 @@ BackendLLVM::initialize_llvm_group()
     initialize_llvm_helper_function_map();
 
     // Skipping this in the non-JIT OptiX case suppresses an LLVM warning
-    if (!use_optix())
+    if (!use_gpu())
         ll.InstallLazyFunctionCreator(helper_function_lookup);
 
     for (HelperFuncMap::iterator i = llvm_helper_function_map.begin(),
@@ -1934,7 +2045,7 @@ BackendLLVM::initialize_llvm_group()
                                              varargs);
 
         // Skipping this in the non-JIT OptiX case suppresses an LLVM warning
-        if (!use_optix())
+        if (!use_gpu())
             ll.add_function_mapping(f, (void*)i->second.function);
     }
 
@@ -2079,10 +2190,149 @@ empty_group_func(void*, void*)
 
 
 
+#if OSL_USE_HART
+static bool
+link_hart_renderer_library(LLVM_Util& ll, cspan<char> bytes, string_view arch,
+                           ShadingContext& context)
+{
+    if (bytes.empty())
+        return true;
+    auto fail = [&](string_view message) {
+        context.errorfmt("HART renderer library: {}", message);
+        return false;
+    };
+    std::string error;
+    std::unique_ptr<llvm::Module> library(
+        ll.module_from_bitcode(bytes.data(), bytes.size(),
+                               "hart_renderer_library", &error));
+    if (!library)
+        return fail(fmtformat("cannot read bitcode: {}", error));
+    if (auto err = library->materializeAll())
+        return fail(fmtformat("cannot materialize bitcode: {}",
+                              llvm::toString(std::move(err))));
+    llvm::raw_string_ostream diagnostics(error);
+    if (llvm::verifyModule(*library, &diagnostics)) {
+        diagnostics.flush();
+        return fail(fmtformat("invalid bitcode: {}", error));
+    }
+    const auto& shadeops = *ll.module();
+    if (library->getTargetTriple() != shadeops.getTargetTriple()
+        || library->getDataLayout() != shadeops.getDataLayout())
+        return fail(
+            "target triple or data layout does not match HART shadeops");
+    const auto* provenance = shadeops.getNamedGlobal(
+        "__hart_device_storage_abi_v1");
+    if (!provenance || !provenance->hasInitializer())
+        return fail("embedded device-storage ABI provenance is missing");
+    bool has_provenance = false;
+    for (const auto& global : library->globals()) {
+        if (global.getName().find("__hart_device_storage_abi_") != 0)
+            continue;
+        if (global.getName().split('.').first != provenance->getName()
+            || !global.isConstant() || !global.hasInitializer()
+            || global.getAddressSpace() != provenance->getAddressSpace()
+            || global.getInitializer() != provenance->getInitializer())
+            return fail("incompatible device-storage ABI provenance");
+        has_provenance = true;
+    }
+    if (!has_provenance)
+        return fail("missing device-storage ABI provenance");
+    if (!library->getModuleInlineAsm().empty() || !library->alias_empty()
+        || !library->ifunc_empty()
+        || library->getNamedGlobal("llvm.global_ctors")
+        || library->getNamedGlobal("llvm.global_dtors"))
+        return fail(
+            "assembly, aliases and global initialization are unsupported");
+    for (const auto& function : *library) {
+        if (function.isDeclaration())
+            continue;
+        const auto cpu = function.getFnAttribute("target-cpu");
+        if (!cpu.isStringAttribute()
+            || cpu.getValueAsString()
+                   != llvm::StringRef(arch.data(), arch.size()))
+            return fail(fmtformat("function '{}' does not target {}",
+                                  function.getName().str(), arch));
+        if (function.getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL
+            || function.getName().find("__direct_callable__") == 0)
+            return fail(
+                "libraries must not define kernels or callable exports");
+        for (const auto& block : function)
+            for (const auto& instruction : block)
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(
+                        &instruction))
+                    if (!llvm::isa<llvm::Function>(
+                            call->getCalledOperand()->stripPointerCasts()))
+                        return fail(
+                            "indirect calls and inline assembly are unsupported");
+    }
+    for (const auto& symbol : library->global_values()) {
+        if (symbol.hasLocalLinkage() || symbol.getName() == "llvm.used"
+            || symbol.getName() == "llvm.compiler.used")
+            continue;
+        const auto* function = llvm::dyn_cast<llvm::Function>(&symbol);
+        if (function && function->isIntrinsic())
+            continue;
+        const auto* existing = shadeops.getNamedValue(symbol.getName());
+        if (!existing) {
+            if (symbol.isDeclaration() && !symbol.use_empty())
+                return fail(fmtformat("unresolved import '{}'",
+                                      symbol.getName().str()));
+            continue;
+        }
+        if (symbol.getValueType() != existing->getValueType()
+            || symbol.getType()->getPointerAddressSpace()
+                   != existing->getType()->getPointerAddressSpace())
+            return fail(fmtformat("incompatible type for '{}'",
+                                  symbol.getName().str()));
+        if (function) {
+            const auto* declaration = llvm::dyn_cast<llvm::Function>(existing);
+            if (!declaration
+                || function->getCallingConv() != declaration->getCallingConv())
+                return fail(
+                    fmtformat("incompatible calling convention for '{}'",
+                              symbol.getName().str()));
+            for (unsigned i = 0; i <= function->arg_size(); ++i)
+                for (auto kind :
+                     { llvm::Attribute::SExt, llvm::Attribute::ZExt,
+                       llvm::Attribute::InReg, llvm::Attribute::StructRet,
+                       llvm::Attribute::ByVal, llvm::Attribute::InAlloca,
+                       llvm::Attribute::Preallocated, llvm::Attribute::Nest,
+                       llvm::Attribute::SwiftSelf,
+                       llvm::Attribute::SwiftError })
+                    if (function->getAttributes().getAttributeAtIndex(i, kind)
+                        != declaration->getAttributes().getAttributeAtIndex(
+                            i, kind))
+                        return fail(
+                            fmtformat("incompatible ABI attributes for '{}'",
+                                      symbol.getName().str()));
+        }
+        if (!symbol.isDeclaration() && !existing->isDeclaration()
+            && !(symbol.isWeakForLinker() && existing->isWeakForLinker()))
+            return fail(fmtformat("duplicate definition of '{}'",
+                                  symbol.getName().str()));
+    }
+    if (!ll.absorb_module(std::move(library)))
+        return fail("cannot link device bitcode");
+    const auto digest = llvm::SHA256::hash(
+        { reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size() });
+    auto& llvm_context = ll.module()->getContext();
+    llvm::Metadata* identity[]
+        = { llvm::MDString::get(llvm_context, llvm::toHex(digest)) };
+    // Retain the whole library's identity even when unused code is pruned.
+    auto* metadata = ll.module()->getOrInsertNamedMetadata(
+        "osl.hart.renderer_library");
+    metadata->clearOperands();
+    metadata->addOperand(llvm::MDNode::get(llvm_context, identity));
+    return true;
+}
+#endif
+
+
+
 void
 BackendLLVM::run()
 {
-    if (group().does_nothing()) {
+    if (group().does_nothing() && !use_hart()) {
         group().llvm_compiled_init((RunLLVMGroupFunc)empty_group_func);
         group().llvm_compiled_version((RunLLVMGroupFunc)empty_group_func);
         return;
@@ -2092,6 +2342,7 @@ BackendLLVM::run()
     // of ShadingSystemImpl::optimize_group.
     OIIO::Timer timer;
     std::string err;
+    std::unique_ptr<llvm::Module> hart_module;
 
     {
 #ifdef OSL_LLVM_NO_BITCODE
@@ -2124,7 +2375,43 @@ BackendLLVM::run()
         }
 #    endif
 #else
-        if (!use_optix()) {
+        if (use_hart()) {
+#    if OSL_USE_HART
+            if (!group().m_userdata_names.empty()
+                && (!renderer()->supports("HARTUserdata")
+                    || !renderer()->supports("build_interpolated_getter"))) {
+                shadingcontext()->errorfmt(
+                    "HART does not yet support interpolated userdata");
+                return;
+            }
+            const auto bitcode
+                = hart_shadeops_bitcode(shadingsys().hart_arch(),
+                                        shadingsys().errhandler());
+            if (bitcode.empty())
+                return;
+            hart_module.reset(ll.module_from_bitcode(
+                reinterpret_cast<const char*>(bitcode.data()), bitcode.size(),
+                "hart_shader_group", &err));
+            if (!hart_module) {
+                shadingcontext()->errorfmt("Cannot read HART shadeops: {}",
+                                           err);
+                return;
+            }
+            if (auto error = hart_module->materializeAll()) {
+                shadingcontext()->errorfmt(
+                    "Cannot materialize HART shadeops: {}",
+                    llvm::toString(std::move(error)));
+                return;
+            }
+            ll.module(hart_module.get());
+            if (!link_hart_renderer_library(ll, shadingsys().m_lib_bitcode,
+                                            shadingsys().hart_arch(),
+                                            *shadingcontext())) {
+                ll.module(nullptr);
+                return;
+            }
+#    endif
+        } else if (!use_optix()) {
             if (use_rs_bitcode()) {
                 ll.module(ll.module_from_bitcode(
                     (char*)osl_llvm_compiled_rs_dependent_ops_block,
@@ -2277,7 +2564,9 @@ BackendLLVM::run()
         // Create the ExecutionEngine. We don't create an ExecutionEngine in the
         // OptiX case, because we are using the NVPTX backend and not MCJIT. However,
         // it's still useful to set the target ISA to facilitate PTX-specific codegen.
-        if (use_optix()) {
+        if (use_hart()) {
+            // HART owns final AMDGPU code generation; no host ExecutionEngine.
+        } else if (use_optix()) {
             ll.set_target_isa(TargetISA::NVPTX);
         } else if (!ll.make_jit_execengine(
                        &err,
@@ -2320,6 +2609,25 @@ BackendLLVM::run()
 
     initialize_llvm_group();
 
+#if OSL_USE_HART
+    if (use_hart()) {
+        std::vector<unsigned int> offsets;
+        build_offsets_of_ShaderGlobals(offsets);
+        auto* sg_type      = llvm::cast<llvm::StructType>(llvm_type_sg());
+        const auto* layout = ll.module()->getDataLayout().getStructLayout(
+            sg_type);
+        bool matches = layout->getSizeInBytes() == sizeof(ShaderGlobals)
+                       && sg_type->getNumElements() == offsets.size();
+        for (size_t i = 0; matches && i < offsets.size(); ++i)
+            matches = layout->getElementOffset(i) == offsets[i];
+        if (!matches) {
+            shadingcontext()->errorfmt("HART ShaderGlobals layout mismatch");
+            ll.module(nullptr);
+            return;
+        }
+    }
+#endif
+
     if (m_layout_only) {
         // BackendCpp (debug_output_cpp==3) path: force the groupdata layout
         // so sym.dataoffset() and group().llvm_groupdata_size() are
@@ -2345,9 +2653,52 @@ BackendLLVM::run()
         }
     }
 
-    std::vector<llvm::Function*> optix_externals;
-    if (use_optix())
-        optix_externals = build_llvm_optix_callables();
+    std::vector<llvm::Function*> gpu_externals;
+    if (use_optix() || use_hart())
+        gpu_externals = build_llvm_gpu_callables();
+
+#if OSL_USE_HART
+    if (use_hart()) {
+        // Recursive block generation may not propagate an opcode's failure.
+        // Never publish a partial group after a resource binding error.
+        if (m_llvm_codegen_failed) {
+            ll.module(nullptr);
+            return;
+        }
+        const llvm::Function* seed = ll.module()->getFunction("osl_sin_ff");
+        if (!seed || !seed->getFnAttribute("target-cpu").isStringAttribute()
+            || seed->getFnAttribute("target-cpu").getValueAsString()
+                   != shadingsys().hart_arch()) {
+            shadingcontext()->errorfmt("HART shadeops are missing the selected "
+                                       "architecture's function attributes");
+            ll.module(nullptr);
+            return;
+        }
+        auto prepare_function = [&](llvm::Function* function) {
+            if (!function)
+                return;
+            function->setLinkage(
+                std::find(gpu_externals.begin(), gpu_externals.end(), function)
+                        != gpu_externals.end()
+                    ? llvm::GlobalValue::ExternalLinkage
+                    : llvm::GlobalValue::InternalLinkage);
+            for (const auto* name :
+                 { "target-cpu", "target-features", "denormal-fp-math",
+                   "denormal-fp-math-f32" }) {
+                const auto attr = seed->getFnAttribute(name);
+                if (attr.isStringAttribute())
+                    function->addFnAttr(attr);
+            }
+            function->removeFnAttr("prefer-vector-width");
+            function->removeFnAttr("min-legal-vector-width");
+        };
+        prepare_function(init_func);
+        for (auto* function : funcs)
+            prepare_function(function);
+        for (auto* function : gpu_externals)
+            prepare_function(function);
+    }
+#endif
 
     // llvm::Function* entry_func = group().num_entry_layers() ? NULL : funcs[m_num_used_layers-1];
     m_stat_llvm_irgen_time += timer.lap();
@@ -2378,8 +2729,8 @@ BackendLLVM::run()
         // seems to yield about another 5-10% opt+JIT speed gain versus
         // merely internalizing.
         std::unordered_set<llvm::Function*> external_functions;
-        if (use_optix()) {
-            for (llvm::Function* func : optix_externals)
+        if (use_optix() || use_hart()) {
+            for (llvm::Function* func : gpu_externals)
                 external_functions.insert(func);
         } else {
             external_functions.insert(init_func);
@@ -2389,7 +2740,9 @@ BackendLLVM::run()
                 // If we plan to call bitcode_string of a layer's function after
                 // optimization it may not exist after optimization unless we
                 // treat it as external.
-                if (f && (group().is_entry_layer(layer) || llvm_debug())) {
+                if (f
+                    && (group().is_entry_layer(layer)
+                        || (llvm_debug() && !use_hart()))) {
                     external_functions.insert(f);
                 }
             }
@@ -2510,7 +2863,7 @@ BackendLLVM::run()
         }
     } else
 #endif
-    {
+        if (!use_hart()) {
         // Force the JIT to happen now and retrieve the JITed function pointers
         // for the initialization and all public entry points.
         group().llvm_compiled_init(
@@ -2527,6 +2880,57 @@ BackendLLVM::run()
             group().llvm_compiled_version(
                 group().llvm_compiled_layer(nlayers - 1));
     }
+
+#if OSL_USE_HART
+    if (use_hart()) {
+        // Each group clones the shadeops, including HIP's host-object IDs
+        // and promoted statics. Only callable functions are exported from
+        // these modules. Retain the data and all used/provenance roots.
+        for (auto& global : ll.module()->globals()) {
+            if (global.hasExternalLinkage() && !global.isDeclaration()) {
+                global.setLinkage(llvm::GlobalValue::InternalLinkage);
+                global.setVisibility(llvm::GlobalValue::DefaultVisibility);
+            }
+        }
+        std::string diagnostics;
+        llvm::raw_string_ostream errors(diagnostics);
+        if (llvm::verifyModule(*ll.module(), &errors)) {
+            errors.flush();
+            shadingcontext()->errorfmt("Invalid generated HART bitcode: {}",
+                                       diagnostics);
+            ll.module(nullptr);
+            return;
+        }
+        for (const auto& name :
+             { init_function_name(shadingsys(), group(), true),
+               layer_function_name(group(), *group()[nlayers - 1], true),
+               fused_function_name(group()) }) {
+            const auto* function = ll.module()->getFunction(name);
+            bool valid           = function && !function->isDeclaration()
+                                   && function->hasExternalLinkage()
+                                   && !function->isVarArg()
+                                   && function->getReturnType()->isVoidTy()
+                                   && function->arg_size() == 6;
+            if (valid)
+                for (const auto& arg : function->args())
+                    valid &= arg.getArgNo() == 4
+                                 ? arg.getType()->isIntegerTy(32)
+                                 : (arg.getType()->isPointerTy()
+                                    && arg.getType()->getPointerAddressSpace()
+                                           == 0);
+            if (!valid) {
+                shadingcontext()->errorfmt("HART callable '{}' was lost or "
+                                           "changed during optimization",
+                                           name);
+                ll.module(nullptr);
+                return;
+            }
+        }
+        llvm::raw_string_ostream output(group().m_hart_bitcode);
+        llvm::WriteBitcodeToFile(*ll.module(), output);
+        output.flush();
+    }
+#endif
 
     if (shadingsys().use_optix_cache()) {
         std::string cache_key = group().optix_cache_key();

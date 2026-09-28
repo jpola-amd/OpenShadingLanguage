@@ -8,6 +8,7 @@
 
 #include "oslexec_pvt.h"
 #include <OSL/genclosure.h>
+#include <OSL/hart_diagnostics.h>
 #include "backendllvm.h"
 
 using namespace OSL;
@@ -605,6 +606,15 @@ LLVMGEN(llvm_gen_print_fmt)
             TypeDesc simpletype(sym.typespec().simpletype());
             int num_elements   = simpletype.numelements();
             int num_components = simpletype.aggregate;
+            if (rop.use_hart()
+                && (num_elements < 0
+                    || size_t(num_elements) * num_components
+                           > HartDiagnosticMaxArgs - encodedtypes.size())) {
+                rop.shadingcontext()->errorfmt(
+                    "HART: diagnostic exceeds 256 scalar arguments ({}:{})",
+                    op.sourcefile(), op.sourceline());
+                return false;
+            }
             if ((sym.typespec().is_closure_based()
                  || simpletype.basetype == TypeDesc::STRING)
                 && formatchar != 's') {
@@ -637,7 +647,8 @@ LLVMGEN(llvm_gen_print_fmt)
             EncodedType et = EncodedType::kUstringHash;
             if (simpletype.basetype == TypeDesc::INT) {
                 //to mimic printf behavior when a hex specifier is used we are promoting the int to uint32_t
-                if (formatchar == 'x' || formatchar == 'X') {
+                if (formatchar == 'x' || formatchar == 'X'
+                    || (rop.use_hart() && formatchar == 'o')) {
                     et = EncodedType::kUInt32;
                 } else {
                     et = EncodedType::kInt32;
@@ -712,12 +723,20 @@ LLVMGEN(llvm_gen_print_fmt)
             }
         }
     }
-    if (!rop.use_optix_cache()) {
+    if (!rop.use_optix_cache() && !rop.use_hart()) {
         // Some ops prepend things
         if (op.opname() == op_error || op.opname() == op_warning) {
             s = fmtformat("Shader {} [{}]: {}", op.opname(),
                           rop.inst()->shadername(), s);
         }
+    }
+    if (rop.use_hart()
+        && (s.size() > HartDiagnosticMaxFormat
+            || arg_values_size > int(HartDiagnosticMaxValues))) {
+        rop.shadingcontext()->errorfmt(
+            "HART: expanded diagnostic format or payload exceeds its limit ({}:{})",
+            op.sourcefile(), op.sourceline());
+        return false;
     }
     ustring s_ustring(s.c_str());
     call_args.push_back(rop.llvm_const_hash(s_ustring));
@@ -765,11 +784,12 @@ LLVMGEN(llvm_gen_print_fmt)
             break;
         }
 
-        rop.ll.op_store(loadedArgValue,
-                        rop.ll.ptr_cast(rop.ll.GEP(rop.ll.type_int8(),
-                                                   loaded_arg_values_on_stack,
-                                                   bytesToArg),
-                                        type_ptr));
+        rop.ll.op_unmasked_store(
+            loadedArgValue,
+            rop.ll.ptr_cast(rop.ll.GEP(rop.ll.type_int8(),
+                                       loaded_arg_values_on_stack, bytesToArg),
+                            type_ptr),
+            1);
         bytesToArg += pvt::size_of_encoded_type(et);
     }
 
@@ -792,6 +812,20 @@ LLVMGEN(llvm_gen_print_fmt)
     // NOTE: format creates a new ustring, so only works on host
     if (op.opname() == op_format)
         rs_func_name = "osl_formatfmt";
+
+    if (rop.use_hart()) {
+        rs_func_name        = "osl_hart_diagnostic";
+        const auto severity = op.opname() == op_error
+                                  ? HartDiagnosticSeverity::Error
+                              : op.opname() == op_warning
+                                  ? HartDiagnosticSeverity::Warning
+                                  : HartDiagnosticSeverity::Print;
+        call_args.push_back(rop.ll.constant(int(severity)));
+        call_args.push_back(rop.llvm_const_hash(rop.inst()->shadername()));
+        call_args.push_back(rop.llvm_const_hash(op.sourcefile()));
+        call_args.push_back(rop.ll.constant(op.sourceline()));
+        call_args.push_back(rop.shadeindex());
+    }
 
     llvm::Value* ret = rop.ll.call_function(rs_func_name, call_args);
 
@@ -1038,27 +1072,33 @@ LLVMGEN(llvm_gen_div)
     // The following should handle f/f, v/v, v/f, f/v, i/i
     // That's all that should be allowed by oslc.
     const char* safe_div = is_float ? "osl_safe_div_fff" : "osl_safe_div_iii";
-    bool deriv = (Result.has_derivs() && (A.has_derivs() || B.has_derivs()));
+    bool deriv  = (Result.has_derivs() && (A.has_derivs() || B.has_derivs()));
+    auto divide = [&](llvm::Value* a, llvm::Value* b) {
+        if (B.is_constant() && !rop.is_zero(B))
+            return rop.ll.op_div(a, b);
+        if (rop.use_hart() && is_float) {
+            // HIP shadeops permit approximate/reciprocal division. Emit the
+            // same strict fdiv as the constant path, retaining safe_div's
+            // nonfinite-result policy for both values and reciprocals.
+            llvm::Value* q      = rop.ll.op_div(a, b);
+            llvm::Value* finite = rop.ll.call_function("osl_isfinite_if", q);
+            return rop.ll.op_select(rop.ll.op_ne(finite, rop.ll.constant(0)), q,
+                                    rop.ll.constant(0.0f));
+        }
+        return rop.ll.call_function(safe_div, a, b);
+    };
     for (int i = 0; i < num_components; i++) {
         llvm::Value* a = rop.llvm_load_value(A, 0, i, type);
         llvm::Value* b = rop.llvm_load_value(B, 0, i, type);
         if (!a || !b)
             return false;
-        llvm::Value* a_div_b;
-        if (B.is_constant() && !rop.is_zero(B))
-            a_div_b = rop.ll.op_div(a, b);
-        else
-            a_div_b = rop.ll.call_function(safe_div, a, b);
+        llvm::Value* a_div_b = divide(a, b);
         llvm::Value *rx = NULL, *ry = NULL;
 
         if (deriv) {
             // Division of duals: (a/b, 1/b*(ax-a/b*bx), 1/b*(ay-a/b*by))
             OSL_DASSERT(is_float);
-            llvm::Value* binv;
-            if (B.is_constant() && !rop.is_zero(B))
-                binv = rop.ll.op_div(rop.ll.constant(1.0f), b);
-            else
-                binv = rop.ll.call_function(safe_div, rop.ll.constant(1.0f), b);
+            llvm::Value* binv           = divide(rop.ll.constant(1.0f), b);
             llvm::Value* ax             = rop.llvm_load_value(A, 1, i, type);
             llvm::Value* bx             = rop.llvm_load_value(B, 1, i, type);
             llvm::Value* a_div_b_mul_bx = rop.ll.op_mul(a_div_b, bx);
@@ -1722,6 +1762,12 @@ LLVMGEN(llvm_gen_aref)
     Symbol& Src    = *rop.opargsym(op, 1);
     Symbol& Index  = *rop.opargsym(op, 2);
 
+    if (rop.use_hart() && Src.typespec().arraylength() <= 0) {
+        rop.shadingcontext()->errorfmt(
+            "HART: cannot index unresolved or empty array '{}'", Src.name());
+        return false;
+    }
+
     // Get array index we're interested in
     llvm::Value* index = rop.loadLLVMValue(Index);
     if (!index)
@@ -1766,6 +1812,12 @@ LLVMGEN(llvm_gen_aassign)
     Symbol& Result = *rop.opargsym(op, 0);
     Symbol& Index  = *rop.opargsym(op, 1);
     Symbol& Src    = *rop.opargsym(op, 2);
+
+    if (rop.use_hart() && Result.typespec().arraylength() <= 0) {
+        rop.shadingcontext()->errorfmt(
+            "HART: cannot index unresolved or empty array '{}'", Result.name());
+        return false;
+    }
 
     // Get array index we're interested in
     llvm::Value* index = rop.loadLLVMValue(Index);
@@ -1897,7 +1949,8 @@ LLVMGEN(llvm_gen_construct_triple)
         if (Space.is_constant()) {
             from = Space.get_string();
             if (from == Strings::common
-                || from == rop.shadingsys().commonspace_synonym())
+                || (!rop.use_hart()
+                    && from == rop.shadingsys().commonspace_synonym()))
                 return true;  // no transformation necessary
         }
         TypeDesc::VECSEMANTICS vectype = TypeDesc::POINT;
@@ -1918,8 +1971,9 @@ LLVMGEN(llvm_gen_construct_triple)
                                 to_arg,
                                 rop.ll.constant((int)vectype) };
         RendererServices* rend(rop.shadingsys().renderer());
-        if (rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0,
-                                   vectype)) {
+        if (!rop.use_hart()
+            && rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0,
+                                      vectype)) {
             // renderer potentially knows about a nonlinear transformation.
             // Note that for the case of non-constant strings, passing empty
             // from & to will make transform_points just tell us if ANY
@@ -2043,11 +2097,13 @@ LLVMGEN(llvm_gen_transform)
         // We can know all the space names at this time
         from        = From ? From->get_string() : Strings::common;
         to          = To->get_string();
-        ustring syn = rop.shadingsys().commonspace_synonym();
-        if (from == syn)
-            from = Strings::common;
-        if (to == syn)
-            to = Strings::common;
+        if (!rop.use_hart()) {
+            ustring syn = rop.shadingsys().commonspace_synonym();
+            if (from == syn)
+                from = Strings::common;
+            if (to == syn)
+                to = Strings::common;
+        }
         if (from == to) {
             // An identity transformation, just copy
             if (Result != P)  // don't bother in-place copy
@@ -2065,11 +2121,14 @@ LLVMGEN(llvm_gen_transform)
                             rop.ll.constant(P->has_derivs()),
                             rop.llvm_void_ptr(*Result),
                             rop.ll.constant(Result->has_derivs()),
-                            rop.llvm_load_value(*From),
+                            From ? rop.llvm_load_value(*From)
+                                 : rop.llvm_const_hash(Strings::common),
                             rop.llvm_load_value(*To),
                             rop.ll.constant((int)vectype) };
     RendererServices* rend(rop.shadingsys().renderer());
-    if (rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0, vectype)) {
+    if (!rop.use_hart()
+        && rend->transform_points(NULL, from, to, 0.0f, NULL, NULL, 0,
+                                  vectype)) {
         // renderer potentially knows about a nonlinear transformation.
         // Note that for the case of non-constant strings, passing empty
         // from & to will make transform_points just tell us if ANY
@@ -2562,6 +2621,16 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
     rop.ll.call_function("osl_init_texture_options", rop.sg_void_ptr(), opt);
     llvm::Value* missingcolor = NULL;
     TextureOpt optdefaults;  // So we can check the defaults
+    if (rop.use_hart() && !tex3d
+        && rop.renderer()->supports("HARTTextureDefaults")) {
+        // Match the reference GPU renderer, not OIIO's smart-bicubic defaults.
+        optdefaults.swrap = optdefaults.twrap = TextureOpt::WrapPeriodic;
+        optdefaults.interpmode                = TextureOpt::InterpBilinear;
+        rop.ll.call_function("osl_texture_set_stwrap_code", opt,
+                             rop.ll.constant(int(optdefaults.swrap)));
+        rop.ll.call_function("osl_texture_set_interp_code", opt,
+                             rop.ll.constant(int(optdefaults.interpmode)));
+    }
     bool swidth_set = false, twidth_set = false, rwidth_set = false;
     bool sblur_set = false, tblur_set = false, rblur_set = false;
     bool swrap_set = false, twrap_set = false, rwrap_set = false;
@@ -2817,12 +2886,31 @@ LLVMGEN(llvm_gen_texture)
                                    errormessage);
 
     RendererServices::TextureHandle* texture_handle = NULL;
-    if (Filename.is_constant() && rop.shadingsys().opt_texture_handle()) {
+    ustring filename;
+    if (rop.use_hart()) {
+        if ((!Filename.is_constant() && Filename.symtype() != SymTypeParam)
+            || !rop.inst()->hart_texture_filename(Filename, filename)) {
+            rop.shadingcontext()->errorfmt(
+                "HART: texture requires a literal filename or an immutable "
+                "nonempty input string parameter");
+            return false;
+        }
+        texture_handle
+            = rop.renderer()->get_texture_handle(filename, rop.shadingcontext(),
+                                                 nullptr);
+    } else if (Filename.is_constant()
+               && rop.shadingsys().opt_texture_handle()) {
         texture_handle
             = rop.renderer()->get_texture_handle(Filename.get_string(),
                                                  rop.shadingcontext(), nullptr);
         // FIXME(colorspace): that nullptr should be replaced by a TextureOpt*
         // that has the colorspace set.
+    }
+    if (rop.use_hart()
+        && (!texture_handle || !rop.renderer()->good(texture_handle))) {
+        rop.shadingcontext()->errorfmt("HART: cannot prepare texture '{}'",
+                                       filename);
+        return false;
     }
 
     // Now call the osl_texture function, passing the options and all the
@@ -3162,6 +3250,38 @@ LLVMGEN(llvm_gen_noise)
     }
     derivs &= Result.has_derivs();  // ignore derivs if result doesn't need
 
+    if (rop.use_hart() && Name && Name->is_constant()
+        && !hart_supports_noise(name, periodic)) {
+        rop.shadingcontext()->errorfmt(
+            "HART: unsupported noise type '{}' ({}:{})", name, op.sourcefile(),
+            op.sourceline());
+        return false;
+    }
+    if (rop.use_hart() && !name.empty() && name != Strings::gabor
+        && arg != op.nargs()) {
+        rop.shadingcontext()->errorfmt(
+            "HART: noise options require gabor ({}:{})", op.sourcefile(),
+            op.sourceline());
+        return false;
+    }
+
+    llvm::BasicBlock* after_block = nullptr;
+    if (rop.use_hart() && Name && !Name->is_constant()) {
+        llvm::Value* checks[] = { rop.llvm_load_value(*Name), rop.sg_void_ptr(),
+                                  rop.ll.constant(int(periodic)),
+                                  rop.ll.constant(int(arg != op.nargs())) };
+        llvm::Value* valid    = rop.ll.call_function("osl_hart_noise_validate",
+                                                     checks);
+        auto* valid_block     = rop.ll.new_basic_block("noise_valid");
+        auto* error_block     = rop.ll.new_basic_block("noise_error");
+        after_block           = rop.ll.new_basic_block("noise_done");
+        rop.ll.op_branch(rop.ll.op_eq(valid, rop.ll.constant(0)), error_block,
+                         valid_block);
+        rop.llvm_assign_zero(Result);
+        rop.ll.op_branch(after_block);
+        rop.ll.set_insert_point(valid_block);
+    }
+
     bool pass_name = false, pass_sg = false, pass_options = false;
     if (name.empty()) {
         // name is not a constant
@@ -3295,6 +3415,9 @@ LLVMGEN(llvm_gen_noise)
     if (rop.shadingsys().profile() >= 1)
         rop.ll.call_function("osl_count_noise", rop.sg_void_ptr());
 
+    if (after_block)
+        rop.ll.op_branch(after_block);
+
     return true;
 }
 
@@ -3343,6 +3466,23 @@ LLVMGEN(llvm_gen_getattribute)
     llvm::Value* obj_name_arg  = object_lookup ? rop.llvm_load_value(ObjectName)
                                                : rop.llvm_const_hash(ustring());
     llvm::Value* attr_name_arg = rop.llvm_load_value(Attribute);
+
+    if (rop.use_hart()) {
+        llvm::Value* args[] = {
+            rop.sg_void_ptr(),
+            rop.shadeindex(),
+            obj_name_arg,
+            attr_name_arg,
+            rop.ll.constant(dest_type),
+            rop.ll.constant_bool(Destination.has_derivs()),
+            array_lookup ? rop.llvm_load_value(Index) : rop.ll.constant(-1),
+            rop.llvm_void_ptr(Destination),
+        };
+        llvm::Value* result = rop.ll.call_function("osl_hart_get_attribute",
+                                                   args);
+        rop.llvm_store_value(rop.ll.op_bool_to_int(result), Result);
+        return true;
+    }
 
     ustring object_name      = (object_lookup && ObjectName.is_constant())
                                    ? ObjectName.get_string()
@@ -3691,6 +3831,31 @@ LLVMGEN(llvm_gen_spline)
                 && (!has_knot_count
                     || (has_knot_count && Knot_count.typespec().is_int())));
 
+    const int length = Knots.typespec().arraylength();
+    int step         = 1;
+    ustring basis;
+    if (rop.use_hart()) {
+        if (length < 4 || !rop.inst()->hart_texture_filename(Spline, basis)) {
+            rop.shadingcontext()->errorfmt(
+                "HART: spline requires a nonempty immutable basis and at "
+                "least four resolved spline knots in '{}'",
+                Knots.name());
+            return false;
+        }
+        step = basis == ustring("bezier")    ? 3
+               : basis == ustring("hermite") ? 2
+                                             : 1;
+        if (!has_knot_count || Knot_count.is_constant()) {
+            const int count = has_knot_count ? Knot_count.get_int() : length;
+            if (count < 4 || count > length || (count - 4) % step) {
+                rop.shadingcontext()->errorfmt(
+                    "HART: invalid spline knot count for array/basis in '{}'",
+                    Knots.name());
+                return false;
+            }
+        }
+    }
+
     std::string name = fmtformat("osl_{}_", op.opname());
     // only use derivatives for result if:
     //   result has derivs and (value || knots) have derivs
@@ -3721,24 +3886,45 @@ LLVMGEN(llvm_gen_spline)
 
     llvm::Value* args[] = {
         rop.llvm_void_ptr(Result),
-        rop.llvm_load_value(Spline),
+        rop.use_hart() ? rop.llvm_const_hash(basis)
+                       : rop.llvm_load_value(Spline),
         rop.llvm_void_ptr(Value),  // make things easy
         rop.llvm_void_ptr(Knots),
         has_knot_count ? rop.llvm_load_value(Knot_count)
                        : rop.ll.constant((int)Knots.typespec().arraylength()),
         rop.ll.constant((int)Knots.typespec().arraylength()),
     };
+    llvm::BasicBlock* after_block = nullptr;
+    if (rop.use_hart()) {
+        llvm::Value* checks[] = { args[4], args[5], rop.ll.constant(step),
+                                  rop.llvm_load_value(Value),
+                                  rop.sg_void_ptr() };
+        llvm::Value* valid    = rop.ll.call_function("osl_hart_spline_validate",
+                                                     checks);
+        auto* valid_block     = rop.ll.new_basic_block("spline_valid");
+        auto* error_block     = rop.ll.new_basic_block("spline_error");
+        after_block           = rop.ll.new_basic_block("spline_done");
+        rop.ll.op_branch(rop.ll.op_eq(valid, rop.ll.constant(0)), error_block,
+                         valid_block);
+        // Only the error branch may skip evaluation; the device error was
+        // recorded by the guard and prevents the renderer publishing output.
+        rop.llvm_assign_zero(Result);
+        rop.ll.op_branch(after_block);
+        rop.ll.set_insert_point(valid_block);
+    }
     rop.ll.call_function(name.c_str(), args);
 
     if (Result.has_derivs() && !result_derivs)
         rop.llvm_zero_derivs(Result);
+    if (after_block)
+        rop.ll.op_branch(after_block);
 
     return true;
 }
 
 
 
-static void
+static bool
 llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
                       const ClosureRegistry::ClosureEntry* clentry,
                       ustring clname, llvm::Value* mem_void_ptr, int argsoffset)
@@ -3751,6 +3937,13 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
         int argno     = attr_i * 2 + argsoffset;
         Symbol& Key   = *rop.opargsym(op, argno);
         Symbol& Value = *rop.opargsym(op, argno + 1);
+        if (rop.use_hart()
+            && (!Key.typespec().is_string() || !Key.is_constant())) {
+            rop.shadingcontext()->errorfmt(
+                "HART: closure keyword names must be literal strings ({}:{})",
+                op.sourcefile(), op.sourceline());
+            return false;
+        }
         OSL_DASSERT(Key.typespec().is_string());
         OSL_ASSERT(Key.is_constant());
         ustring key        = Key.get_string();
@@ -3762,7 +3955,12 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
             const ClosureParam& p = clentry->params[clentry->nformal + t];
             // strcmp might be too much, we could precompute the ustring for the param,
             // but in this part of the code is not a big deal
-            if (equivalent(p.type, ValueType) && !strcmp(key.c_str(), p.key)) {
+            if (equivalent(p.type, ValueType) && !strcmp(key.c_str(), p.key)
+                && (!rop.use_hart()
+                    || (p.type == TypeDesc::PTR
+                            ? Value.typespec().is_closure()
+                                  && !Value.typespec().is_array()
+                            : !Value.typespec().is_closure_based()))) {
                 // store data
                 OSL_DASSERT(p.offset + p.field_size <= clentry->struct_size);
                 llvm::Value* dst = rop.ll.offset_ptr(mem_void_ptr, p.offset);
@@ -3774,11 +3972,18 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
             }
         }
         if (!legal) {
+            if (rop.use_hart()) {
+                rop.shadingcontext()->errorfmt(
+                    "HART: unsupported closure keyword '{}' for '{}' ({}:{})",
+                    key, clname, op.sourcefile(), op.sourceline());
+                return false;
+            }
             rop.shadingcontext()->warningfmt(
                 "Unsupported closure keyword arg \"{}\" for {} ({}:{})", key,
                 clname, op.sourcefile(), op.sourceline());
         }
     }
+    return true;
 }
 
 
@@ -3794,6 +3999,14 @@ LLVMGEN(llvm_gen_closure)
     Symbol& Id     = *rop.opargsym(op, 1 + weighted);
     OSL_DASSERT(Result.typespec().is_closure());
     OSL_DASSERT(Id.typespec().is_string());
+    if (rop.use_hart()
+        && (!rop.shadingsys().renderer()->supports("HARTClosures")
+            || !Id.is_constant())) {
+        rop.shadingcontext()->errorfmt(
+            "HART: closure requires HARTClosures and a literal name ({}:{})",
+            op.sourcefile(), op.sourceline());
+        return false;
+    }
     ustring closure_name = Id.get_string();
 
     const ClosureRegistry::ClosureEntry* clentry
@@ -3807,15 +4020,30 @@ LLVMGEN(llvm_gen_closure)
         return false;
     }
 
+    // Do not let an already optimized group bypass the host-callback guard.
+    // Neither callbacks nor the host renderer may enter the device module.
+    if (rop.use_hart()
+        && (clentry->prepare || clentry->setup || clentry->nformal < 0
+            || clentry->nformal > op.nargs() - 2 - weighted
+            || (op.nargs() - 2 - weighted - clentry->nformal) % 2
+            || (!rop.shadingsys().renderer()->supports("HARTClosureParameters")
+                && ((closure_name != ustring("diffuse")
+                     && closure_name != ustring("emission"))
+                    || op.nargs() != 2 + weighted + clentry->nformal)))) {
+        rop.shadingcontext()->errorfmt(
+            "HART: unsupported closure '{}', keyword arguments, or "
+            "prepare/setup callbacks ({}:{})",
+            closure_name, op.sourcefile(), op.sourceline());
+        return false;
+    }
+
     OSL_DASSERT(op.nargs() >= (2 + weighted + clentry->nformal));
 
     // Call osl_allocate_closure_component(closure, id, size).  It returns
     // the memory for the closure parameter data.
-    llvm::Value* render_ptr = rop.ll.constant_ptr(rop.shadingsys().renderer(),
-                                                  rop.ll.type_void_ptr());
-    llvm::Value* sg_ptr     = rop.sg_void_ptr();
-    llvm::Value* id_int     = rop.ll.constant(clentry->id);
-    llvm::Value* size_int   = rop.ll.constant(clentry->struct_size);
+    llvm::Value* sg_ptr   = rop.sg_void_ptr();
+    llvm::Value* id_int   = rop.ll.constant(clentry->id);
+    llvm::Value* size_int = rop.ll.constant(clentry->struct_size);
     llvm::Value* return_ptr
         = weighted
               ? rop.ll.call_function("osl_allocate_weighted_closure_component",
@@ -3847,6 +4075,9 @@ LLVMGEN(llvm_gen_closure)
     // zero out the closure parameter memory.
     if (clentry->prepare) {
         // Call clentry->prepare(renderservices *, int id, void *mem)
+        llvm::Value* render_ptr
+            = rop.ll.constant_ptr(rop.shadingsys().renderer(),
+                                  rop.ll.type_void_ptr());
         llvm::Value* funct_ptr
             = rop.ll.constant_ptr((void*)clentry->prepare,
                                   rop.llvm_type_prepare_closure_func());
@@ -3866,7 +4097,11 @@ LLVMGEN(llvm_gen_closure)
         TypeDesc t  = sym.typespec().simpletype();
 
         if (!sym.typespec().is_closure_array() && !sym.typespec().is_structure()
-            && equivalent(t, p.type)) {
+            && equivalent(t, p.type)
+            && (!rop.use_hart()
+                || (p.type == TypeDesc::PTR
+                        ? sym.typespec().is_closure()
+                        : !sym.typespec().is_closure_based()))) {
             llvm::Value* dst = rop.ll.offset_ptr(mem_void_ptr, p.offset);
             llvm::Value* src = rop.llvm_void_ptr(sym);
             rop.ll.op_memcpy(dst, src, (int)p.type.size(),
@@ -3876,6 +4111,8 @@ LLVMGEN(llvm_gen_closure)
                 "Incompatible formal argument {} to '{}' closure ({} {}, expected {}). Prototypes don't match renderer registry ({}:{}).",
                 carg + 1, closure_name, sym.typespec(), sym.unmangled(), p.type,
                 op.sourcefile(), op.sourceline());
+            if (rop.use_hart())
+                return false;
         }
     }
 
@@ -3883,6 +4120,9 @@ LLVMGEN(llvm_gen_closure)
     // setup(render_services, id, mem_ptr).
     if (clentry->setup) {
         // Call clentry->setup(renderservices *, int id, void *mem)
+        llvm::Value* render_ptr
+            = rop.ll.constant_ptr(rop.shadingsys().renderer(),
+                                  rop.ll.type_void_ptr());
         llvm::Value* funct_ptr
             = rop.ll.constant_ptr((void*)clentry->setup,
                                   rop.llvm_type_setup_closure_func());
@@ -3890,8 +4130,9 @@ LLVMGEN(llvm_gen_closure)
         rop.ll.call_function(funct_ptr, args);
     }
 
-    llvm_gen_keyword_fill(rop, op, clentry, closure_name, mem_void_ptr,
-                          2 + weighted + clentry->nformal);
+    if (!llvm_gen_keyword_fill(rop, op, clentry, closure_name, mem_void_ptr,
+                               2 + weighted + clentry->nformal))
+        return false;
 
     if (next_block)
         rop.ll.op_branch(next_block);
@@ -4250,6 +4491,18 @@ LLVMGEN(llvm_gen_raytype)
         ustring name = Name.get_string();
         args[1]      = rop.ll.constant(rop.shadingsys().raytype_bit(name));
         func         = "osl_raytype_bit";
+    } else if (rop.use_hart()) {
+        const auto names = rop.shadingsys().raytypes();
+        auto* name       = rop.llvm_load_value(Name);
+        llvm::Value* bit = rop.ll.constant(0);
+        // As with raytype_bit, the first occurrence of a name wins.
+        for (size_t i = names.size(); i > 0; --i)
+            bit = rop.ll.op_select(rop.ll.op_eq(name, rop.llvm_const_hash(
+                                                          names[i - 1])),
+                                   rop.ll.constant(uint32_t(1) << (i - 1)),
+                                   bit);
+        args[1] = bit;
+        func    = "osl_raytype_bit";
     } else {
         // No way to know which name is being asked for
         args[1] = rop.llvm_load_value(Name);

@@ -1,0 +1,1 @@
+HART shader 'test' (<buffer>:11, point 0): Hello, world!

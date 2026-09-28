@@ -1,0 +1,14 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:25, point 0): test arrays of struct
+
+HART shader 'test' (test.osl:33, point 0): float f; f = a[2].f;  ==> 15
+HART shader 'test' (test.osl:36, point 0): float g = a[2].f;  ==> 15
+HART shader 'test' (test.osl:38, point 0): test struct containing array of struct:
+HART shader 'test' (test.osl:41, point 0): b.a[1].f == 3.14159
+HART shader 'test' (test.osl:43, point 0): test struct assignment to and from one array element:
+HART shader 'test' (test.osl:45, point 0): after c=a[2], c = { 15, 1 1 1 }
+HART shader 'test' (test.osl:47, point 0): after a[3]=c, a[3] = { 15, 1 1 1 }
+HART shader 'test' (test.osl:49, point 0): test array-of-struct assignmment:
+HART shader 'test' (test.osl:54, point 0): a2 = a; float f2; f = a2[2].f;  ==> 15 (should be 15)
+HART shader 'test' (test.osl:56, point 0): test array-of-struct array element assignmment:
+HART shader 'test' (test.osl:63, point 0): a3[0] = a3[1]; ===> 1 (should be 1) and [1 1 1] (should be [1 1 1])

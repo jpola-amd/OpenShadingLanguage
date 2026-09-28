@@ -1,0 +1,9 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_printf(output color Cout = 0)
+{
+    printf("unsupported HART shader printing %g\n", u);
+    Cout = color(u, v, u + v);
+}

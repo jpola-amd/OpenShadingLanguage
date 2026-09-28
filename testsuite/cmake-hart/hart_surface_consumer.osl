@@ -1,0 +1,24 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_surface_consumer(vector value = 0, int operation = -1,
+                            output color Cout = 0)
+{
+    int selected = operation;
+    if (selected < 0)
+        selected = (u > 0.5) + 2 * (v > 0.5);
+    float result = 0;
+    if (selected == 0) {
+        vector n = normalize(value);
+        result = n[0] + 2 * n[1] + 3 * n[2];
+    } else if (selected == 1)
+        result = length(value);
+    else if (selected == 2)
+        result = dot(value, value);
+    else if (selected == 3)
+        result = dot(value, N);
+    else
+        result = dot(Ng, value);
+    Cout = color(result, Dx(result), Dy(result));
+}

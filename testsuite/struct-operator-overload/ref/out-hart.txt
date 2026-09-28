@@ -1,0 +1,2 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:38, point 0): c2_out = 0.3 0.3

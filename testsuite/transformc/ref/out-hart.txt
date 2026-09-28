@@ -1,0 +1,36 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 1.000 0.000 = hsv 0.250 1.000 1.000
+HART shader 'test' (test.osl:12, point 0): hsv 0.250 1.000 1.000 = rgb 0.500 1.000 0.000
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 0.500 0.500 = hsv 0.000 0.000 0.500
+HART shader 'test' (test.osl:12, point 0): hsv 0.000 0.000 0.500 = rgb 0.500 0.500 0.500
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 1.000 0.000 = hsl 0.250 1.000 0.500
+HART shader 'test' (test.osl:12, point 0): hsl 0.250 1.000 0.500 = rgb 0.500 1.000 0.000
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 0.500 0.500 = hsl 0.000 0.000 0.500
+HART shader 'test' (test.osl:12, point 0): hsl 0.000 0.000 0.500 = rgb 0.500 0.500 0.500
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 1.000 0.000 = YIQ 0.737 0.023 -0.417
+HART shader 'test' (test.osl:12, point 0): YIQ 0.737 0.023 -0.417 = rgb 0.500 1.000 -0.000
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 0.500 0.500 = YIQ 0.500 0.000 0.000
+HART shader 'test' (test.osl:12, point 0): YIQ 0.500 0.000 0.000 = rgb 0.500 0.500 0.500
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 1.000 0.000 = XYZ 0.564 0.822 0.129
+HART shader 'test' (test.osl:12, point 0): XYZ 0.564 0.822 0.129 = rgb 0.500 1.000 0.000
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 0.500 0.500 = XYZ 0.475 0.500 0.544
+HART shader 'test' (test.osl:12, point 0): XYZ 0.475 0.500 0.544 = rgb 0.500 0.500 0.500
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 1.000 0.000 = xyY 0.372 0.543 0.822
+HART shader 'test' (test.osl:12, point 0): xyY 0.372 0.543 0.822 = rgb 0.500 1.000 0.000
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:10, point 0): rgb 0.500 0.500 0.500 = xyY 0.313 0.329 0.500
+HART shader 'test' (test.osl:12, point 0): xyY 0.313 0.329 0.500 = rgb 0.500 0.500 0.500
+HART shader 'test' (test.osl:13, point 0):     residual = 0.000 0.000 0.000
+HART shader 'test' (test.osl:33, point 0): transformc ("linear","sRGB",(0.500 1.000 0.000)) = 0.735 1.000 0.000
+HART shader 'test' (test.osl:35, point 0): transformc ("sRGB","linear",(0.500 1.000 0.000)) = 0.214 1.000 0.000
+HART shader 'test' (test.osl:39, point 0): transformc ("rgb","YIQ",(0.500 0.500 0.500 / 1.000 0.000 0.000 / 0.000 1.000 0.000)) = 0.500 0.000 0.000 / 0.299 0.596 0.212 / 0.587 -0.275 -0.523
+HART shader 'test' (test.osl:42, point 0): transformc ("rgb","sRGB",(0.500 0.500 0.500 / 1.000 0.000 0.000 / 0.000 1.000 0.000)) = 0.735 0.735 0.735 / 0.659 0.000 0.000 / 0.000 0.659 0.000
+HART shader 'test' (test.osl:44, point 0): 

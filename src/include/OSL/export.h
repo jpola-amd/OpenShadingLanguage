@@ -43,7 +43,7 @@
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 #    if defined(OSL_STATIC_BUILD) || defined(OSL_STATIC_DEFINE) \
-        || defined(__CUDACC__)
+        || defined(__CUDACC__) || defined(__HIP__)
 #        define OSL_DLL_IMPORT
 #        define OSL_DLL_EXPORT
 #        define OSL_DLL_LOCAL

@@ -1,0 +1,24 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:91, point 0): test && and || on integers:
+HART shader 'test' (test.osl:7, point 0): 0 && 0 is 0
+HART shader 'test' (test.osl:7, point 0): 0 && 2 is 0
+HART shader 'test' (test.osl:7, point 0): 2 && 0 is 0
+HART shader 'test' (test.osl:7, point 0): 2 && 2 is 1
+HART shader 'test' (test.osl:12, point 0): 0 || 0 is 0
+HART shader 'test' (test.osl:12, point 0): 0 || 2 is 1
+HART shader 'test' (test.osl:12, point 0): 2 || 0 is 1
+HART shader 'test' (test.osl:12, point 0): 2 || 2 is 1
+HART shader 'test' (test.osl:17, point 0): ! 0 is 1
+HART shader 'test' (test.osl:17, point 0): ! 2 is 0
+HART shader 'test' (test.osl:98, point 0): 
+test && and || on coerced floats:
+HART shader 'test' (test.osl:53, point 0): 0 && 0 is 0
+HART shader 'test' (test.osl:53, point 0): 0 && 2.3 is 0
+HART shader 'test' (test.osl:53, point 0): 2.3 && 0 is 0
+HART shader 'test' (test.osl:53, point 0): 2.3 && 2.3 is 1
+HART shader 'test' (test.osl:58, point 0): 0 || 0 is 0
+HART shader 'test' (test.osl:58, point 0): 0 || 2.3 is 1
+HART shader 'test' (test.osl:58, point 0): 2.3 || 0 is 1
+HART shader 'test' (test.osl:58, point 0): 2.3 || 2.3 is 1
+HART shader 'test' (test.osl:48, point 0): ! 0 is 1
+HART shader 'test' (test.osl:48, point 0): ! 2.3 is 0

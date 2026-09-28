@@ -13,6 +13,7 @@ BSDL_ENTER_NAMESPACE
 
 namespace mtx {
 
+BSDL_INLINE_METHOD
 SchlickFresnel::SchlickFresnel(Power F0, Power F90, float exponent, float _eta,
                                bool backfacing)
     : DielectricFresnel(_eta, backfacing)

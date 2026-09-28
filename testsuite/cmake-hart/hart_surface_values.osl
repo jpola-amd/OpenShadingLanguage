@@ -1,0 +1,12 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_surface_values(int planar = 0, output color Cout = 0)
+{
+    vector q = vector(P);
+    if (planar)
+        q[2] = 0;
+    vector n = normalize(q);
+    Cout = color(dot(q, N), length(q), n[0]);
+}

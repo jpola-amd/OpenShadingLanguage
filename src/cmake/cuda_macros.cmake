@@ -155,6 +155,8 @@ function ( MAKE_CUDA_BITCODE src suffix generated_bc extra_clang_args )
     list (TRANSFORM OpenImageIO_INCLUDES PREPEND -I
           OUTPUT_VARIABLE ALL_OpenImageIO_INCLUDES)
 
+    # These modules are linked together; keep translation-unit-local device
+    # globals distinct even when Clang externalizes them for host references.
     add_custom_command (OUTPUT ${bc_cuda}
         COMMAND ${LLVM_BC_GENERATOR}
             "-I${OPTIX_INCLUDES}"
@@ -170,6 +172,7 @@ function ( MAKE_CUDA_BITCODE src suffix generated_bc extra_clang_args )
             ${LLVM_COMPILE_FLAGS} ${CUDA_LIB_FLAGS} ${CLANG_MSVC_FIX} ${CUDA_TEXREF_FIX}
             -D__CUDACC__ -DOSL_COMPILING_TO_BITCODE=1 -DNDEBUG -DOIIO_NO_SSE -D__CUDADEVRT_INTERNAL__
             --language=cuda --cuda-device-only --cuda-gpu-arch=${CUDA_TARGET_ARCH}
+            -fgpu-rdc
             -Wno-deprecated-register -Wno-format-security
             -fno-math-errno -ffast-math ${CUDA_OPT_FLAG_CLANG} ${CLANG_FTZ_FLAG} -S -emit-llvm ${extra_clang_args}
             ${src} -o ${asm_cuda}

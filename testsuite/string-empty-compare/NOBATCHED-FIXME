@@ -1,0 +1,6 @@
+# Copyright Contributors to the Open Shading Language project.
+# SPDX-License-Identifier: BSD-3-Clause
+# https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+# Batched O0 still compares character pointers, not scalar JIT string hashes.
+# Null-backed and interned empty strings need separate batched qualification.

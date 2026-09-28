@@ -802,6 +802,13 @@ ShadingSystem::clear_symlocs()
 void
 ShadingSystem::clear_symlocs(ShaderGroup* group)
 {
+    uint64_t hart_size = 0;
+    if (group
+        && getattribute(group, "hart_bitcode_size", TypeUInt64, &hart_size)) {
+        m_impl->errorfmt(
+            "Cannot clear symbol locations of a compiled HART group");
+        return;
+    }
     if (group)
         group->clear_symlocs();
     else
@@ -821,6 +828,13 @@ ShadingSystem::add_symlocs(cspan<SymLocationDesc> symlocs)
 void
 ShadingSystem::add_symlocs(ShaderGroup* group, cspan<SymLocationDesc> symlocs)
 {
+    uint64_t hart_size = 0;
+    if (group
+        && getattribute(group, "hart_bitcode_size", TypeUInt64, &hart_size)) {
+        m_impl->errorfmt(
+            "Cannot change symbol locations of a compiled HART group");
+        return;
+    }
     if (group)
         group->add_symlocs(symlocs);
     else
@@ -1129,6 +1143,7 @@ ShadingSystemImpl::ShadingSystemImpl(RendererServices* renderer,
     , m_max_local_mem_KB(2048)
     , m_compile_report(0)
     , m_use_optix(renderer->supports("OptiX"))
+    , m_use_hart(renderer->supports("HART"))
     , m_use_optix_cache(m_use_optix && renderer->supports("optix_ptx_cache"))
     , m_max_optix_groupdata_alloc(0)
     , m_buffer_printf(true)
@@ -1620,6 +1635,26 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
     }
 
     lock_guard guard(m_mutex);  // Thread safety
+    if (name == "max_hart_groupdata_alloc") {
+        if (!use_hart() || type != TypeInt || *(const int*)val < 0) {
+            errorfmt("max_hart_groupdata_alloc requires a HART renderer and "
+                     "a nonnegative integer byte limit");
+            return false;
+        }
+        m_max_hart_groupdata_alloc = *(const int*)val;
+        return true;
+    }
+    if (name == "hart_arch" && type == TypeDesc::STRING) {
+        const std::string arch = *(const char* const*)val;
+        if (!use_hart() || arch.empty()
+            || (!m_hart_arch.empty() && arch != m_hart_arch)) {
+            errorfmt("hart_arch requires a HART renderer and a nonempty "
+                     "architecture that cannot change after selection");
+            return false;
+        }
+        m_hart_arch = arch;
+        return true;
+    }
     ATTR_SET("statistics:level", int, m_statslevel);
     ATTR_SET("stat:rank_groups", int, m_stat_rank_groups);
     ATTR_SET("debug", int, m_debug);
@@ -1738,8 +1773,11 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
         return true;
     }
     if (name == "raytypes" && type.basetype == TypeDesc::STRING) {
-        OSL_ASSERT(type.numelements() <= 32
-                   && "ShaderGlobals.raytype is an int, max of 32 raytypes");
+        if (type.arraylen < 0 || type.aggregate != TypeDesc::SCALAR
+            || type.numelements() > 32 || !val) {
+            errorfmt("raytypes requires at most 32 string names");
+            return false;
+        }
         m_raytypes.clear();
         for (size_t i = 0; i < type.numelements(); ++i)
             m_raytypes.emplace_back(((const char**)val)[i]);
@@ -1752,7 +1790,8 @@ ShadingSystemImpl::attribute(string_view name, TypeDesc type, const void* val)
         return true;
     }
     if (name == "lib_bitcode" && type.basetype == TypeDesc::UINT8) {
-        if (type.arraylen < 0) {
+        if (type.arraylen < 0 || type.aggregate != TypeDesc::SCALAR
+            || (type.arraylen && !val)) {
             errorfmt("Invalid bitcode size: {}", type.arraylen);
             return false;
         }
@@ -1908,6 +1947,8 @@ ShadingSystemImpl::getattribute(string_view name, TypeDesc type, void* val)
     ATTR_DECODE("llvm_jit_fma", int, m_llvm_jit_fma);
     ATTR_DECODE("llvm_jit_aggressive", int, m_llvm_jit_aggressive);
     ATTR_DECODE_STRING("llvm_jit_target", m_llvm_jit_target);
+    ATTR_DECODE_STRING("hart_arch", m_hart_arch);
+    ATTR_DECODE("max_hart_groupdata_alloc", int, m_max_hart_groupdata_alloc);
     ATTR_DECODE("vector_width", int, m_vector_width);
     ATTR_DECODE("opt_passes", int, m_opt_passes);
     ATTR_DECODE("optimize_nondebug", int, m_optimize_nondebug);
@@ -2140,9 +2181,43 @@ ShadingSystemImpl::attribute(ShaderGroup* group, string_view name,
         return attribute(name, type, val);
     lock_guard lock(group->m_mutex);
     if (name == "renderer_outputs" && type.basetype == TypeDesc::STRING) {
+        if (!group->m_hart_bitcode.empty()) {
+            errorfmt("Cannot change renderer outputs of a compiled HART group");
+            return false;
+        }
         group->m_renderer_outputs.clear();
         for (size_t i = 0; i < type.numelements(); ++i)
             group->m_renderer_outputs.emplace_back(((const char**)val)[i]);
+        return true;
+    }
+    if (use_hart() && type.basetype == TypeDesc::STRING
+        && (name == "entry_layers" || name == "hart_entry_layers")) {
+        if (!group->m_hart_bitcode.empty()
+            || (name == "entry_layers" && group->optimized())) {
+            errorfmt("Cannot change HART entry selection after {}",
+                     name == "entry_layers" ? "optimization" : "compilation");
+            return false;
+        }
+        std::vector<int> entries;
+        for (size_t i = 0; i < type.numelements(); ++i) {
+            const ustring layer_name(((const char**)val)[i]);
+            const int layer = group->find_layer(layer_name);
+            if (layer < 0
+                || (name == "hart_entry_layers"
+                    && !group->is_entry_layer(layer))) {
+                errorfmt("HART entry '{}' is not a {}layer", layer_name,
+                         name == "hart_entry_layers" ? "declared entry "
+                                                     : "shader ");
+                return false;
+            }
+            entries.push_back(layer);
+        }
+        if (name == "entry_layers") {
+            group->clear_entry_layers();
+            for (int layer : entries)
+                group->mark_entry_layer(layer);
+        }
+        group->m_hart_entry_layers = std::move(entries);
         return true;
     }
     if (name == "entry_layers" && type.basetype == TypeDesc::STRING) {
@@ -2179,6 +2254,10 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         *(int*)val = group->nlayers();
         return true;
     }
+    if (name == "is_optimized" && type == TypeInt) {
+        *(int*)val = group->optimized();
+        return true;
+    }
     if (name == "layer_names" && type.basetype == TypeDesc::STRING) {
         size_t n = std::min(type.numelements(), (size_t)group->nlayers());
         for (size_t i = 0; i < n; ++i)
@@ -2200,6 +2279,30 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
     }
     if (name == "raytype_queries" && type.basetype == TypeDesc::INT) {
         *(int*)val = group->raytype_queries();
+        return true;
+    }
+    if (name == "num_hart_entry_layers" && type == TypeInt) {
+        *(int*)val = use_hart() ? (group->m_hart_entry_layers.empty()
+                                       ? int(group->nlayers() > 0)
+                                       : int(group->m_hart_entry_layers.size()))
+                                : 0;
+        return use_hart();
+    }
+    if (name == "hart_entry_layers" && type.basetype == TypeDesc::STRING) {
+        if (!use_hart())
+            return false;
+        const size_t count = group->m_hart_entry_layers.empty()
+                                 ? size_t(group->nlayers() > 0)
+                                 : group->m_hart_entry_layers.size();
+        const size_t n     = std::min(type.numelements(), count);
+        for (size_t i = 0; i < n; ++i) {
+            const int layer    = group->m_hart_entry_layers.empty()
+                                     ? group->nlayers() - 1
+                                     : group->m_hart_entry_layers[i];
+            ((ustring*)val)[i] = group->layer(layer)->layername();
+        }
+        for (size_t i = n; i < type.numelements(); ++i)
+            ((ustring*)val)[i] = ustring();
         return true;
     }
     if (name == "num_entry_layers" && type.basetype == TypeDesc::INT) {
@@ -2268,11 +2371,34 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         *(std::string*)val = exists ? group->m_llvm_ptx_compiled_version : "";
         return true;
     }
+    if (name == "hart_bitcode" && type == TypeDesc::PTR) {
+        *(const void**)val = group->m_hart_bitcode.empty()
+                                 ? nullptr
+                                 : group->m_hart_bitcode.data();
+        return !group->m_hart_bitcode.empty();
+    }
+    if (name == "hart_bitcode_size" && type == TypeUInt64) {
+        *(uint64_t*)val = group->m_hart_bitcode.size();
+        return !group->m_hart_bitcode.empty();
+    }
+    if (name == "hart_groupdata_alloc" && type == TypeInt) {
+        *(int*)val = group->m_hart_groupdata_alloc;
+        return !group->m_hart_bitcode.empty();
+    }
+    if (name == "llvm_groupdata_alignment" && type == TypeInt) {
+        *(int*)val = group->m_llvm_groupdata_alignment;
+        return group->jitted();
+    }
     if (name == "interactive_params" && type.basetype == TypeDesc::PTR) {
         *(void**)val = group->m_interactive_arena.get();
         return true;
     }
     if (name == "device_interactive_params" && type.basetype == TypeDesc::PTR) {
+        if (use_hart() && !group->m_device_interactive_arena_valid) {
+            *(void**)val = nullptr;
+            errorfmt("HART: interactive parameter device storage is invalid");
+            return false;
+        }
         *(void**)val = group->m_device_interactive_arena.d_get();
         return true;
     }
@@ -3171,7 +3297,7 @@ ShadingSystemImpl::ConnectShaders(ShaderGroup& group, string_view srclayer,
         return false;
     }
 
-    if (srccon.type.is_structure() && dstcon.type.is_structure()
+    if (srccon.type.is_structure_based() && dstcon.type.is_structure_based()
         && equivalent(srccon.type, dstcon.type)) {
         // If the connection is whole struct-to-struct (and they are
         // structs with equivalent data layout), implement it underneath
@@ -3183,7 +3309,8 @@ ShadingSystemImpl::ConnectShaders(ShaderGroup& group, string_view srclayer,
                                       srcstruct->field(i).name);
             std::string d = fmtformat("{}.{}", dstparam,
                                       dststruct->field(i).name);
-            ConnectShaders(group, srclayer, s, dstlayer, d);
+            if (!ConnectShaders(group, srclayer, s, dstlayer, d))
+                return false;
         }
         return true;
     }
@@ -3551,20 +3678,32 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
             break;
         }
     }
-    if (!layer)
+    if (!layer) {
+        if (use_hart())
+            errorfmt("HART ReParameter: unknown layer '{}'", layername);
         return false;  // could not find the named layer
+    }
 
     // Find the named parameter within the layer
     int paramindex = layer->findparam(ustring(paramname),
                                       false /* don't go to master */);
     if (paramindex < 0) {
         paramindex = layer->findparam(ustring(paramname), true);
-        if (paramindex >= 0)
+        if (paramindex >= 0) {
             // This param exists, but it got optimized away, no failure
+            if (use_hart() && !group.m_device_interactive_arena_valid)
+                return group.upload_hart_interactive(
+                    0, { group.interactive_arena_ptr(),
+                         group.m_interactive_arena_size });
             return true;
+        }
     }
-    if (paramindex < 0)
+    if (paramindex < 0) {
+        if (use_hart())
+            errorfmt("HART ReParameter: unknown parameter '{}.{}'", layername,
+                     paramname);
         return false;  // could not find the named parameter
+    }
 
     Symbol* sym = layer->symbol(paramindex);
     if (!sym) {
@@ -3585,8 +3724,19 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
     // Check for mismatch versus previously-declared type
     if ((relaxed_param_typecheck() && !relaxed_equivalent(sym->typespec(), type))
         || (!relaxed_param_typecheck()
-            && !relaxed_equivalent(sym->typespec(), type)))
+            && !relaxed_equivalent(sym->typespec(), type))) {
+        if (use_hart())
+            errorfmt("HART ReParameter: type mismatch for '{}.{}'", layername,
+                     paramname);
         return false;
+    }
+    if (use_hart()
+        && (!val || type.arraylen < 0
+            || type.size() != sym->typespec().simpletype().size())) {
+        errorfmt("HART ReParameter: invalid data or size for '{}.{}'",
+                 layername, paramname);
+        return false;
+    }
 
     // Can't change param value if the group has already been optimized,
     // unless that parameter is marked lockgeom=0.
@@ -3598,20 +3748,39 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
 
     if (offset >= 0) {
         size_t size = type.size();
+        if (use_hart()
+            && (size_t(offset) > group.m_interactive_arena_size
+                || size > group.m_interactive_arena_size - size_t(offset))) {
+            errorfmt("HART ReParameter: invalid arena range for '{}.{}'",
+                     layername, paramname);
+            return false;
+        }
         m_stat_reparam_calls_total += 1;
         m_stat_reparam_bytes_total += size;
 
         // Copy ustringhashes instead of ustrings
         const void* payload;
-        ustringhash string_hash;
+        ustringhash scalar_hash;
+        std::vector<ustringhash> string_hashes;
         if (type == TypeDesc::STRING) {
-            string_hash = ustringhash_from(
-                *reinterpret_cast<const ustring*>(val));
-            payload = &string_hash;
+            scalar_hash = ustringhash_from(*static_cast<const ustring*>(val));
+            payload     = &scalar_hash;
+        } else if (type.basetype == TypeDesc::STRING) {
+            const auto* strings = static_cast<const ustring*>(val);
+            string_hashes.reserve(size / sizeof(ustring));
+            for (size_t i = 0; i < size / sizeof(ustring); ++i)
+                string_hashes.push_back(ustringhash_from(strings[i]));
+            payload = string_hashes.data();
         } else
             payload = val;
 
-        if (memcmp(group.interactive_arena_ptr() + offset, payload, size)) {
+        if ((use_hart() && !group.m_device_interactive_arena_valid)
+            || memcmp(group.interactive_arena_ptr() + offset, payload, size)) {
+            if (use_hart()
+                && !group.upload_hart_interactive(
+                    size_t(offset),
+                    { static_cast<const uint8_t*>(payload), size }))
+                return false;
             memcpy(group.interactive_arena_ptr() + offset, payload,
                    type.size());
             if (use_optix())
@@ -3630,9 +3799,7 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
 
 PerThreadInfo*
 ShadingSystemImpl::create_thread_info()
-{
-    return new PerThreadInfo;
-}
+{ return new PerThreadInfo; }
 
 
 
@@ -3823,8 +3990,8 @@ int
 ShadingSystemImpl::raytype_bit(ustring name)
 {
     for (size_t i = 0, e = m_raytypes.size(); i < e; ++i)
-        if (name == m_raytypes[i])
-            return (1 << i);
+        if (name == m_raytypes[i] || (name.empty() && m_raytypes[i].empty()))
+            return int(uint32_t(1) << i);
     return 0;  // not found
 }
 
@@ -3899,6 +4066,55 @@ ShadingSystemImpl::group_post_jit_cleanup(ShaderGroup& group)
 
 
 
+bool
+ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
+{
+#if !OSL_USE_HART || defined(OSL_LLVM_NO_BITCODE)
+    errorfmt("HART shader generation requires a build with HART bitcode");
+    return false;
+#else
+    if (use_optix() || hart_arch().empty()) {
+        errorfmt("HART requires an exclusive HART renderer and hart_arch "
+                 "selected before shader compilation");
+        return false;
+    }
+    if (group.nlayers() < 1) {
+        errorfmt("HART requires at least one shader layer");
+        return false;
+    }
+    for (int layer : group.m_hart_entry_layers)
+        if (layer < 0 || layer >= group.nlayers()
+            || !group.is_entry_layer(layer)) {
+            errorfmt("HART entry selection contains a non-entry layer");
+            return false;
+        }
+    if (group.num_entry_layers() && group.m_hart_entry_layers.empty()) {
+        errorfmt("HART explicit entries must be configured with entry_layers");
+        return false;
+    }
+    if (debug_nan() || debug_uninit() || llvm_debug_layers() || llvm_debug_ops()
+        || countlayerexecs() || m_profile || llvm_debugging_symbols()
+        || llvm_profiling_events() || debug_output_cpp()
+        || !m_rs_bitcode.empty() || !m_only_groupname.empty()) {
+        errorfmt("HART does not support CPU instrumentation, C++ execution, "
+                 "host renderer bitcode, or selective group compilation");
+        return false;
+    }
+    if (!group.m_device_interactive_arena_valid) {
+        errorfmt("HART: interactive parameter device storage is invalid");
+        return false;
+    }
+    if (!group.optimized()) {
+        for (int layer = 0; layer < group.nlayers(); ++layer)
+            if (!group[layer]->validate_hart())
+                return false;
+    }
+    return true;
+#endif
+}
+
+
+
 void
 ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                                   bool do_jit)
@@ -3925,6 +4141,9 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         m_stat_opt_locking_time += t;
         return;
     }
+
+    if (use_hart() && !validate_hart_group(group))
+        return;
 
     if (!m_only_groupname.empty() && m_only_groupname != group.name()) {
         // For debugging purposes, we are requested to compile only one
@@ -4044,6 +4263,14 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         }
     }
 
+    if (use_hart() && !group.m_device_interactive_arena_valid) {
+        if (ctx_allocated) {
+            release_context(ctx);
+            destroy_thread_info(thread_info);
+        }
+        return;
+    }
+
     if (need_jit) {
         bool cached = false;
         if (use_optix_cache()) {
@@ -4066,6 +4293,13 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
                 lljitter.set_layout_only(true);
             }
             lljitter.run();
+            if (use_hart() && group.m_hart_bitcode.empty()) {
+                if (ctx_allocated) {
+                    release_context(ctx);
+                    destroy_thread_info(thread_info);
+                }
+                return;
+            }
 
             // NOTE: it is now possible to optimize and not JIT
             // which would leave the cleanup to happen

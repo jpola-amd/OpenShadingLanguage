@@ -1,0 +1,48 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+shader hart_matrix_consumer(matrix value = matrix(1), int report = 0,
+                            int constant_input = 0, output color Cout = 0)
+{
+    // 65x9 packs seventeen matrix operations and point/vector/normal rows.
+    int column = int(64 * u);
+    int operation = column / 4;
+    int probe = column - 4 * operation;
+    int kind = int(8 * v) / 3;
+    float x = 16 * u - operation - 0.5;
+    float y = 2 * v - 1;
+    point q = point(x, y, 1 + 0.5 * x * y);
+    if (constant_input)
+        q = point(0.25, -0.5, 1);
+    if (report == 2) {
+        float sample = determinant(value);
+        if (kind == 1)
+            sample = value[3][0];
+        else if (kind == 2)
+            sample = value[1][1];
+        // Matrix-valued computations and component reads have no derivatives.
+        Cout = color(sample, Dx(sample), Dy(sample));
+    } else {
+        color result = 0;
+        if (operation == 16)
+            result = color(value[0][0], value[0][1], value[3][3]);
+        else if (kind == 0)
+            result = color(transform(value, q));
+        else if (kind == 1)
+            result = color(transform(value, vector(q)));
+        else
+            result = color(transform(value, normal(q)));
+        if (report == 0)
+            Cout = result;
+        else {
+            int component = probe - 3 * (probe / 3);
+            float sample = result[0];
+            if (component == 1)
+                sample = result[1];
+            else if (component == 2)
+                sample = result[2];
+            Cout = color(sample, Dx(sample), Dy(sample));
+        }
+    }
+}

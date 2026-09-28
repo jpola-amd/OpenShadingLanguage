@@ -1,0 +1,26 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:12, point 0):   parameter initialization test: cparam = 0.1 0.7 0.2
+HART shader 'test' (test.osl:13, point 0):   parameter initialization test2: cparam2 = 0.1 0.1 0.1
+HART shader 'test' (test.osl:14, point 0): 
+HART shader 'test' (test.osl:18, point 0):   color (0.1) = 0.1 0.1 0.1
+HART shader 'test' (test.osl:19, point 0):   color (0.1, 0.2, 0.5) = 0.1 0.2 0.5
+HART shader 'test' (test.osl:24, point 0):   C = color (0 1 2) has components 0, 1, 2
+HART shader 'test' (test.osl:27, point 0):   After C[1] = 8, V = (0 8 2)
+HART shader 'test' (test.osl:29, point 0):   After C[2] = 0.5, V = (0 8 0.5)
+HART shader 'test' (test.osl:30, point 0):   C = color (0 8 0.5) has rgb components 0, 8, 0.5
+HART shader 'test' (test.osl:33, point 0):   After C.r = 14.5, C = (14.5 8 0.5)
+HART shader 'test' (test.osl:35, point 0):   After C.g = 15.5, C = (14.5 15.5 0.5)
+HART shader 'test' (test.osl:37, point 0):   After C.b = 16.5, C = (14.5 15.5 16.5)
+HART shader 'test' (test.osl:42, point 0): 
+testing with spaces:
+HART shader 'test' (test.osl:43, point 0):   color ("rgb", 0.1, 0.2, 0.5) = 0.1 0.2 0.5
+HART shader 'test' (test.osl:45, point 0):   color ("hsv", 0.1, 0.2, 0.5) = 0.5 0.46 0.4
+HART shader 'test' (test.osl:49, point 0):   color ("hsv", 0, 0, 0.5) = 0.5 0.5 0.5
+HART shader 'test' (test.osl:52, point 0):   color ("hsv", 0.5, 1, 0.5) = 0 0.5 0.5
+HART shader 'test' (test.osl:56, point 0):   color ("hsl", 0, 0, 0.5) = 0.5 0.5 0.5
+HART shader 'test' (test.osl:59, point 0):   color ("hsl", 0.5, 1, 0.1) = 0 0.2 0.2
+HART shader 'test' (test.osl:63, point 0):   color ("YIQ", 0.5, 0.25, 0.25) = 0.8939 0.270375 0.649225
+HART shader 'test' (test.osl:66, point 0):   color ("XYZ", 0.25, 0.5, 0.25) = -0.08315 0.7059 0.1763
+HART shader 'test' (test.osl:70, point 0): 
+HART shader 'test' (test.osl:72, point 0):   luminance(0.5 0.75 0.75) = 0.696873
+HART shader 'test' (test.osl:74, point 0):   luminance(0.5 0.5 0.5) = 0.5

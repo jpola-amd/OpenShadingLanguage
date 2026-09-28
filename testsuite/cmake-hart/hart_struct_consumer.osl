@@ -1,0 +1,19 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+// https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
+
+#include "hart_aggregate_types.h"
+
+shader hart_struct_consumer(
+    HartPacket value = {{{0,0},{0,0}}, {0,0,0}, 0}, output color Cout = 0)
+{
+    HartPacket copy = value;
+    int index = u >= 0.5;
+    HartLeaf selected = copy.leaves[index];
+    copy.leaves[1-index] = selected;
+    HartLeaf pair[2];
+    pair = copy.leaves;
+    float q = pair[1-index].weight + pair[index].shade[2]
+            + copy.coefficients[int(2*v)] + copy.axis[0];
+    Cout = color(q, Dx(q), Dy(q));
+}

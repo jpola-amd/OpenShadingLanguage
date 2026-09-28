@@ -19,6 +19,21 @@ add_custom_target ( CopyFiles ALL DEPENDS "${CMAKE_BINARY_DIR}/testsuite/runtest
 
 set (OSL_TEST_BIG_TIMEOUT 800 CACHE STRING "Timeout for tests that take a long time")
 
+if (BUILD_TESTING)
+    add_test (NAME hart-reference-selection
+        COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-references.py")
+    add_test (NAME cmake-hart-discovery
+        COMMAND "${CMAKE_COMMAND}"
+            "-DOSL_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            "-DTEST_BINARY_DIR=${CMAKE_BINARY_DIR}/testsuite/cmake-hart"
+            -P "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/run.cmake")
+    if (OSL_USE_OPTIX AND USE_LLVM_BITCODE)
+        add_subdirectory ("${PROJECT_SOURCE_DIR}/testsuite/cuda-bitcode-link"
+                          "${CMAKE_BINARY_DIR}/testsuite/cuda-bitcode-link")
+    endif ()
+endif ()
+
 
 # Build a single "PYTHONPATH=..." entry suitable for a CTest ENVIRONMENT
 # property, putting prefix_dir first.
@@ -120,7 +135,8 @@ macro (add_one_testsuite testname testsrcdir)
         set_tests_properties (${testname} PROPERTIES LABELS noise
                               PROCESSORS 2 COST 4)
     endif ()
-    if (${testname} MATCHES "optix")
+    if (${testname} MATCHES "optix"
+        AND NOT "${testname}" MATCHES "\\.hart($|\\.)")
         set_tests_properties (${testname} PROPERTIES LABELS optix)
         if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "10.0")
             # Make sure libnvrtc-builtins.so is reachable
@@ -135,6 +151,11 @@ macro (add_one_testsuite testname testsrcdir)
         # long, so give them a higher cost and timeout.
         set_tests_properties (${testname} PROPERTIES LABELS batchregression
                               COST 15 TIMEOUT ${OSL_TEST_BIG_TIMEOUT})
+    endif ()
+    if ("${testname}" MATCHES "\\.hart($|\\.)")
+        set_property (TEST ${testname} APPEND PROPERTY LABELS hart gpu)
+        set_tests_properties (${testname} PROPERTIES RUN_SERIAL TRUE
+                              TIMEOUT ${OSL_TEST_BIG_TIMEOUT})
     endif ()
 endmacro ()
 
@@ -232,6 +253,31 @@ macro ( TESTSUITE )
               add_one_testsuite ("${_testname}.optix.fused" "${_testsrcdir}"
                                  ENV TESTSHADE_OPT=2 TESTSHADE_OPTIX=1 TESTSHADE_FUSED=1 )
             endif()
+        endif ()
+
+        # HART GPU tests require both an explicit configure-time opt-in and a
+        # marker. Reuse the fixture's commands and references without runtime
+        # skips or OptiX-specific comparison thresholds.
+        if (OSL_USE_HART AND USE_LLVM_BITCODE
+            AND "$ENV{TESTSUITE_HART}" STREQUAL "1"
+            AND EXISTS "${_testsrcdir}/HART")
+            # Preserve the original GPU optimized-only fixture restrictions.
+            if (NOT EXISTS "${_testsrcdir}/OPTIMIZEONLY"
+                AND NOT EXISTS "${_testsrcdir}/OPTIX_OPTIMIZEONLY")
+                add_one_testsuite ("${_testname}.hart" "${_testsrcdir}"
+                                   ENV TESTSHADE_HART=1 TESTSHADE_OPT=0
+                                       TESTSHADE_LLVM_OPT=10 TESTSHADE_FUSED=0)
+            endif ()
+            if (NOT EXISTS "${_testsrcdir}/NOOPTIMIZE")
+                add_one_testsuite ("${_testname}.hart.opt" "${_testsrcdir}"
+                                   ENV TESTSHADE_HART=1 TESTSHADE_OPT=2
+                                       TESTSHADE_LLVM_OPT=3 TESTSHADE_FUSED=0)
+                if (NOT EXISTS "${_testsrcdir}/NOFUSED")
+                    add_one_testsuite ("${_testname}.hart.fused" "${_testsrcdir}"
+                                       ENV TESTSHADE_HART=1 TESTSHADE_OPT=2
+                                           TESTSHADE_LLVM_OPT=3 TESTSHADE_FUSED=1)
+                endif ()
+            endif ()
         endif ()
 
         if (OSL_BUILD_BATCHED)
@@ -464,7 +510,7 @@ macro (osl_add_all_tests)
                 splineinverse-knots-ascend-reg splineinverse-knots-descend-reg
                 spline-boundarybug spline-derivbug
                 split-reg
-                string string-reg
+                string string-empty-compare string-reg
                 struct struct-array struct-array-mixture
                 struct-err struct-init-copy
                 struct-isomorphic-overload struct-layers
