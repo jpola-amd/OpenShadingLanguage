@@ -536,6 +536,13 @@ public:
     bool use_gpu() const { return shadingsys().use_gpu(); }
     bool use_optix_cache() { return shadingsys().use_optix_cache(); }
 
+    // Userdata resolves per point; only its fallback lives in the shared arena.
+    bool hart_interactive_default(const Symbol& sym) const
+    {
+        return use_hart() && sym.symtype() == SymTypeParam && sym.interpolated()
+               && sym.interactive() && !sym.connected();
+    }
+
     /// Return if we should compile against free function versions of Renderer Service.
     bool use_rs_bitcode() { return m_use_rs_bitcode; }
 

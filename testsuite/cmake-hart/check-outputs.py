@@ -22,7 +22,7 @@ oslc = str(Path(args.oslc).resolve())
 oiiotool = shutil.which(args.oiiotool)
 assert oiiotool, "The output-file test requires OpenImageIO's oiiotool"
 env = {**os.environ, "TESTSHADE_OPTIX": "0", "TESTSHADE_BATCHED": "0",
-       "TESTSHADE_RS_BITCODE": "0"}
+       "TESTSHADE_RS_BITCODE": "0", "TESTSHADE_HART": "0", "TESTSHADE_FUSED": "0"}
 root = Path.cwd() / ("hart-outputs-" + uuid.uuid4().hex)
 root.mkdir()
 

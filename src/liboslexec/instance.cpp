@@ -1117,11 +1117,9 @@ ShaderInstance::validate_hart() const
         if (!validate_type(sym))
             return false;
         const auto& hints = m_instoverrides[i];
-        if (hints.interpolated()
-            && (hints.interactive() || sym.typespec().is_closure_based())) {
+        if (hints.interpolated() && sym.typespec().is_closure_based()) {
             shadingsys().errorfmt(
-                "HART: interpolated parameter '{}' cannot be interactive "
-                "or closure-based",
+                "HART: interpolated parameter '{}' cannot be closure-based",
                 sym.name());
             return false;
         }
@@ -1131,15 +1129,37 @@ ShaderInstance::validate_hart() const
                                   sym.name());
             return false;
         }
-        if ((hints.interpolated()
-             && !shadingsys().renderer()->supports("HARTUserdata"))
-            || (hints.interactive()
-                && !shadingsys().renderer()->supports("HARTInteractive"))) {
+        if (hints.interpolated() && hints.interactive()) {
+            if (sym.symtype() != SymTypeParam
+                || (!sym.typespec().is_float_based()
+                    && !sym.typespec().is_int_based())) {
+                shadingsys().errorfmt(
+                    "HART: interpolated interactive parameter '{}' must be "
+                    "a numeric input",
+                    sym.name());
+                return false;
+            }
+            if (sym.has_init_ops()
+                && hints.valuesource() == Symbol::DefaultVal) {
+                shadingsys().errorfmt(
+                    "HART: interpolated interactive parameter '{}' requires "
+                    "a constant default or an instance value",
+                    sym.name());
+                return false;
+            }
+        }
+        const bool missing_userdata    = hints.interpolated()
+                                         && !shadingsys().renderer()->supports(
+                                             "HARTUserdata");
+        const bool missing_interactive = hints.interactive()
+                                         && !shadingsys().renderer()->supports(
+                                             "HARTInteractive");
+        if (missing_userdata || missing_interactive) {
             shadingsys().errorfmt(
                 "HART: {} parameter '{}' is unsupported by the renderer in "
                 "shader '{}'",
-                hints.interpolated() ? "interpolated" : "interactive",
-                sym.name(), shadername());
+                missing_userdata ? "interpolated" : "interactive", sym.name(),
+                shadername());
             return false;
         }
     }

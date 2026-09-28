@@ -967,13 +967,29 @@ immutable artifacts and A-B-A cache reuse.
 
 Generated testshade also supports interpolated parameters, including int32,
 float-based scalar/aggregate/array values and string hashes. Use
-`[[int interpolated=1]]` or `--param:interpolated=1`; a parameter cannot be both
-interpolated and interactive, and interpolated closures are unsupported.
+`[[int interpolated=1]]` or `--param:interpolated=1`; interpolated closures are
+unsupported.
 The grid supplies the same `s`, `t`, `face_idx` and conditional `red`, `green`,
 `blue` userdata as CPU testshade, with their meaningful derivatives.
 `--userdata[:type=TYPE] NAME VALUE` adds uniform values. Missing, absent or
 type-mismatched entries use each shader parameter's own default; they are not
 device errors. Values supplied without derivatives have zero gradients.
+
+Numeric input parameters can be both interpolated and interactive when the
+renderer supports both capabilities. A userdata hit takes precedence; a miss
+copies that layer's current interactive default into per-point Groupdata and
+zeros its derivatives. Shader execution never writes these resolved values
+into the shared interactive arena. Reparameterization changes subsequent
+fallback values without recompiling the group or changing cached userdata
+hits. Combined string/output/closure parameters and runtime-initialized
+defaults without an instance override are rejected. Immutable texture
+filenames still cannot be interpolated or interactive.
+
+`hart-interactive-userdata-runtime` checks typed and partial hits, missing and
+type-mismatched userdata, distinct defaults in two layers, zero/default and
+supplied derivatives, and in-place updates in all four execution modes.
+The numerical CPU controls use ordinary interpolated parameters with staged
+defaults; the CPU's eager combined-parameter path is not an equivalent oracle.
 
 The generated-renderer API accepts `HartOptions::userdata_bindings`. Each
 `HartUserdataBinding` borrows host bytes for one typed record (`stride=0`) or
@@ -1153,6 +1169,19 @@ callable ABI is unchanged. `hart-diagnostics-runtime`, the path-tracer tests and
 `unit_journal` cover payloads, bounds, context and repeated-launch draining.
 
 `hart-generated-cli` checks the supported CLI boundary without GPU execution.
+The standard test runner also recognizes `HART` marker files. With
+`TESTSUITE_HART=1` at configuration, marked fixtures get `.hart` (OSL 0 /
+LLVM 10), `.hart.opt` (OSL 2 / LLVM 3), and `.hart.fused` variants, subject to
+the existing optimization/fusion markers. These tests retain their original
+shaders and numerical thresholds, have `hart;gpu` labels, and run serially.
+For CPU-only selections in a mixed build, exclude both backends with
+`-LE "hart|optix"`. `testshade` and `testrender` also honor
+`TESTSHADE_HART=1` and, with HART selected, `TESTSHADE_FUSED=1`.
+The runner rejects conflicting backend selections rather than falling back
+to CPU. A dedicated `out-hart.txt` reference is backend-exclusive and can
+preserve HART's existing shader/source/point diagnostic prefix; CPU references
+are not changed or accepted in its place.
+
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
 which compares arithmetic, `sin(u+v)`, and straight-line and conditional
 two-layer groups

@@ -342,6 +342,13 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>")
             set_tests_properties (hart-userdata-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-interactive-userdata-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-generated.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>"
+                    --gpu --interactive-userdata)
+            set_tests_properties (hart-interactive-userdata-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             add_test (NAME hart-geometry-state-runtime
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-geometry-state.py"

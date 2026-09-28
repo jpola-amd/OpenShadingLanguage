@@ -4,6 +4,7 @@
 
 import argparse
 import colorsys
+from collections import Counter
 import json
 import math
 import os
@@ -33,6 +34,8 @@ suites.add_argument("--selectors", action="store_true",
                     help="Run integer/string hashes and checked dynamic noise selection")
 suites.add_argument("--diagnostics", action="store_true",
                     help="Run bounded print/warning/error payloads and launch resets")
+suites.add_argument("--interactive-userdata", action="store_true",
+                    help="Run numeric interactive defaults beneath userdata lookup")
 suites.add_argument("--derivatives", action="store_true",
                     help="Run derivative runtime cases instead of the basic runtime cases")
 suites.add_argument("--surface", action="store_true",
@@ -83,7 +86,7 @@ suites.add_argument("--fused-benchmark", action="store_true",
                     help="Benchmark host-synchronized launch latency for split, "
                          "fused-scratch and fused-local execution")
 args = parser.parse_args()
-if (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.derivatives or args.surface or args.filterwidth
+if (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.interactive_userdata or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
         or args.procedural or args.textures or args.texture_alpha
         or args.texture_channels or args.texture_materials or args.matrices
@@ -96,6 +99,8 @@ oslc = str(Path(args.oslc).resolve())
 fixtures = Path(__file__).resolve().parent
 env = os.environ.copy()
 env["TESTSHADE_OPTIX"] = "0"
+env["TESTSHADE_HART"] = "0"
+env["TESTSHADE_FUSED"] = "0"
 env["TESTSHADE_BATCHED"] = "0"
 env["TESTSHADE_RS_BITCODE"] = "0"
 root = Path.cwd() / ("hart-generated-check-" + uuid.uuid4().hex)
@@ -2643,6 +2648,197 @@ def check_diagnostic_suite():
         render([name], ["-O2", "--llvm_opt", "3"], [], error=message, launched=False)
 
 
+def check_interactive_userdata_suite():
+    producer = root / "hart_combined_runtime_producer.osl"
+    producer.write_text("""
+shader hart_combined_runtime_producer(
+    float shared=2 [[int interpolated=1]], output float value=0) {
+    value=shared;
+}
+""", encoding="ascii")
+    consumer = root / "hart_combined_runtime_consumer.osl"
+    consumer.write_text("""
+shader hart_combined_runtime_consumer(
+    float value=0, float shared=5 [[int interpolated=1]],
+    float red=3 [[int interpolated=1]],
+    int count=7 [[int interpolated=1]],
+    color tint=color(.25,.5,.75) [[int interpolated=1]],
+    float weights[2]={.25,.5} [[int interpolated=1]],
+    matrix basis=1 [[int interpolated=1]], output color Cout=0) {
+    float q=value+shared+red+count+tint[0]+2*tint[1]+3*tint[2]
+            +weights[0]+2*weights[1]+basis[0][0];
+    Cout=color(q,Dx(shared)+Dx(red)+Dx(tint[0])+Dx(weights[1]),
+                 Dy(shared)+Dy(red)+Dy(tint[1])+Dy(weights[0]));
+    printf("COMBINED %d %d %.9g %.9g %.9g %.9g %.9g\\n",
+           int(2*u),int(v),value,shared,Cout[0],Cout[1],Cout[2]);
+}
+""", encoding="ascii")
+    compile_fixture(producer)
+    compile_fixture(consumer)
+    hints_consumer = root / "hart_cli_hint_consumer.osl"
+    hints_consumer.write_text("""
+shader hart_cli_hint_consumer(float value=0, float shared=5,
+                             output color Cout=0) {
+    Cout=color(value+shared);
+    printf("CLI_HINT %.9g\\n",Cout[0]);
+}
+""", encoding="ascii")
+    compile_fixture(hints_consumer)
+    fields = (("shared", "float"), ("red", "float"),
+              ("count", "int"), ("tint", "color"),
+              ("weights", "float[2]"), ("basis", "matrix"))
+    states = (
+        {"shared": "5", "red": "3", "count": "7", "tint": ".25,.5,.75",
+         "weights": ".25,.5", "basis": "1"},
+        {"shared": "13", "red": "6", "count": "11", "tint": "1,2,3",
+         "weights": "2,4", "basis": "2"},
+    )
+    # Keep uniform bindings independent of the CPU's specialized builtin getters.
+    supplied = ["--userdata:type=float", "shared", "9",
+                "--userdata:type=int", "count", "17",
+                "--userdata:type=color", "tint", "2,3,4",
+                "--userdata:type=float[2]", "weights", "5,7",
+                "--userdata:type=matrix", "basis", "3"]
+    mismatched = ["--userdata:type=int", "shared", "9",
+                  "--userdata:type=float", "count", "17",
+                  "--userdata:type=float", "tint", "2",
+                  "--userdata:type=float", "weights", "5",
+                  "--userdata:type=float", "basis", "3"]
+    cases = (("missing", [], False), ("found", supplied, True),
+             ("mismatched", mismatched, False))
+
+    def graph(state, interactive):
+        hint = ":interactive=1" if interactive else ""
+        result = ["--layer", "producer", "--param:type=float", "shared", "2",
+                  producer.stem, "--layer", "consumer"]
+        for name, datatype in fields:
+            result += ["--param:type="+datatype+hint, name, state[name]]
+        return result + [consumer.stem, "--connect", "producer", "value",
+                         "consumer", "value", "--entry", "producer",
+                         "--entry", "consumer"]
+
+    def updates(state):
+        result = []
+        for name, datatype in fields:
+            result += ["--reparam:type="+datatype, "consumer", name, state[name]]
+        return result
+
+    def expected(state, found):
+        result = []
+        for y in range(2):
+            for x in range(3):
+                u = x/2
+                upstream = 9 if found else 2
+                shared = 9 if found else float(state["shared"])
+                red = u if u > .5 else float(state["red"])
+                count = 17 if found else int(state["count"])
+                tint = ((2, 3, 4) if found else
+                        tuple(map(float, state["tint"].split(","))))
+                weights = ((5, 7) if found else
+                           tuple(map(float, state["weights"].split(","))))
+                basis = 3 if found else float(state["basis"])
+                q = (upstream+shared+red+count
+                     +sum((i+1)*t for i, t in enumerate(tint))
+                     +weights[0]+2*weights[1]+basis)
+                result.append((x, y, upstream, shared, q,
+                               .5 if u > .5 else 0, 0))
+        return result
+
+    def records(output):
+        result = []
+        for x, y, values in re.findall(r"COMBINED (\d+) (\d+) ([^\r\n]+)", output):
+            values = tuple(map(float, values.split()))
+            assert len(values) == 5, output
+            result.append((int(x), int(y)) + values)
+        return Counter(result)
+
+    def check_cli_hints(flags, mode_env):
+        output = run(flags + [
+            "-g", "1", "1", "--iters", "2", "--print",
+            "--userdata:type=float", "unused", "9",
+            "--layer", "producer", "--param:type=float", "shared", "2",
+            producer.stem,
+            "--reparam:type=float", "consumer", "shared", "11",
+            "--layer", "consumer",
+            "--param:type=float:interactive=1", "shared", "5",
+            hints_consumer.stem,
+            "--connect", "producer", "value", "consumer", "value",
+        ], extra_env=mode_env)
+        assert re.findall(r"CLI_HINT ([^\r\n]+)", output) == ["7", "13"], output
+        compare(pixels(output, 1, 1), [13, 13, 13])
+        if mode_env.get("TESTSHADE_HART") == "1":
+            kind = "fused" if mode_env["TESTSHADE_FUSED"] == "1" else "split"
+            assert "HART callable mode: " + kind in output, output
+            assert output.count("Launching HART grid") == 2, output
+
+    grid = ["-g", "3", "2", "--print"]
+    for backend, error in (
+        ("TESTSHADE_OPTIX", "mutually exclusive"),
+        ("TESTSHADE_BATCHED", "does not support TESTSHADE_BATCHED"),
+        ("TESTSHADE_RS_BITCODE", "does not support TESTSHADE_RS_BITCODE"),
+    ):
+        run(["--print", hints_consumer.stem], error,
+            {"TESTSHADE_HART": "1", backend: "1"})
+    cpu_values = {}
+    # The CPU's combined eager path bypasses userdata. Ordinary-interpolated
+    # staged controls provide the intended lookup/default oracle instead.
+    for optimize in (0, 2):
+        mode_env = {"TESTSHADE_OPT": str(optimize),
+                    "TESTSHADE_LLVM_OPT": "10" if optimize == 0 else "3"}
+        check_cli_hints(["-t", "1"], mode_env)
+        for name, userdata, found in cases:
+            for stage, state in enumerate(states):
+                output = run(["-t", "1"] + grid + graph(state, False) + userdata,
+                             extra_env=mode_env)
+                values = expected(state, found)
+                assert records(output) == Counter(values), (
+                    f"CPU O{optimize} {name} stage {stage}\n" + output)
+                wanted_pixels = [v for row in values for v in row[4:]]
+                actual_pixels = pixels(output, 3, 2)
+                compare(actual_pixels, wanted_pixels)
+                cpu_values[optimize, name, stage] = actual_pixels
+
+    for mode, optimize, llvm, flags in (
+        ("split", 2, 3, []),
+        ("fused", 2, 3, ["--hart-fused"]),
+        ("fused-local", 2, 3,
+         ["--hart-fused", "--hart-local-groupdata", "1048576"]),
+        ("unoptimized", 0, 10, []),
+    ):
+        mode_env = {"TESTSHADE_OPT": str(optimize),
+                    "TESTSHADE_LLVM_OPT": str(llvm)}
+        check_cli_hints(
+            ["-v"] + [flag for flag in flags if flag != "--hart-fused"],
+            {**mode_env, "TESTSHADE_HART": "1",
+             "TESTSHADE_FUSED": str(int(mode in ("fused", "fused-local")))})
+        for name, userdata, found in cases:
+            # Both transitions execute in place on their compiled group.
+            # Compiler/API coverage separately checks one group's A-B-A arena.
+            for initial, final in ((0, 1), (1, 0)):
+                output = run(["--hart", "-v", "--warmup", "--iters", "2"]
+                             + flags + grid + graph(states[initial], True)
+                             + userdata + updates(states[final]),
+                             extra_env=mode_env)
+                wanted = Counter(expected(states[initial], found))
+                wanted.update(expected(states[initial], found))
+                wanted.update(expected(states[final], found))
+                assert records(output) == wanted, output
+                assert output.count("Launching HART grid") == 3, output
+                prefix = "HART shader 'hart_combined_runtime_consumer'"
+                assert output.count(prefix) == 18, output
+                compare(pixels(output, 3, 2),
+                        cpu_values[optimize, name, final])
+        output = run(["--hart", "-v", "--iters", "2"] + flags + grid
+                     + graph(states[0], True)
+                     + ["--reparam:type=int", "consumer", "red", "99"],
+                     "type mismatch", mode_env, error_after_launch=True)
+        assert output.count("Launching HART grid") == 1, output
+        assert "Pixel (" not in output, output
+        print("HART combined defaults " + mode
+              + ": typed hits/misses, per-layer fallback, updates "
+              "and gradients passed")
+
+
 def check_selector_suite():
     configurations = [
         ("-O0", "10", []), ("-O2", "3", []),
@@ -3885,6 +4081,9 @@ try:
     if args.diagnostics:
         check_diagnostic_suite()
 
+    if args.interactive_userdata:
+        check_interactive_userdata_suite()
+
     if args.derivatives:
         connected = connected_group("hart_deriv_consumer",
                                     producer="hart_deriv_producer")
@@ -4125,7 +4324,7 @@ try:
     if args.fused_benchmark:
         check_fused_benchmark()
 
-    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.derivatives or args.surface or args.filterwidth
+    if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.interactive_userdata or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
                          or args.procedural or args.textures or args.texture_alpha
                          or args.texture_channels or args.texture_materials
@@ -4240,6 +4439,8 @@ elif args.selectors:
     suite = "hashes and dynamic noise selectors"
 elif args.diagnostics:
     suite = "bounded diagnostics"
+elif args.interactive_userdata:
+    suite = "interpolated interactive defaults"
 elif args.strings:
     suite = "string values"
 elif args.aggregates:
@@ -4266,7 +4467,9 @@ else:
     suite = ("surface" if args.surface else
              ("derivative" if args.derivatives else ("loop" if args.loops else "CLI")))
 print("Generated HART " + suite + " checks passed"
-      + ("; GPU image comparisons and launch statistics passed"
+      + ("; staged CPU controls and in-place GPU updates/derivatives passed"
+         if args.interactive_userdata else
+         ("; GPU image comparisons and launch statistics passed"
          if args.fused_benchmark else
          ("; CPU/GPU numeric, image, cold-cache and repeated-launch checks passed"
-          if args.gpu else "")))
+          if args.gpu else ""))))

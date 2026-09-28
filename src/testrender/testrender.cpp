@@ -64,7 +64,9 @@ static std::string shaderpath;
 static bool shadingsys_options_set = false;
 static bool use_optix              = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_OPTIX"));
-static bool use_hart = false, hart_fused = false;
+static bool use_hart = OIIO::Strutil::stoi(
+    OIIO::Sysutil::getenv("TESTSHADE_HART"));
+static bool hart_fused = false;
 static int hart_device = 0, hart_local_groupdata = 0, hart_bounces = 4;
 static bool optix_no_inline             = false;
 static bool optix_no_inline_layer_funcs = false;
@@ -161,11 +163,13 @@ getargs(int argc, const char* argv[])
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
     ap.arg("--hart", &use_hart)
-      .help("Use experimental HART surface and volume path tracing");
+      .help("Use experimental HART surface and volume path tracing "
+            "(or set TESTSHADE_HART=1)");
     ap.arg("--hart-device %d:DEVICE", &hart_device)
       .help("HART device ordinal (default: 0)");
     ap.arg("--hart-fused", &hart_fused)
-      .help("Use fused HART shader callables");
+      .help("Use fused HART shader callables "
+            "(or set TESTSHADE_FUSED=1 with HART)");
     ap.arg("--hart-local-groupdata %d:BYTES", &hart_local_groupdata)
       .help("Maximum callable-local HART Groupdata bytes (requires --hart-fused)");
     ap.arg("--hart-bounces %d:N", &hart_bounces)
@@ -248,6 +252,9 @@ getargs(int argc, const char* argv[])
 
     // clang-format on
     ap.parse_args(argc, argv);
+    if (use_hart
+        && OIIO::Strutil::stoi(OIIO::Sysutil::getenv("TESTSHADE_FUSED")))
+        hart_fused = true;
     if (max_bounces < 0) {
         print(stderr, "--max-bounces must be nonnegative\n");
         exit(EXIT_FAILURE);

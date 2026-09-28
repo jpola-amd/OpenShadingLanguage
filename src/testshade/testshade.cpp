@@ -417,6 +417,7 @@ add_shader(cspan<const char*> argv)
     shadingsys->Shader(*shadergroup, "surface", shadername, layername);
     layername.clear();
     params.clear();
+    param_hints.clear();
     return 0;
 }
 
@@ -473,6 +474,7 @@ specify_expr(cspan<const char*> argv)
     shadingsys->Shader(*shadergroup, "surface", shadername, layername);
     layername.clear();
     params.clear();
+    param_hints.clear();
 }
 
 
@@ -493,7 +495,7 @@ parse_float_list(string_view str, float* f, int len)
 
 
 // Utility: Add {paramname, stringval} to the given parameter list.
-static void
+static ParamHints
 add_param(ParamValueList& params, string_view command, string_view paramname,
           string_view stringval)
 {
@@ -531,8 +533,7 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
     if ((type == TypeDesc::UNKNOWN || type == TypeMatrix)
         && parse_float_list(stringval, f, 16)) {
         params.emplace_back(paramname, TypeMatrix, 1, f);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
     // If it is or might be a vector type, look for 3 comma-separated floats
     if ((type == TypeDesc::UNKNOWN || equivalent(type, TypeVector))
@@ -540,24 +541,21 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
         if (type == TypeDesc::UNKNOWN)
             type = TypeVector;
         params.emplace_back(paramname, type, 1, f);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
     // If it is or might be an int, look for an int that takes up the whole
     // string.
     if ((type == TypeDesc::UNKNOWN || type == TypeInt)
         && OIIO::Strutil::string_is<int>(stringval)) {
         params.emplace_back(paramname, OIIO::Strutil::stoi(stringval));
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
     // If it is or might be an float, look for a float that takes up the
     // whole string.
     if ((type == TypeDesc::UNKNOWN || type == TypeFloat)
         && OIIO::Strutil::string_is<float>(stringval)) {
         params.emplace_back(paramname, OIIO::Strutil::stof(stringval));
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // Catch-all for float types and arrays
@@ -569,8 +567,7 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
             OIIO::Strutil::parse_char(stringval, ',');
         }
         params.emplace_back(paramname, type, 1, &vals[0]);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // Catch-all for int types and arrays
@@ -582,8 +579,7 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
             OIIO::Strutil::parse_char(stringval, ',');
         }
         params.emplace_back(paramname, type, 1, &vals[0]);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // String arrays are slightly tricky
@@ -595,14 +591,13 @@ add_param(ParamValueList& params, string_view command, string_view paramname,
         for (auto&& s : splitelements)
             strelements.push_back(ustring(s));
         params.emplace_back(paramname, type, 1, &strelements[0]);
-        param_hints.push_back(hint);
-        return;
+        return hint;
     }
 
     // All remaining cases -- it's a string
     const char* s = ustring(stringval).c_str();
     params.emplace_back(paramname, TypeString, 1, &s);
-    param_hints.push_back(hint);
+    return hint;
 }
 
 
@@ -617,7 +612,9 @@ action_param(cspan<const char*> argv)
         use_reparam = true;
     ParamValueList& params(use_reparam ? reparams : (::params));
 
-    add_param(params, command, argv[1], argv[2]);
+    const ParamHints hint = add_param(params, command, argv[1], argv[2]);
+    if (!use_reparam)
+        param_hints.push_back(hint);
 }
 
 
@@ -708,7 +705,7 @@ getargs(int argc, const char* argv[])
     // they can be later processed in full.
     shader_setup_args.clear();
     shader_setup_args.push_back("testshade");  // seed with 'program'
-    use_hart     = false;
+    use_hart     = OIIO::Strutil::stoi(OIIO::Sysutil::getenv("TESTSHADE_HART"));
     hart_options = false;
     hart         = HartOptions {};
 
@@ -726,7 +723,8 @@ getargs(int argc, const char* argv[])
     ap.arg("--optix", &use_optix)
       .help("Use OptiX if available");
     ap.arg("--hart", &use_hart)
-      .help("Run a simple OSL shader or external AMDGPU bitcode through HART");
+      .help("Run a simple OSL shader or external AMDGPU bitcode through HART "
+            "(or set TESTSHADE_HART=1)");
     ap.arg("--hart-module %s:FILE", &hart.module)
       .help("HART grid module: raw LLVM bitcode")
       .action([&](cspan<const char*> args) { hart.module = args[1]; hart.has_module = hart_options = true; });
@@ -743,7 +741,8 @@ getargs(int argc, const char* argv[])
       .help("Disable the HART pipeline cache for this run")
       .action([&](cspan<const char*>) { hart.no_cache = hart_options = true; });
     ap.arg("--hart-fused", &hart.fused)
-      .help("Use one init+entry callable for a generated HART shader group")
+      .help("Use one init+entry callable for a generated HART shader group "
+            "(or set TESTSHADE_FUSED=1 with HART)")
       .action([&](cspan<const char*>) { hart.fused = hart_options = true; });
     ap.arg("--hart-local-groupdata %s:BYTES", &hart.local_groupdata)
       .help("Maximum private group-data bytes for --hart-fused (default: 0)")
@@ -898,6 +897,9 @@ getargs(int argc, const char* argv[])
 
     // clang-format on
     ap.parse_args(argc, argv);
+    if (use_hart
+        && OIIO::Strutil::stoi(OIIO::Sysutil::getenv("TESTSHADE_FUSED")))
+        hart.fused = hart_options = true;
 }
 
 

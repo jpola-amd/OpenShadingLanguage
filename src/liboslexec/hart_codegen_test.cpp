@@ -396,10 +396,17 @@ public:
     int supports(string_view feature) const override
     {
         return feature == "HART" || feature == "HARTArrayBounds"
-               || feature == "HARTInteractive" || feature == "HARTClosures"
+               || (arena.interactive && feature == "HARTInteractive")
+               || feature == "HARTClosures"
                || (getter && feature == "build_interpolated_getter")
                || (userdata && feature == "HARTUserdata");
     }
+    void* device_alloc(size_t size) override
+    { return arena.device_alloc(size); }
+    void device_free(void* pointer) override { arena.device_free(pointer); }
+    void* copy_to_device(void* destination, const void* source,
+                         size_t size) override
+    { return arena.copy_to_device(destination, source, size); }
     void build_interpolated_getter(const ShaderGroup&, const ustring& name,
                                    TypeDesc type, bool derivatives,
                                    InterpolatedGetterSpec& spec) override
@@ -429,6 +436,7 @@ public:
     bool userdata = true, getter = true, missing_spec = false;
     int host_lookups = 0;
     std::vector<Request> requests;
+    HartInteractiveServices arena;
 };
 
 
@@ -5385,6 +5393,18 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
         }
         for (const auto& block : function)
             for (const auto& inst : block) {
+                int64_t arena_offset = 0;
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+                    OIIO_CHECK_ASSERT(
+                        !interactive_address(store->getPointerOperand(),
+                                             function.getArg(5), layout,
+                                             arena_offset));
+                if (const auto* memory = llvm::dyn_cast<llvm::MemIntrinsic>(
+                        &inst))
+                    OIIO_CHECK_ASSERT(!interactive_address(memory->getRawDest(),
+                                                           function.getArg(5),
+                                                           layout,
+                                                           arena_offset));
                 if (const auto* clear = llvm::dyn_cast<llvm::MemSetInst>(
                         &inst)) {
                     int64_t offset = 0;
@@ -5550,17 +5570,21 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
                                      layout),
                                  function.getArg(1));
                 const pvt::Symbol* symbol = nullptr;
+                int symbol_layer          = -1;
                 for (int l = 0; l < group.nlayers(); ++l)
                     if (function.getName().str()
                         == fmtformat("osl_layer_group_hart_test_group_name_{}",
                                      group.layer(l)->layername()))
                         for (const auto& candidate : group.layer(l)->symbols())
-                            if (candidate.name() == names[slot])
-                                symbol = &candidate;
+                            if (candidate.name() == names[slot]) {
+                                symbol       = &candidate;
+                                symbol_layer = l;
+                            }
                 OIIO_CHECK_ASSERT(symbol);
                 if (!symbol)
                     continue;
                 const size_t value_size = types[slot].size();
+                OIIO_CHECK_ASSERT(symbol_offset != offsets[slot]);
                 const size_t cache_size = value_size
                                           * (derivatives[slot] ? 3 : 1);
                 if (connected && names[slot] == "shared") {
@@ -5599,7 +5623,8 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
                     !dominators.dominates(missing,
                                           default_branch->getSuccessor(1)));
                 bool default_write = false, scalar_default = false;
-                bool zero_derivatives = false;
+                bool zero_derivatives    = false;
+                bool interactive_default = false;
                 for (const auto& candidate : function) {
                     if (!dominators.dominates(missing, &candidate))
                         continue;
@@ -5637,9 +5662,25 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
                                 }
                             }
                         if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(
-                                &operation))
-                            default_write |= at(copy->getRawDest(), function,
-                                                symbol_offset);
+                                &operation)) {
+                            if (at(copy->getRawDest(), function,
+                                   symbol_offset)) {
+                                default_write = true;
+                                if (symbol->interactive()) {
+                                    int64_t offset = -1;
+                                    OIIO_CHECK_ASSERT(interactive_address(
+                                        copy->getRawSource(),
+                                        function.getArg(5), layout, offset));
+                                    OIIO_CHECK_EQUAL(
+                                        offset,
+                                        group.interactive_param_offset(
+                                            symbol_layer, symbol->name()));
+                                    OIIO_CHECK_ASSERT(
+                                        integer(copy->getLength(), value_size));
+                                    interactive_default = true;
+                                }
+                            }
+                        }
                         if (const auto* clear
                             = llvm::dyn_cast<llvm::MemSetInst>(&operation))
                             zero_derivatives |= at(clear->getRawDest(),
@@ -5651,8 +5692,12 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
                     }
                 }
                 OIIO_CHECK_ASSERT(default_write);
-                if (names[slot] == "shared" || names[slot] == "gain"
-                    || names[slot] == "tag") {
+                if (symbol->interactive()) {
+                    OIIO_CHECK_ASSERT(interactive_default);
+                    if (symbol->has_derivs())
+                        OIIO_CHECK_ASSERT(zero_derivatives);
+                } else if (names[slot] == "shared" || names[slot] == "gain"
+                           || names[slot] == "tag") {
                     OIIO_CHECK_ASSERT(scalar_default);
                     if (symbol->has_derivs())
                         OIIO_CHECK_ASSERT(zero_derivatives);
@@ -5697,10 +5742,23 @@ check_userdata_ir(ShadingSystem& ss, ShaderGroup& group,
         OIIO_CHECK_EQUAL(defaults, 1);
     }
     if (connected)
-        for (int i = 0; i < count; ++i)
-            OIIO_CHECK_EQUAL(slot_layers[i],
-                             names[i] == "shared" || names[i] == "tag" ? 3u
-                                                                       : 0u);
+        for (int i = 0; i < count; ++i) {
+            unsigned expected = 0;
+            for (int l = 0; l < group.nlayers(); ++l) {
+                const auto* instance = group.layer(l);
+                if (instance->unused())
+                    continue;
+                for (const auto& symbol : instance->symbols())
+                    if (symbol.name() == names[i] && symbol.interpolated()
+                        && !symbol.connected()
+                        && symbol.typespec().simpletype() == types[i])
+                        expected |= instance->layername() == "producer" ? 1u
+                                                                        : 2u;
+            }
+            if (names[i] == "shared" || names[i] == "tag")
+                OIIO_CHECK_EQUAL(expected, 3u);
+            OIIO_CHECK_EQUAL(slot_layers[i], expected);
+        }
     std::vector<int> requested_sites(count, 0);
     for (const auto& request : requests) {
         bool matched = false;
@@ -5926,8 +5984,9 @@ check_userdata_modules(string_view arch, string_view stdosl)
     }
     for (int failure = 0; failure < 6; ++failure) {
         HartUserdataServices renderer;
-        renderer.userdata = failure != 0;
-        renderer.getter   = failure != 5;
+        renderer.userdata          = failure != 0;
+        renderer.getter            = failure != 5;
+        renderer.arena.interactive = failure != 1 && failure != 2;
         Diagnostics errors;
         ShadingSystem ss(&renderer, nullptr, &errors);
         ss.attribute("hart_arch", arch);
@@ -5954,7 +6013,9 @@ check_userdata_modules(string_view arch, string_view stdosl)
             ss.add_symlocs(group.get(), { &input, 1 });
         }
         check_rejected_group(ss, *group, errors,
-                             failure == 4 ? "pre-placement" : "interpolated");
+                             failure == 4                   ? "pre-placement"
+                             : failure == 1 || failure == 2 ? "interactive"
+                                                            : "interpolated");
         if (failure == 1 || failure == 2)
             OIIO_CHECK_ASSERT(
                 OIIO::Strutil::contains(errors.last_error, "interactive"));
@@ -5962,6 +6023,322 @@ check_userdata_modules(string_view arch, string_view stdosl)
             OIIO_CHECK_ASSERT(
                 OIIO::Strutil::contains(errors.last_error, "closure"));
         OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+        OIIO_CHECK_ASSERT(renderer.requests.empty());
+    }
+    return true;
+}
+
+
+
+bool
+check_interpolated_interactive_modules(string_view arch, string_view stdosl)
+{
+    const char* sources[] = {
+        "shader hart_combined_producer("
+        "float shared=2 [[int interpolated=1]], "
+        "int count=3 [[int interpolated=1,int interactive=1]], "
+        "color tint=color(.125,.25,.5) [[int interpolated=1,int interactive=1]], "
+        "float weights[2]={1,2} [[int interpolated=1,int interactive=1]], "
+        "matrix basis=1 [[int interpolated=1,int interactive=1]], "
+        "output float value=0) { "
+        "if(u>.25) value=shared+count+tint[0]+tint[1]+tint[2]"
+        "+Dx(tint[0])+Dy(tint[1])+weights[0]+weights[1]"
+        "+Dx(weights[0])+Dy(weights[1])+basis[0][0]; else value=u; }",
+        "shader hart_combined_consumer(float value=0, "
+        "float shared=5 [[int interpolated=1,int interactive=1]], "
+        "output color Cout=0) { "
+        "if(v>.25) Cout=color(value+shared,Dx(shared),Dy(shared)); "
+        "else Cout=0; }",
+        "shader hart_combined_initializer("
+        "float gain=u [[int interpolated=1,int interactive=1]], "
+        "output color Cout=0) { Cout=color(gain,Dx(gain),Dy(gain)); }",
+    };
+    std::string oso[std::size(sources)];
+    for (size_t i = 0; i < std::size(sources); ++i) {
+        OSLCompiler compiler;
+        if (!compiler.compile_buffer(sources[i], oso[i], { }, stdosl))
+            return false;
+    }
+    const struct {
+        int osl, llvm;
+        bool lazy, local;
+    } variants[] = { { 0, 10, true, false },
+                     { 0, 10, false, false },
+                     { 2, 10, true, true },
+                     { 2, 3, false, true } };
+    for (const auto& variant : variants) {
+        HartUserdataServices renderer;
+        auto check = [&]() {
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", variant.osl);
+            ss.attribute("llvm_optimize", variant.llvm);
+            ss.attribute("lazy_userdata", int(variant.lazy));
+            ss.attribute("max_hart_groupdata_alloc", variant.local ? 4096 : 0);
+            ss.attribute("error_repeats", 1);
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_producer", oso[0]));
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_consumer", oso[1]));
+            const float shared = 2, other_shared = 5, changed_shared = 11;
+            const int count = 3, changed_count = 17;
+            const float tint[]         = { .125f, .25f, .5f };
+            const float changed_tint[] = { 2, 4, 8 };
+            const float weights[] = { 1, 2 }, changed_weights[] = { 4, 9 };
+            const float basis[]         = { 1, 0, 0, 0, 0, 1, 0, 0,
+                                            0, 0, 1, 0, 0, 0, 0, 1 };
+            const float changed_basis[] = { 2, 0, 0, 0, 0, 3, 0, 0,
+                                            0, 0, 4, 0, 0, 0, 0, 5 };
+            struct {
+                int layer;
+                InteractiveField field;
+                const void* initial;
+                const void* changed;
+            } fields[] = {
+                { 0, { "shared", TypeFloat }, &shared, &changed_shared },
+                { 0, { "count", TypeInt }, &count, &changed_count },
+                { 0, { "tint", TypeColor }, tint, changed_tint },
+                { 0,
+                  { "weights", TypeDesc(TypeDesc::FLOAT, 2) },
+                  weights,
+                  changed_weights },
+                { 0, { "basis", TypeMatrix }, basis, changed_basis },
+                { 1, { "shared", TypeFloat }, &other_shared, &changed_shared },
+            };
+            auto group = ss.ShaderGroupBegin("hart_test_group");
+            // The master supplies interpolation, the instance adds interaction.
+            OIIO_CHECK_ASSERT(ss.Parameter("shared", TypeFloat, &shared,
+                                           ParamHints::interactive));
+            OIIO_CHECK_ASSERT(
+                ss.Shader("surface", "hart_producer", "producer"));
+            OIIO_CHECK_ASSERT(
+                ss.Shader("surface", "hart_consumer", "consumer"));
+            OIIO_CHECK_ASSERT(
+                ss.ConnectShaders("producer", "value", "consumer", "value"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("consumer.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "Combined userdata compilation:\n{}",
+                      errors.messages);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+            OIIO_CHECK_EQUAL(renderer.arena.allocations, 1);
+            OIIO_CHECK_EQUAL(renderer.arena.copies.size(), 1);
+            check_module(ss, *group, arch,
+                         { "osl_hart_get_userdata", "rs_hart_get_userdata" },
+                         variant.llvm, true, true, false, 2, false, true);
+            if (variant.llvm == 10)
+                OIIO_CHECK_ASSERT(check_userdata_ir(ss, *group,
+                                                    renderer.requests, true,
+                                                    variant.lazy, false));
+            int allocated = -1, group_size = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "hart_groupdata_alloc",
+                                              allocated));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                              "llvm_groupdata_size",
+                                              group_size));
+            OIIO_CHECK_ASSERT(group_size > 0 && group_size <= 4096);
+            OIIO_CHECK_EQUAL(allocated, variant.local ? group_size : 0);
+            size_t extent = 0;
+            for (auto& entry : fields) {
+                auto& field = entry.field;
+                const int offset
+                    = group->interactive_param_offset(entry.layer,
+                                                      ustring(field.name));
+                OIIO_CHECK_ASSERT(offset >= 0);
+                if (offset < 0)
+                    return false;
+                field.offset = size_t(offset);
+                for (const auto& symbol : group->layer(entry.layer)->symbols())
+                    if (symbol.name() == field.name) {
+                        OIIO_CHECK_ASSERT(
+                            symbol.interpolated() && symbol.interactive()
+                            && !symbol.lockgeom() && !symbol.is_constant());
+                        OIIO_CHECK_ASSERT(symbol.typespec().simpletype()
+                                          == field.type);
+                        field.extent = symbol.derivsize();
+                    }
+                OIIO_CHECK_ASSERT(field.extent >= field.type.size());
+                extent = std::max(extent, field.offset + field.extent);
+            }
+            OIIO_CHECK_ASSERT(fields[0].field.offset != fields[5].field.offset);
+            OIIO_CHECK_EQUAL(renderer.arena.requested_size, extent);
+            if (!extent || extent > 4096
+                || renderer.arena.requested_size != extent)
+                return false;
+            std::vector<uint8_t> expected(extent, 0);
+            for (const auto& entry : fields)
+                std::memcpy(expected.data() + entry.field.offset, entry.initial,
+                            entry.field.type.size());
+            const void* artifact = nullptr;
+            uint64_t size        = 0;
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                              TypeDesc::PTR, &artifact));
+            OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode_size",
+                                              TypeUInt64, &size));
+            if (!artifact || !size)
+                return false;
+            const std::string original(static_cast<const char*>(artifact),
+                                       size);
+            const size_t requests = renderer.requests.size();
+            auto unchanged        = [&]() {
+                const void* current   = nullptr;
+                uint64_t current_size = 0;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "hart_bitcode",
+                                                  TypeDesc::PTR, &current));
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "hart_bitcode_size",
+                                                  TypeUInt64, &current_size));
+                OIIO_CHECK_EQUAL(current, artifact);
+                OIIO_CHECK_EQUAL(current_size, size);
+                if (current && current_size == size)
+                    OIIO_CHECK_ASSERT(
+                        string_view(static_cast<const char*>(current), size)
+                        == string_view(original));
+                OIIO_CHECK_EQUAL(renderer.requests.size(), requests);
+                OIIO_CHECK_EQUAL(renderer.host_lookups, 0);
+                void* host = nullptr;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "interactive_params",
+                                                  TypeDesc::PTR, &host));
+                OIIO_CHECK_ASSERT(host);
+                if (host)
+                    OIIO_CHECK_EQUAL(std::memcmp(host, expected.data(), extent),
+                                     0);
+            };
+            auto device_matches = [&]() {
+                void* device = nullptr;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "device_interactive_params",
+                                                  TypeDesc::PTR, &device));
+                OIIO_CHECK_EQUAL(device, renderer.arena.storage.get());
+                OIIO_CHECK_ASSERT(device);
+                if (device)
+                    OIIO_CHECK_EQUAL(std::memcmp(device, expected.data(),
+                                                 extent),
+                                     0);
+                unchanged();
+            };
+            auto update = [&](size_t index, const void* value) {
+                const auto& entry = fields[index];
+                OIIO_CHECK_ASSERT(
+                    ss.ReParameter(*group,
+                                   entry.layer ? "consumer" : "producer",
+                                   entry.field.name, entry.field.type, value));
+                std::memcpy(expected.data() + entry.field.offset, value,
+                            entry.field.type.size());
+                device_matches();
+            };
+            device_matches();
+            for (size_t i = 0; i < std::size(fields); ++i)
+                update(i, fields[i].changed);
+            for (size_t i = 0; i < std::size(fields); ++i)
+                update(i, fields[i].initial);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            // Damage a default upload, then repair it by updating another layer.
+            const int before         = errors.errors;
+            renderer.arena.fail_copy = true;
+            OIIO_CHECK_ASSERT(!ss.ReParameter(*group, "producer", "weights",
+                                              fields[3].field.type,
+                                              changed_weights));
+            OIIO_CHECK_EQUAL(errors.errors, before + 1);
+            OIIO_CHECK_ASSERT(
+                OIIO::Strutil::contains(errors.last_error,
+                                        "failed to upload interactive"));
+            OIIO_CHECK_ASSERT(std::memcmp(renderer.arena.storage.get(),
+                                          expected.data(), extent)
+                              != 0);
+            unchanged();
+            void* invalid = &renderer;
+            OIIO_CHECK_ASSERT(!ss.getattribute(group.get(),
+                                               "device_interactive_params",
+                                               TypeDesc::PTR, &invalid));
+            OIIO_CHECK_ASSERT(!invalid);
+            renderer.arena.fail_copy = false;
+            update(5, &changed_shared);
+            OIIO_CHECK_EQUAL(renderer.arena.copies.back().offset, 0);
+            OIIO_CHECK_EQUAL(renderer.arena.copies.back().size, extent);
+            update(5, &other_shared);
+            ss.optimize_group(group.get(), nullptr);
+            device_matches();
+            OIIO_CHECK_EQUAL(errors.errors, before + 2);
+            OIIO_CHECK_EQUAL(renderer.arena.allocations, 1);
+            return true;
+        };
+        const int before = unit_test_failures;
+        OIIO_CHECK_ASSERT(check());
+        OIIO_CHECK_EQUAL(renderer.arena.frees,
+                         renderer.arena.successful_allocations);
+        OIIO_CHECK_ASSERT(!renderer.arena.storage);
+        if (before != unit_test_failures)
+            print(stderr,
+                  "Combined checks failed (OSL {}, LLVM {}, lazy {}, "
+                  "local {})\n",
+                  variant.osl, variant.llvm, variant.lazy, variant.local);
+    }
+    for (int optimize : { 0, 2 }) {
+        HartUserdataServices renderer;
+        {
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", optimize);
+            ss.attribute("llvm_optimize", 10);
+            OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_test", oso[2]));
+            auto group       = ss.ShaderGroupBegin("hart_test_group");
+            const float gain = 2.5f;
+            OIIO_CHECK_ASSERT(ss.Parameter("gain", TypeFloat, &gain,
+                                           ParamHints::interactive));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            const SymLocationDesc output("layer0.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(group.get(), { &output, 1 });
+            ss.optimize_group(group.get(), nullptr);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch,
+                         { "osl_hart_get_userdata", "rs_hart_get_userdata" },
+                         10, false, false, false, 0, false, true);
+            OIIO_CHECK_ASSERT(check_userdata_ir(ss, *group, renderer.requests,
+                                                false, false, false));
+        }
+        OIIO_CHECK_EQUAL(renderer.arena.frees,
+                         renderer.arena.successful_allocations);
+        OIIO_CHECK_ASSERT(!renderer.arena.storage);
+    }
+    const struct {
+        string_view declaration, error;
+    } rejected[] = {
+        { "string value=\"x\" [[int interpolated=1,int interactive=1]]",
+          "must be a numeric input" },
+        { "output float value=1 [[int interpolated=1,int interactive=1]]",
+          "must be a numeric input" },
+        { "closure color value=0 [[int interpolated=1,int interactive=1]]",
+          "cannot be closure-based" },
+        { "float value=u [[int interpolated=1,int interactive=1]]",
+          "requires a constant default or an instance value" },
+    };
+    for (const auto& test : rejected) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(
+                fmtformat("shader hart_combined_bad({},output color Cout=0)"
+                          "{{ Cout=color(u,v,0); }}",
+                          test.declaration),
+                bytecode, { }, stdosl))
+            return false;
+        HartUserdataServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.attribute("hart_arch", arch);
+        auto group = make_group(ss, bytecode);
+        check_rejected_group(ss, *group, errors, test.error);
+        OIIO_CHECK_EQUAL(renderer.arena.allocations, 0);
         OIIO_CHECK_ASSERT(renderer.requests.empty());
     }
     return true;
@@ -10421,6 +10798,14 @@ check_texture_compatibility_modules(string_view arch, string_view stdosl)
           "hart_texture_alpha_4.exr", ParamHints::interpolated },
         { "string filename=\"hart-test-texture.exr\"", "", "filename",
           "hart_texture_alpha_4.exr", ParamHints::interactive },
+        { "string filename=\"hart-test-texture.exr\" "
+          "[[int interpolated=1,int interactive=1]]",
+          "", "filename", nullptr, ParamHints::none, false,
+          "must be a numeric input" },
+        { "string filename=\"hart-test-texture.exr\"", "", "filename",
+          "hart_texture_alpha_4.exr",
+          ParamHints::interpolated | ParamHints::interactive, false,
+          "must be a numeric input" },
         { "string value=\"hart-test-texture.exr\"", "", "value", nullptr,
           ParamHints::none, true },
         { "string filename=\"missing.exr\"", "", "filename", nullptr,
@@ -13364,6 +13749,7 @@ main(int argc, char* argv[])
         || !check_explicit_entry_modules(arch, argv[2], oso[0], oso[5])
         || !check_interactive_modules(arch, argv[2])
         || !check_userdata_modules(arch, argv[2])
+        || !check_interpolated_interactive_modules(arch, argv[2])
         || !check_attribute_modules(arch, argv[2])
         || !check_renderer_library_modules(arch, argv[2], argv[4], argv[5],
                                            oso[0])

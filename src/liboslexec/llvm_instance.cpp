@@ -1028,7 +1028,27 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
     // Only generate init_ops or default assignment when userdata pre-placement
     // is not found
     if (symloc == nullptr) {
-        if (sym.has_init_ops() && sym.valuesource() == Symbol::DefaultVal) {
+        if (hart_interactive_default(sym)) {
+            const int offset = group().interactive_param_offset(layer(),
+                                                                sym.name());
+            if (offset < 0 || size_t(offset) > group().m_interactive_arena_size
+                || size_t(sym.size())
+                       > group().m_interactive_arena_size - size_t(offset)) {
+                shadingcontext()->errorfmt(
+                    "HART: invalid interactive default arena range for '{}'",
+                    sym.name());
+                m_llvm_codegen_failed = true;
+                if (after_userdata_block)
+                    ll.op_branch(after_userdata_block);
+                return;
+            }
+            llvm::Value* source = ll.offset_ptr(m_llvm_interactive_params_ptr,
+                                                offset);
+            ll.op_memcpy(llvm_void_ptr(sym), source, sym.size());
+            if (sym.has_derivs())
+                llvm_zero_derivs(sym);
+        } else if (sym.has_init_ops()
+                   && sym.valuesource() == Symbol::DefaultVal) {
             // Handle init ops.
             build_llvm_code(sym.initbegin(), sym.initend());
         } else {
@@ -1767,11 +1787,11 @@ BackendLLVM::build_llvm_instance(bool groupentry)
             continue;
         // Skip if it's an interpolated (userdata) parameter and we're
         // initializing them lazily, or if it's an interactively-adjusted
-        // parameter.
+        // parameter. HART's combined parameters still resolve per point.
         if ((s.symtype() == SymTypeParam || s.symtype() == SymTypeOutputParam)
             && !s.typespec().is_closure() && !s.connected()
             && !s.connected_down()
-            && (s.interactive()
+            && ((s.interactive() && !hart_interactive_default(s))
                 || (s.interpolated() && shadingsys().lazy_userdata())))
             continue;
         // Set initial value for params (may contain init ops)

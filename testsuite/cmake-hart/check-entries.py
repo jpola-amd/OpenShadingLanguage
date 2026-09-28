@@ -20,7 +20,7 @@ args = parser.parse_args()
 testshade = str(Path(args.testshade).resolve())
 oslc = str(Path(args.oslc).resolve())
 env = {**os.environ, "TESTSHADE_OPTIX": "0", "TESTSHADE_BATCHED": "0",
-       "TESTSHADE_RS_BITCODE": "0"}
+       "TESTSHADE_RS_BITCODE": "0", "TESTSHADE_HART": "0", "TESTSHADE_FUSED": "0"}
 root = Path.cwd() / ("hart-entries-" + uuid.uuid4().hex)
 root.mkdir()
 sources = {

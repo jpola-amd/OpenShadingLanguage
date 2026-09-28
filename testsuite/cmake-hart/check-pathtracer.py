@@ -25,7 +25,8 @@ lighting = len(sys.argv) == 6 and sys.argv[5] == "--lighting"
 volumes = len(sys.argv) == 6 and sys.argv[5] == "--volumes"
 textures = len(sys.argv) == 6 and sys.argv[5] == "--textures"
 env = os.environ.copy()
-for key in ("TESTSHADE_OPTIX", "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
+for key in ("TESTSHADE_OPTIX", "TESTSHADE_HART", "TESTSHADE_FUSED",
+            "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
     env.pop(key, None)
 flags = {
     "split": ["--llvm_opt", "3"],
@@ -37,8 +38,9 @@ flags = {
 width, height = 16, 12
 
 
-def run(args, root, expected=0):
-    result = subprocess.run(args, cwd=root, env=env, stdout=subprocess.PIPE,
+def run(args, root, expected=0, extra_env=None):
+    result = subprocess.run(args, cwd=root, env={**env, **(extra_env or {})},
+                            stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=360)
     print(result.stdout, end="")
     if result.returncode != expected:
@@ -793,6 +795,22 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     cpu = render("emission", False)
     gpu = render("emission", True, repeat=True)
     compare(gpu, cpu)
+    environment_image = root / "emission-environment.pfm"
+    environment = {"TESTSHADE_HART": "1",
+                   "TESTSHADE_FUSED": str(int(mode in ("fused", "fused-local")))}
+    output = run([renderer, "-v"] + common
+                 + [flag for flag in flags if flag != "--hart-fused"]
+                 + ["--hart-bounces", "1", "emission.xml", str(environment_image)],
+                 root, extra_env=environment)
+    compare(pixels(environment_image), cpu)
+    compiled = re.search(r"HART compiled (\d+) materials, (\d+) callables", output)
+    entries = 1 if mode in ("fused", "fused-local") else 2
+    assert compiled and int(compiled[2]) == int(compiled[1]) * entries, output
+    assert "HART path tracer rendered" in output, output
+    conflict_image = root / "environment-conflict.pfm"
+    output = run([renderer, "emission.xml", str(conflict_image)], root, 1,
+                 {**environment, "TESTSHADE_OPTIX": "1"})
+    assert "Invalid HART options" in output and not conflict_image.exists(), output
     assert min(gpu) == 0 and max(gpu) > 0.4
     assert len(set(round(v, 4) for v in gpu)) > 20
     compare(render("furnace", True, bounces=0),

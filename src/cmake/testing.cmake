@@ -132,7 +132,8 @@ macro (add_one_testsuite testname testsrcdir)
         set_tests_properties (${testname} PROPERTIES LABELS noise
                               PROCESSORS 2 COST 4)
     endif ()
-    if (${testname} MATCHES "optix")
+    if (${testname} MATCHES "optix"
+        AND NOT "${testname}" MATCHES "\\.hart($|\\.)")
         set_tests_properties (${testname} PROPERTIES LABELS optix)
         if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "10.0")
             # Make sure libnvrtc-builtins.so is reachable
@@ -147,6 +148,11 @@ macro (add_one_testsuite testname testsrcdir)
         # long, so give them a higher cost and timeout.
         set_tests_properties (${testname} PROPERTIES LABELS batchregression
                               COST 15 TIMEOUT ${OSL_TEST_BIG_TIMEOUT})
+    endif ()
+    if ("${testname}" MATCHES "\\.hart($|\\.)")
+        set_property (TEST ${testname} APPEND PROPERTY LABELS hart gpu)
+        set_tests_properties (${testname} PROPERTIES RUN_SERIAL TRUE
+                              TIMEOUT ${OSL_TEST_BIG_TIMEOUT})
     endif ()
 endmacro ()
 
@@ -244,6 +250,29 @@ macro ( TESTSUITE )
               add_one_testsuite ("${_testname}.optix.fused" "${_testsrcdir}"
                                  ENV TESTSHADE_OPT=2 TESTSHADE_OPTIX=1 TESTSHADE_FUSED=1 )
             endif()
+        endif ()
+
+        # HART GPU tests require both an explicit configure-time opt-in and a
+        # marker. Reuse the fixture's commands and references without runtime
+        # skips or OptiX-specific comparison thresholds.
+        if (OSL_USE_HART AND USE_LLVM_BITCODE
+            AND "$ENV{TESTSUITE_HART}" STREQUAL "1"
+            AND EXISTS "${_testsrcdir}/HART")
+            if (NOT EXISTS "${_testsrcdir}/OPTIMIZEONLY")
+                add_one_testsuite ("${_testname}.hart" "${_testsrcdir}"
+                                   ENV TESTSHADE_HART=1 TESTSHADE_OPT=0
+                                       TESTSHADE_LLVM_OPT=10 TESTSHADE_FUSED=0)
+            endif ()
+            if (NOT EXISTS "${_testsrcdir}/NOOPTIMIZE")
+                add_one_testsuite ("${_testname}.hart.opt" "${_testsrcdir}"
+                                   ENV TESTSHADE_HART=1 TESTSHADE_OPT=2
+                                       TESTSHADE_LLVM_OPT=3 TESTSHADE_FUSED=0)
+                if (NOT EXISTS "${_testsrcdir}/NOFUSED")
+                    add_one_testsuite ("${_testname}.hart.fused" "${_testsrcdir}"
+                                       ENV TESTSHADE_HART=1 TESTSHADE_OPT=2
+                                           TESTSHADE_LLVM_OPT=3 TESTSHADE_FUSED=1)
+                endif ()
+            endif ()
         endif ()
 
         if (OSL_BUILD_BATCHED)

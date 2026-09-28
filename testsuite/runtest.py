@@ -68,7 +68,7 @@ else :
 
 refdir = "ref/"
 mytest = os.path.split(os.path.abspath(os.getcwd()))[-1]
-if str(mytest).endswith('.opt') or str(mytest).endswith('.optix') :
+if str(mytest).endswith(('.opt', '.optix', '.hart', '.hart.fused')) :
     mytest = mytest.split('.')[0]
 test_source_dir = os.getenv('OSL_TESTSUITE_SRC',
                             os.path.join(OSL_TESTSUITE_ROOT, mytest))
@@ -260,6 +260,20 @@ def oiiodiff (fileA, fileB, extraargs="", silent=True, concat=True) :
     return command
 
 
+def hart_command_options () :
+    if not int(os.environ.get('TESTSHADE_HART') or 0) :
+        return ""
+    for backend in ('TESTSHADE_OPTIX', 'TESTSHADE_BATCHED',
+                    'TESTSHADE_RS_BITCODE') :
+        if int(os.environ.get(backend) or 0) :
+            raise RuntimeError(
+                "TESTSHADE_HART and {} are mutually exclusive".format(backend))
+    options = "--hart "
+    if int(os.environ.get('TESTSHADE_FUSED') or 0) :
+        options += "--hart-fused "
+    return options
+
+
 # Construct a command that run testshade with the specified arguments,
 # appending output to the file "out.txt".
 def testshade (args) :
@@ -267,19 +281,22 @@ def testshade (args) :
         testshadename = os.environ['OSL_TESTSHADE_NAME'] + " "
     else :
         testshadename = osl_app("testshade")
-    return (testshadename + args + redirect + " ;\n")
+    return (testshadename + hart_command_options() + args + redirect + " ;\n")
 
 
 # Construct a command that run testrender with the specified arguments,
 # appending output to the file "out.txt".
 def testrender (args) :
     os.environ["optix_log_level"] = "0"
-    return (osl_app("testrender") + " " + args + redirect + " ;\n")
+    return (osl_app("testrender") + " " + hart_command_options()
+            + args + redirect + " ;\n")
 
 
 # Construct a command that run testoptix with the specified arguments,
 # appending output to the file "out.txt".
 def testoptix (args) :
+    if hart_command_options() :
+        raise RuntimeError("testoptix cannot run with TESTSHADE_HART")
     # Disable OptiX logging to prevent messages from the library from
     # appearing in the program output.
     os.environ["optix_log_level"] = "0"
@@ -346,11 +363,20 @@ def runtest (command, outputs, failureok=0, failthresh=0, failpercent=0, regress
             # We will first compare out to ref/out, and if that fails, we
             # will compare it to everything else with the same extension in
             # the ref directory.  That allows us to have multiple matching
-            # variants for different platforms, etc.
+            # variants for different platforms, etc. A dedicated HART reference
+            # is exclusive so diagnostic metadata cannot disappear unnoticed.
             if regression != None:
                 testfiles = ["baseline/"+out]
-            else :                     
+            else :
                 testfiles = ["ref/"+out] + glob.glob (os.path.join ("ref", "*"+extension))
+                hartref = os.path.join("ref", os.path.splitext(out)[0]
+                                       + "-hart" + extension)
+                if (int(os.environ.get('TESTSHADE_HART') or 0)
+                        and os.path.isfile(hartref)) :
+                    testfiles = [hartref]
+                else :
+                    testfiles = [f for f in testfiles
+                                 if not os.path.splitext(f)[0].endswith("-hart")]
             for testfile in (testfiles) :
                 # print ("comparing " + out + " to " + testfile)
                 if extension == ".tif" or extension == ".exr" :

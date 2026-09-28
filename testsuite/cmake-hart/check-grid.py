@@ -25,6 +25,8 @@ if bool(args.callable_grid) != bool(args.callable_module):
     parser.error("--callable-grid and --callable-module must be supplied together")
 env = os.environ.copy()
 env["TESTSHADE_OPTIX"] = "0"
+env["TESTSHADE_HART"] = "0"
+env["TESTSHADE_FUSED"] = "0"
 
 
 def run(arguments, error=None, forbidden=()):
