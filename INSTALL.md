@@ -312,6 +312,12 @@ Use `layer.parameter` to disambiguate layers; unqualified names select the last
 matching layer. Struct fields retain their dotted parameter names. Whole
 structs, strings and closures are not image outputs. As on the CPU, shader
 output arrays must have a fixed size (unsized input arrays remain supported).
+Generated grids can construct the supported diffuse/emission closure trees,
+including closure parameters and layer connections. Groups that need closures
+use a separate raygen with a 1024-byte caller-owned pool per point, shared by
+all entries until the call sequence returns. Numeric-only groups retain the
+pool-free path. Pool exhaustion reports a device error and publishes no image;
+closure pointers are never copied into image outputs.
 
 `--center` places `u`, `v` and `P` at pixel centers and uses `1/width` and
 `1/height` UV derivatives. As in CPU testshade, `P` derivatives retain the
@@ -946,7 +952,7 @@ explicit option precedence, two simultaneous textures with swapped bindings,
 repeated rendering, and missing/empty resource failures without image output.
 Their CPU oracles explicitly select matching magnifying samplers.
 
-`Dz`, unlisted noise forms, closures,
+`Dz`, unlisted noise forms and closure constructors,
 tracing, shader printing, writes to read-only or unlisted shader globals,
 other globals such as `Ps`, unlisted coordinate spaces and transforms,
 string allocation and character operations,
@@ -1108,7 +1114,8 @@ Unsized input arrays use the existing group-resolved parameter length; an empty
 initializer retains OSL's one-zero-element default. Unresolved or zero-length
 storage cannot be indexed. Differentiable members retain
 their normal derivative storage. Closure aggregates require `HARTClosures`
-as well as the array capability; ordinary RGB `--hart` still rejects closures.
+as well as the array capability; generated grids provide bounded caller-owned
+storage but still reject closure-valued image outputs.
 Recompile older shaders with arrays-of-struct parameters to include their
 struct-field metadata in the bytecode; missing metadata is rejected before
 launch rather than losing connected values.
@@ -1399,7 +1406,7 @@ not validation of the NVIDIA backend.
 
 ### Inspecting generated HART closures
 
-The experimental closure path is separate from ordinary RGB `testshade --hart`
+Numerical closure-tree inspection is separate from ordinary RGB `testshade --hart`
 output. A renderer advertising `HARTClosures` may compile scalar closure values,
 closure connections and `Ci`, using registered `diffuse(N)` and `emission()`
 components, addition, scalar/color multiplication and null closures. Without

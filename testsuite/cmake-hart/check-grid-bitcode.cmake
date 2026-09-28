@@ -29,6 +29,8 @@ foreach (bc IN LISTS GENERATED_GRID_FILES)
     if (NOT ir MATCHES "target triple = \"amdgcn-amd-amdhsa\""
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_generated\\("
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_generated_fused\\("
+        OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_generated_closures\\("
+        OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_generated_closures_fused\\("
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_closures\\("
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_closures_fused\\("
         OR NOT ir MATCHES "define [^\n]*@__raygen__testshade_closure_pool\\("

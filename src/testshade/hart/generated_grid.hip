@@ -95,6 +95,35 @@ __raygen__testshade_generated_fused()
 
 
 
+template<bool Fused>
+__device__ void
+shade_closures()
+{
+    const auto& params = testshade_hart_params;
+    alignas(16) unsigned char storage[testshade::HartClosureCapacity];
+    if (params.closure_capacity > sizeof(storage)) {
+        atomicOr(params.textures->errors,
+                 testshade::HartClosureAllocationFailed);
+        return;
+    }
+    testshade::HartClosurePool pool { storage, params.closure_capacity };
+    testshade_generated<Fused>(&pool);
+}
+
+
+
+extern "C" __global__ void
+__raygen__testshade_generated_closures()
+{ shade_closures<false>(); }
+
+
+
+extern "C" __global__ void
+__raygen__testshade_generated_closures_fused()
+{ shade_closures<true>(); }
+
+
+
 __device__ bool
 closure_contains(const testshade::HartClosurePool& pool, const void* ptr,
                  size_t bytes)

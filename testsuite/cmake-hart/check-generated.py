@@ -4334,7 +4334,7 @@ try:
                          or args.fused_local or args.fused_benchmark):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
-            ("hart_closure", "does not support parameter"),
+            ("hart_closure", "RGB color"),
             ("hart_string", "unsupported operation 'strlen'"),
             ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),
         ):
@@ -4349,7 +4349,7 @@ try:
              "--shader", "hart_sine", "surface", "-v"],
             "HART: unsupported shader global 'Ps'")
         # Even an unused producer must be validated before optimization.
-        for shader in ("hart_closure", "hart_string", "hart_texture"):
+        for shader in ("hart_string", "hart_texture"):
             run(["--hart", "--shader", shader, "producer",
                  "--shader", "hart_sine", "consumer", "-v"],
                 "HART: texture requires explicit closest or linear interpolation"

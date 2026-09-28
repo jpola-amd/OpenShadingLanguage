@@ -2027,7 +2027,7 @@ test_shade(int argc, const char* argv[])
     std::string hart_arch;
 #if OSL_TESTSHADE_HART
     if (use_hart) {
-        rend = testshade_hart_renderer(hart.device, hart_arch);
+        rend = testshade_hart_renderer(hart.device, hart_arch, true);
         if (!rend)
             return EXIT_FAILURE;
     } else

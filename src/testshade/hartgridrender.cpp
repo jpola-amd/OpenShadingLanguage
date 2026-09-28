@@ -1030,18 +1030,8 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         return false;
     }
     std::vector<OSLQuery> queries;
-    for (int layer = 0; layer < layers; ++layer) {
+    for (int layer = 0; layer < layers; ++layer)
         queries.push_back(shadingsys.oslquery(group, layer));
-        for (const auto& parameter : queries.back()) {
-            if (parameter.isclosure) {
-                err.errorfmt(
-                    "Generated HART mode does not support parameter '{}' "
-                    "of type '{}'",
-                    parameter.name, parameter.type_name());
-                return false;
-            }
-        }
-    }
     std::vector<ustring> layer_names(layers);
     if (!shadingsys.getattribute(&group, "layer_names",
                                  TypeDesc(TypeDesc::STRING, layers),
@@ -1301,9 +1291,12 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                                      count)
         || !textures.prepare(shadingsys))
         return false;
-    int entry_count = 0;
+    int entry_count = 0, closure_count = 0, unknown_closures = 0;
     void* interactive = nullptr;
     if (!shadingsys.getattribute(&group, "num_entry_layers", entry_count)
+        || !shadingsys.getattribute(&group, "num_closures_needed", closure_count)
+        || !shadingsys.getattribute(&group, "unknown_closures_needed",
+                                    unknown_closures)
         || !shadingsys.getattribute(&group, "device_interactive_params",
                                     TypeDesc::PTR, &interactive)) {
         err.errorfmt("Cannot retrieve compiled HART runtime bindings");
@@ -1312,10 +1305,17 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     HartGridRenderer runtime(err);
     const char* entry = options.fused ? "__raygen__testshade_generated_fused"
                                       : "__raygen__testshade_generated";
+    const size_t closure_capacity = closure_count || unknown_closures
+                                        ? testshade::HartClosureCapacity
+                                        : 0;
+    if (closure_capacity)
+        entry = options.fused ? "__raygen__testshade_generated_closures_fused"
+                              : "__raygen__testshade_generated_closures";
     if (verbose) {
         err.infofmt("HART callable mode: {}",
                     options.fused ? "fused" : "split");
         err.infofmt("HART output arena: {} bytes", count * stride);
+        err.infofmt("HART closure pool: {} bytes per point", closure_capacity);
     }
     if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
         || !runtime.load(modules, entry, callables, options.runstats))
@@ -1323,11 +1323,13 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     std::vector<std::byte> pixels(count * stride);
     const Matrix44 transforms[] = { object2common, object2common.inverse(),
                                     shader2common, shader2common.inverse() };
-    const bool rendered         = runtime.render(
-        width, height, iterations, warmup, pixels, size_t(group_size),
-        size_t(group_alignment), raytype, &textures, transforms,
-        options.fused ? size_t(local_groupdata) : 0, 0, entry_count > 0,
-        interactive, options.update_parameters, options.pixelcenters);
+    const bool rendered
+        = runtime.render(width, height, iterations, warmup, pixels,
+                         size_t(group_size), size_t(group_alignment), raytype,
+                         &textures, transforms,
+                         options.fused ? size_t(local_groupdata) : 0,
+                         closure_capacity, entry_count > 0, interactive,
+                         options.update_parameters, options.pixelcenters);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

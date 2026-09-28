@@ -1,0 +1,3 @@
+Compiled arrayparam.osl -> arrayparam.oso
+Compiled simple.osl -> simple.oso
+HART shader 'simple' (simple.osl:9, point 0): 1.000000 0.000000 1.000000
