@@ -5,3 +5,4 @@
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 command = testshade("test")
+relative_source_paths = True

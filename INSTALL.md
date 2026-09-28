@@ -1174,7 +1174,9 @@ names, source line and the explicit callable shade index; host decoding resolves
 real hashes, including empty and connected strings. Reports are drained after
 each synchronized launch, including warmup. Each contextual report is newline
 terminated, even when its format has no final newline. Ordering between shading
-points is unspecified.
+points follows the full 64-bit shade index. Within each point, reports retain
+their execution order, including reports from connected layers. Host ordering
+does not change the bounded device storage or diagnostic payload.
 
 Formats must be literal strings. Numeric width (at most 1024), precision (at most
 128), ordinary flags and OSL's `cdefgimnopsvxX` conversions are accepted, with at
@@ -1216,6 +1218,10 @@ An optional `out-fused-hart.txt` is exclusive to optimized fused dispatch,
 for example when it preserves a different floating-point signed zero. OSL 0
 keeps precedence over this variant. CPU reference selection excludes all HART
 variants; no numerical tolerance or diagnostic metadata is removed.
+Fixtures with included-header diagnostics may opt into `relative_source_paths`:
+text comparison removes only the current test directory prefix from HART
+source paths. Filenames, line numbers, point indices and payloads remain checked,
+and the raw diagnostic output is unchanged.
 
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
 which compares arithmetic, `sin(u+v)`, and straight-line and conditional

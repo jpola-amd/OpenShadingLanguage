@@ -31,11 +31,13 @@ public:
         OIIO_CHECK_EQUAL(code, EH_ERROR);
         ++errors;
         last_message = message;
+        messages.push_back(message);
         OIIO::print("HART texture diagnostic: {}\n", message);
     }
 
     int errors = 0;
     std::string last_message;
+    std::vector<std::string> messages;
 };
 
 
@@ -463,6 +465,30 @@ test_diagnostics()
     buffer->count = 1;
     record        = valid;
     reject_record("HART shader 'unit' (<unknown>:0, point 0): payload 7");
+    const std::array<uint64_t, 5> indices { 2, uint64_t(1) << 40, 2, 0, 0 };
+    const std::array<uint32_t, 5> expected { 3, 4, 0, 2, 1 };
+    buffer->count = uint32_t(indices.size());
+    for (uint32_t i = 0; i < buffer->count; ++i) {
+        buffer->records[i]             = valid;
+        buffer->records[i].shade_index = indices[i];
+        buffer->records[i].line        = 10 - i;
+    }
+    if (!hip_ok(hipMemcpy(state.diagnostics, buffer.get(), sizeof(*buffer),
+                          hipMemcpyHostToDevice)))
+        return;
+    errors.messages.clear();
+    OIIO_CHECK_ASSERT(!store.check_errors());
+    OIIO_CHECK_EQUAL(errors.messages.size(), expected.size());
+    for (size_t i = 0; i < errors.messages.size() && i < expected.size(); ++i) {
+        const auto& wanted = buffer->records[expected[i]];
+        OIIO_CHECK_EQUAL(
+            errors.messages[i],
+            OIIO::Strutil::fmt::format(
+                "HART shader 'unit' (<unknown>:{}, point {}): payload 7\n",
+                wanted.line, wanted.shade_index));
+    }
+    OIIO_CHECK_ASSERT(store.reset_errors());
+    OIIO_CHECK_ASSERT(store.check_errors());
     OIIO_CHECK_ASSERT(store.clear());
     OIIO_CHECK_ASSERT(store.prepare());
     OIIO_CHECK_ASSERT(store.check_errors());

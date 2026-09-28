@@ -21,8 +21,13 @@ for name, text in (("out.txt", "cpu"), ("out-hart.txt", "gpu"),
                    ("out-fused-hart.txt", "fused")):
     (source / "ref" / name).write_text(text + "\n", encoding="ascii")
 emitter = root / "emit.py"
-emitter.write_text("import os\nprint(os.environ['REFERENCE_PAYLOAD'])\n",
-                   encoding="ascii")
+emitter.write_text(
+    'import os\n'
+    'root = os.getcwd() + os.sep\n'
+    'payload = os.environ["REFERENCE_PAYLOAD"].replace("@TESTDIR@", root)\n'
+    'print(payload.replace("@ESCAPED_TESTDIR@", root.replace("\\\\", "\\\\\\\\")))\n',
+    encoding="ascii",
+)
 command = f'"{sys.executable}" "{emitter}" >> out.txt 2>&1;'
 (source / "run.py").write_text(
     "compile_osl_files = False\ncommand = " + repr(command) + "\n",
@@ -60,6 +65,37 @@ try:
             assert "PASS: " in output and filename in output, output
         else:
             assert "NO MATCH for  out.txt" in output, output
+    (source / "ref" / "out-hart.txt").write_text(
+        "HART shader 'test' (header.h:3, point 0): value\n", encoding="ascii",
+    )
+    path_cases = [
+        (False, "@TESTDIR@header.h", 3, 0, "value", False),
+        (True, "@TESTDIR@header.h", 3, 0, "value", True),
+        (True, "@ESCAPED_TESTDIR@header.h", 3, 0, "value", True),
+        (True, "@TESTDIR@other.h", 3, 0, "value", False),
+        (True, "@TESTDIR@header.h", 4, 0, "value", False),
+        (True, "@TESTDIR@header.h", 3, 1, "value", False),
+        (True, "@TESTDIR@header.h", 3, 0, "wrong", False),
+        (True, "outside/header.h", 3, 0, "value", False),
+        (True, "header.h", 3, 0, "value", True),
+    ]
+    for i, (enabled, filename, line, point, text, matches) in enumerate(path_cases):
+        (source / "run.py").write_text(
+            "compile_osl_files = False\nrelative_source_paths = " + repr(enabled)
+            + "\ncommand = " + repr(command) + "\n", encoding="utf-8",
+        )
+        work = root / ("paths-" + str(i))
+        work.mkdir()
+        payload = f"HART shader 'test' ({filename}:{line}, point {point}): {text}"
+        child_env = dict(env, TESTSHADE_HART="1", TESTSHADE_OPT="2",
+                         TESTSHADE_FUSED="0", REFERENCE_PAYLOAD=payload)
+        result = subprocess.run(
+            [sys.executable, str(testsuite / "runtest.py"), str(work)],
+            cwd=root, env=child_env, capture_output=True, text=True, timeout=30,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode == (0 if matches else 1), output
+        assert ("PASS: " if matches else "NO MATCH for  out.txt") in output, output
     success = True
 finally:
     if success:
@@ -67,4 +103,4 @@ finally:
     else:
         print("Reference-selection failure artifacts retained in", root, flush=True)
 
-print("48 actual runner cases passed: CPU/HART/OSL0/fused references stay exclusive")
+print("57 actual runner cases passed: exclusive references and scoped source paths")

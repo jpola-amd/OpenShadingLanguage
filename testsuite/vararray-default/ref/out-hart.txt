@@ -1,0 +1,10 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:7, point 0): a array length 3
+HART shader 'test' (test.osl:9, point 0):   [0] = 0
+HART shader 'test' (test.osl:9, point 0):   [1] = 1
+HART shader 'test' (test.osl:9, point 0):   [2] = 2.3
+HART shader 'test' (test.osl:14, point 0): b array length 2
+HART shader 'test' (test.osl:16, point 0):   [0] = (9 9 9)
+HART shader 'test' (test.osl:16, point 0):   [1] = (1 2.3 4)
+HART shader 'test' (test.osl:14, point 0): c array length 1
+HART shader 'test' (test.osl:16, point 0):   [0] = (0 0 0)

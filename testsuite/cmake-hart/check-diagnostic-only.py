@@ -216,10 +216,10 @@ try:
             (f"hart_diagnostic_{stage}", f"diagnostic_only_{stage}.osl",
              101 if stage == "producer" else 100, point,
              f"ONLY {stage} {value:.2f}")
-            for _ in range(2) for stage in ("producer", "consumer")
-            for point, value in enumerate((1, 2))
+            for _ in range(2) for point, value in enumerate((1, 2))
+            for stage in ("producer", "consumer")
         ]
-        assert Counter(records(output)) == Counter(expected), output
+        assert records(output) == expected, output
         storage = re.findall(
             r"HART group storage: (\d+) bytes, alignment (\d+), local (\d+) bytes, scratch (\d+) bytes",
             output,

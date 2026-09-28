@@ -1,0 +1,4 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:31, point 0): Dconst = { A:{1, 2}  B:{{21, 22}, 2.71828, [0.25 0.5 0.75]}  C:{{101, 102}, 42.1}}
+HART shader 'test' (test.osl:31, point 0): Dvar   = { A:{1, 2}  B:{{21, 22}, 2.71828, [0.25 0.5 0.75]}  C:{{101, 102}, 42.1}}
+HART shader 'test' (test.osl:31, point 0): Dcopy  = { A:{1, 2}  B:{{21, 22}, 2.71828, [0.25 0.5 0.75]}  C:{{101, 102}, 42.1}}

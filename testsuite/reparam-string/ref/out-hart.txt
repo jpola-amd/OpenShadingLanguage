@@ -1,0 +1,3 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:7, point 0): test_string = initial value
+HART shader 'test' (test.osl:7, point 0): test_string = updated value

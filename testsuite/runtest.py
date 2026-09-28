@@ -101,6 +101,7 @@ idiff_postfilecmd = ""
 skip_diff = int(os.environ.get("OSL_TESTSUITE_SKIP_DIFF", "0"))
 
 filter_re = None
+relative_source_paths = False
 cleanup_on_success = False
 if int(os.getenv('TESTSUITE_CLEANUP_ON_SUCCESS', '0')) :
     cleanup_on_success = True
@@ -163,7 +164,20 @@ def text_diff (fromfile, tofile, diff_file=None, filter_re=None):
     except:
         print ("Unexpected error:", sys.exc_info()[0])
         return -1
-        
+
+    if relative_source_paths:
+        root = os.path.abspath(os.curdir) + os.sep
+        def relative_source(line):
+            context = re.match(r"^HART shader '[^']+' \(", line)
+            if context:
+                start = context.end()
+                for prefix in (root, root.replace("\\", "\\\\")):
+                    if line.startswith(prefix, start):
+                        return line[:start] + line[start + len(prefix):]
+            return line
+        fromlines = [relative_source(line) for line in fromlines]
+        tolines = [relative_source(line) for line in tolines]
+
     diff = difflib.unified_diff(fromlines, tolines, fromfile, tofile,
                                 fromdate, todate)
     # Diff is a generator, but since we need a way to tell if it is

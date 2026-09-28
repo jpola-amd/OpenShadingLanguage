@@ -1,0 +1,8 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:44, point 0): a = 0.2 0.3 0.4 0.5
+HART shader 'test' (test.osl:45, point 0): b = 1 2 3 4
+HART shader 'test' (test.osl:49, point 0): a+b = 1.2 2.3 3.4 4.5
+HART shader 'test' (test.osl:52, point 0): a-b = -0.8 -1.7 -2.6 -3.5
+HART shader 'test' (test.osl:55, point 0): a*b = 0.2 0.6 1.2 2
+HART shader 'test' (test.osl:58, point 0): a/b = 0.2 0.15 0.133333 0.125
+HART shader 'test' (test.osl:61, point 0): -a = -0.2 -0.3 -0.4 -0.5

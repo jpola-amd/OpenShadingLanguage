@@ -183,8 +183,18 @@ struct HartTextureStore::Impl {
                                  hipMemcpyDeviceToHost),
                        "hipMemcpy diagnostics"))
             return false;
+        std::array<uint32_t, HartDiagnosticCapacity> order;
+        for (uint32_t i = 0; i < count; ++i)
+            order[i] = i;
+        std::sort(order.begin(), order.begin() + count,
+                  [&](uint32_t a, uint32_t b) {
+                      const auto left = diagnostic_host->records[a].shade_index;
+                      const auto right = diagnostic_host->records[b].shade_index;
+                      return left < right || (left == right && a < b);
+                  });
         bool success = true;
-        for (uint32_t i = 0; i < count; ++i) {
+        for (uint32_t position = 0; position < count; ++position) {
+            const uint32_t i   = order[position];
             const auto& record = diagnostic_host->records[i];
             auto fail          = [&](string_view reason) {
                 err.errorfmt("HART diagnostic record {}: {}", i, reason);

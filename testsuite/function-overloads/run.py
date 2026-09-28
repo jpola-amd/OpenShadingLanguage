@@ -5,6 +5,7 @@
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
 realruntest = runtest
+relative_source_paths = True
 
 def runtest (command, *args, **kwargs) :
     passed = True
@@ -16,4 +17,3 @@ def runtest (command, *args, **kwargs) :
     return not passed
 
 command = ""
-
