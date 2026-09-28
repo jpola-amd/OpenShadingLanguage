@@ -38,13 +38,23 @@ testshade_generated(testshade::HartClosurePool* closure_pool = nullptr)
         return nullptr;
 
     OSL::ShaderGlobals sg { };
-    sg.u    = size.x == 1 ? 0.5f : float(index.x) / float(size.x - 1);
-    sg.v    = size.y == 1 ? 0.5f : float(index.y) / float(size.y - 1);
-    sg.dudx = 1.0f / float(size.x == 1 ? 1 : size.x - 1);
-    sg.dvdy = 1.0f / float(size.y == 1 ? 1 : size.y - 1);
+    const float grid_dx = 1.0f / float(size.x == 1 ? 1 : size.x - 1);
+    const float grid_dy = 1.0f / float(size.y == 1 ? 1 : size.y - 1);
+    if (params.pixelcenters) {
+        sg.u    = (float(index.x) + 0.5f) / float(size.x);
+        sg.v    = (float(index.y) + 0.5f) / float(size.y);
+        sg.dudx = 1.0f / float(size.x);
+        sg.dvdy = 1.0f / float(size.y);
+    } else {
+        sg.u    = size.x == 1 ? 0.5f : float(index.x) / float(size.x - 1);
+        sg.v    = size.y == 1 ? 0.5f : float(index.y) / float(size.y - 1);
+        sg.dudx = grid_dx;
+        sg.dvdy = grid_dy;
+    }
     sg.P    = OSL::Vec3(sg.u, sg.v, 1.0f);
-    sg.dPdx = OSL::Vec3(sg.dudx, 0.0f, 0.0f);
-    sg.dPdy = OSL::Vec3(0.0f, sg.dvdy, 0.0f);
+    // CPU testshade keeps grid-spaced P derivatives even with --center.
+    sg.dPdx = OSL::Vec3(grid_dx, 0.0f, 0.0f);
+    sg.dPdy = OSL::Vec3(0.0f, grid_dy, 0.0f);
     sg.dPdu = OSL::Vec3(1.0f, 0.0f, 0.0f);
     sg.dPdv = OSL::Vec3(0.0f, 1.0f, 0.0f);
     // Imath's default vector constructor does not initialize its components.

@@ -3991,7 +3991,7 @@ try:
 
     base = ["--hart", "hart_first"]
     for option in (
-        ["--batched"], ["--center"],
+        ["--batched"],
         ["--use_rs_bitcode"],
         ["--no-output-placement"], ["--shadeimage"],
         ["--scaleuv", "2", "2"], ["--offsetuv", "1", "1"],

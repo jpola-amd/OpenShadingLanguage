@@ -30,6 +30,7 @@ struct HartOptions {
     std::string local_groupdata = "0";
     bool has_local_groupdata    = false;
     bool runstats               = false;
+    bool pixelcenters           = false;
     bool has_module = false, has_callables = false, has_entry = false;
     std::vector<std::string> shader_entries;
     std::vector<std::string> entry_outputs;

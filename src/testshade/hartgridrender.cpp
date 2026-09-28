@@ -483,7 +483,8 @@ public:
                 cspan<Matrix44> transforms = { }, size_t local_groupdata = 0,
                 size_t closure_capacity = 0, bool zero_outputs = false,
                 void* interactive                   = nullptr,
-                const std::function<bool()>& update = { })
+                const std::function<bool()>& update = { },
+                bool pixelcenters                   = false)
     {
         const size_t bytes       = pixels.size();
         const size_t params_size = group_alignment
@@ -551,6 +552,7 @@ public:
                           scratch_bytes,
                           count,
                           raytype,
+                          pixelcenters,
                           textures ? textures->device_state() : nullptr,
                           static_cast<const Matrix44*>(m_transforms),
                           closure_capacity,
@@ -822,6 +824,8 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--debug");
     ap.arg("-o %s:VARIABLE %s:FILE");
     ap.arg("-d %s:FORMAT", &format);
+    ap.arg("-od %s:FORMAT", &format);
+    ap.arg("--center");
     ap.arg("--groupname %s:NAME");
     ap.arg("--layer %s:NAME");
     ap.arg("--entry %s:LAYERNAME");
@@ -981,7 +985,7 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          size_t(group_size), size_t(group_alignment), 0,
                          &textures, transforms,
                          options.fused ? size_t(local_groupdata) : 0, capacity,
-                         false, interactive);
+                         false, interactive, { }, options.pixelcenters);
     const bool cleared = runtime.clear();
     return rendered && cleared;
 }
@@ -1319,7 +1323,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         width, height, iterations, warmup, pixels, size_t(group_size),
         size_t(group_alignment), raytype, &textures, transforms,
         options.fused ? size_t(local_groupdata) : 0, 0, entry_count > 0,
-        interactive, options.update_parameters);
+        interactive, options.update_parameters, options.pixelcenters);
     const bool cleared  = runtime.clear();
     if (!rendered || !cleared)
         return false;

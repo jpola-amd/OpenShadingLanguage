@@ -306,10 +306,16 @@ matching layer. Struct fields retain their dotted parameter names. Whole
 structs, strings and closures are not image outputs. As on the CPU, shader
 output arrays must have a fixed size (unsized input arrays remain supported).
 
+`--center` places `u`, `v` and `P` at pixel centers and uses `1/width` and
+`1/height` UV derivatives. As in CPU testshade, `P` derivatives retain the
+grid spacing `1/max(1, dimension-1)`. Without this option, border samples stay
+at zero and one; a one-point axis stays at one half in either mode.
+
 Each point owns one packed record containing each distinct selected symbol,
 in first-request order. Aliases of the same symbol share storage but may write
 different files. Integer printing and integer image buffers retain int32
 values; `-d float`, `-d half`, and `-d uint8` explicitly request file conversion.
+The existing `-od` alias selects the same conversions.
 Arrays and matrices become flattened image channels. Display conversion for
 JPEG/GIF/PNG applies to scalar color outputs, not numeric data outputs.
 `--print` suppresses all image files, and `null` suppresses individual files.

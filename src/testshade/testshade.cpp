@@ -2171,6 +2171,7 @@ test_shade(int argc, const char* argv[])
         setup_transformations(*rend, Mshad, Mobj);
         hart.shader_entries = entrylayers;
         hart.entry_outputs  = entryoutputs;
+        hart.pixelcenters   = pixelcenters;
         if (!reparams.empty()) {
             hart.update_parameters = [&]() {
                 for (const auto& value : reparams)

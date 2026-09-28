@@ -20,6 +20,7 @@ struct HartGeneratedParams {
     uint64_t scratch_bytes;
     uint64_t point_count;
     int raytype;
+    int pixelcenters;
     const HartTextureState* textures;
     const OSL::Matrix44* transforms;
     uint64_t closure_capacity;

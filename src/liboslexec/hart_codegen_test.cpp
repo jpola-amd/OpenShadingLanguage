@@ -5149,6 +5149,7 @@ check_userdata_host_layout()
     OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, scratch_bytes), 24);
     OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, point_count), 32);
     OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, raytype), 40);
+    OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, pixelcenters), 44);
     OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, textures), 48);
     OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, transforms), 56);
     OIIO_CHECK_EQUAL(offsetof(HartGeneratedParams, closure_capacity), 64);
