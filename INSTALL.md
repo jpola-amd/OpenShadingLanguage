@@ -1751,6 +1751,71 @@ Windows searches `System32` before `PATH`, and
 display-driver copies there can be incompatible with the selected SDK.
 Merely adding the SDK to `PATH` does not override those copies.
 
+### Installing and checking a relocated HART build
+
+Shader and PTX data destinations default to paths relative to the installation
+prefix. `cmake --install BUILD --config Release --prefix PREFIX` therefore
+relocates them along with the public headers, libraries, tools and CMake
+exports. An explicit absolute `OSL_SHADER_INSTALL_DIR` or
+`OSL_PTX_INSTALL_DIR` remains an override. Existing build caches may retain
+the old absolute defaults; remove just these two cache entries when
+reconfiguring to adopt the relative defaults. Compiled-in shader/PTX fallback
+paths still refer to the configured prefix; pass an explicit installed shader
+include path to `oslc` after relocation.
+
+The Windows runtime DLLs and native codegen worker are app-local, but this is
+**not an SDK-free deployment**. Cold HART compilation also needs the selected
+HIP SDK's compiler resources. Set `HIP_PATH` to that compatible SDK root,
+not to its `bin` directory. A cached pipeline can hide this dependency; the
+installed check disables caching for generated grid pipelines. Keep the
+selected HART/ROCm development installations available, including any compiler
+resource paths required by that HART build. Do not substitute driver DLLs or
+another ROCm version.
+
+On Linux, HART executables retain the selected SDK runtime paths and gain an
+executable-relative OSL library RPATH (normally `$ORIGIN/../lib`). This respects
+`CMAKE_SKIP_INSTALL_RPATH` and nonstandard `CMAKE_INSTALL_BINDIR` /
+`CMAKE_INSTALL_LIBDIR` layouts. SDK libraries are not bundled on Linux; preserve
+their package layout, including the worker beside the HART library or in its
+sibling `bin` directory. Configuration tests are not a Linux build/run result.
+
+Build the standalone consumer against the **installed** CMake package, not
+build-tree targets, with matching OIIO/Imath dependencies. For example:
+
+```powershell
+cmake -S .\testsuite\cmake-hart\install-consumer -B C:\temp\osl-consumer `
+  "-DOSL_DIR=C:\temp\osl-install\lib\cmake\OSL" `
+  "-DCMAKE_PREFIX_PATH=D:\OSL\dependencies\x64-windows"
+cmake --build C:\temp\osl-consumer --config Release
+python .\testsuite\cmake-hart\check-install.py C:\temp\osl-install `
+  --consumer C:\temp\osl-consumer\Release\osl_install_consumer.exe `
+  --oiio-runtime-dir D:\OSL\dependencies\x64-windows\bin `
+  --hip-root D:\opt\rocm\therock-dist-windows-gfx120X-all-7.14.0rc3 --gpu
+```
+
+The checker uses a fresh temporary working directory outside source, build and
+installation trees. It removes inherited loader/backend settings, then uses
+only the install, explicit dependency runtime directories and explicit HIP
+compiler-resource root. On Windows it checks app-local runtime families and
+exact PE imports, including optional ROCm kpack, without adding SDK binaries
+to `PATH`. It verifies compiler metadata, exact CPU and split/fused GPU grid
+values, native emissive rendering, and the consumer's compile/query/CPU APIs.
+This is not a loaded-module audit. Mixed HART/OptiX installations also need
+`--cuda-runtime-dir` naming their CUDA runtime directory, even for CPU work.
+For CPU-only installations omit `--gpu` and `--hip-root`; GPU work is reported
+as **NOT RUN**, not as a successful GPU test. The checker deliberately requires
+the default installed `share/OSL/shaders/stdosl.h` layout.
+
+The consumer disables user-wide Visual Studio/vcpkg integration so it cannot
+auto-copy unrelated OIIO/Imath DLLs beside the executable and shadow the
+explicit runtime directory. This does not change system integration settings.
+For incremental native builds, generated BSDL lookup headers are declared
+outputs: a no-op build leaves headers and embedded native bitcode untouched,
+while changing a real dependency or deleting a generated header rebuilds the
+affected outputs.
+
+### External-module contract
+
 The initial external-module contract is intentionally small:
 
 - Raw, unbundled AMDGPU LLVM bitcode with a nullary raygen entry named

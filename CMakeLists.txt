@@ -131,10 +131,14 @@ message(STATUS "OSL_USE_OPTIX: ${OSL_USE_OPTIX}")
 set (OPTIX_EXTRA_LIBS CACHE STRING "Extra lib targets needed for OptiX")
 set (CUDA_EXTRA_LIBS CACHE STRING "Extra lib targets needed for CUDA")
 set (CUDA_TARGET_ARCH "sm_60" CACHE STRING "CUDA GPU architecture (e.g. sm_50)")
-set (OSL_SHADER_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/shaders"
+set (OSL_SHADER_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/shaders"
      CACHE STRING "Directory where shaders will be installed")
-set (OSL_PTX_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME}/ptx"
+set (OSL_PTX_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/ptx"
      CACHE STRING "Directory where OptiX PTX files will be installed")
+get_filename_component (OSL_SHADER_FULL_INSTALL_DIR "${OSL_SHADER_INSTALL_DIR}"
+                        ABSOLUTE BASE_DIR "${CMAKE_INSTALL_PREFIX}")
+get_filename_component (OSL_PTX_FULL_INSTALL_DIR "${OSL_PTX_INSTALL_DIR}"
+                        ABSOLUTE BASE_DIR "${CMAKE_INSTALL_PREFIX}")
 set (CMAKE_DEBUG_POSTFIX "" CACHE STRING "Library naming postfix for Debug builds (e.g., '_debug')")
 option (OSL_USTRINGREP_IS_HASH "Always use ustringhash for strings" OFF)
 

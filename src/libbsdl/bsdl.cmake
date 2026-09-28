@@ -17,8 +17,24 @@ function(ADD_BSDL_LIBRARY NAME)
     target_link_libraries(genluts PRIVATE BSDL_BOOTSTRAP Threads::Threads)
     file(MAKE_DIRECTORY ${BSDL_GEN_HEADERS}/BSDL/SPI)
     file(MAKE_DIRECTORY ${BSDL_GEN_HEADERS}/BSDL/MTX)
-    add_custom_command(TARGET genluts POST_BUILD USES_TERMINAL COMMAND $<TARGET_FILE:genluts> ${BSDL_GEN_HEADERS}/BSDL
-                    COMMENT "Generating BSDL lookup tables ...")
+    set(BSDL_LUT_HEADERS
+        SPI/microfacet_tools_luts.h
+        SPI/bsdf_clearcoat_luts.h
+        SPI/bsdf_dielectric_front_luts.h
+        SPI/bsdf_dielectric_back_luts.h
+        SPI/bsdf_thinlayer_luts.h
+        MTX/bsdf_contysheen_luts.h
+        MTX/bsdf_zeltnersheen_luts.h
+        MTX/bsdf_dielectric_reflfront_luts.h
+        MTX/bsdf_dielectric_bothfront_luts.h
+        MTX/bsdf_dielectric_bothback_luts.h)
+    list(TRANSFORM BSDL_LUT_HEADERS PREPEND "${BSDL_GEN_HEADERS}/BSDL/")
+    add_custom_command(OUTPUT ${BSDL_LUT_HEADERS}
+        COMMAND $<TARGET_FILE:genluts> "${BSDL_GEN_HEADERS}/BSDL"
+        DEPENDS genluts
+        USES_TERMINAL VERBATIM
+        COMMENT "Generating BSDL lookup tables ...")
+    add_custom_target(${NAME}_luts DEPENDS ${BSDL_LUT_HEADERS})
 
     if (DEFINED bsdl_SPECTRAL_COLOR_SPACES)
         add_executable(jakobhanika_luts ${CMAKE_CURRENT_SOURCE_DIR}/${bsdl_SUBDIR}/src/jakobhanika_luts.cpp)
@@ -41,5 +57,5 @@ function(ADD_BSDL_LIBRARY NAME)
     target_include_directories(${NAME} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/${bsdl_SUBDIR}/include)
     target_link_libraries(${NAME} INTERFACE Imath::Imath)
     target_include_directories(${NAME} INTERFACE ${BSDL_GEN_HEADERS})
-    add_dependencies(${NAME} genluts)
+    add_dependencies(${NAME} ${NAME}_luts)
 endfunction()

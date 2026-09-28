@@ -19,7 +19,9 @@ FLEX_BISON (osllex.l oslgram.y osl lib_src compiler_headers)
 add_library (${local_lib} ${lib_src})
 target_include_directories(${local_lib}
     PUBLIC
-        ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
+        $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
 target_link_libraries (${local_lib}
     PUBLIC
@@ -56,4 +58,3 @@ set_target_properties (${local_lib}
     )
 
 install_targets (${local_lib})
-

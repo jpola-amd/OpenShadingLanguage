@@ -11,7 +11,9 @@ FLEX_BISON (../liboslexec/osolex.l ../liboslexec/osogram.y oso lib_src compiler_
 add_library (${local_lib} ${lib_src})
 target_include_directories (${local_lib}
     PUBLIC
-        ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
+        $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         ../liboslexec)
 target_link_libraries (${local_lib}

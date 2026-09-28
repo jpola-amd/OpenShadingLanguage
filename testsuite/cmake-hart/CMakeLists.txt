@@ -126,7 +126,8 @@ elseif (TEST_CASE STREQUAL "matching-tools" OR TEST_CASE STREQUAL "mismatched-to
     if (NOT TEST_CASE STREQUAL "mismatched-tools")
         set (LLVM_VERSION "23.0.0git")
     endif ()
-elseif (NOT TEST_CASE STREQUAL "enabled")
+elseif (NOT TEST_CASE STREQUAL "enabled"
+        AND NOT TEST_CASE MATCHES "^runtime-linux(-no-rpath)?$")
     message (FATAL_ERROR "Unknown test case: ${TEST_CASE}")
 endif ()
 
@@ -155,6 +156,29 @@ if (OSL_USE_HART)
 elseif (TARGET amd::hart OR TARGET hip::host OR ROCM_CLANG_EXECUTABLE
         OR ROCM_DEVICE_LIB_PATH)
     message (FATAL_ERROR "Disabled HART discovery searched for SDKs")
+endif ()
+
+if (TEST_CASE MATCHES "^runtime-linux(-no-rpath)?$")
+    # Exercise configuration only; this does not claim Linux execution.
+    set (CMAKE_SYSTEM_NAME "Linux")
+    set (CMAKE_INSTALL_FULL_BINDIR "/prefix with spaces/tools")
+    set (CMAKE_INSTALL_FULL_LIBDIR "/prefix with spaces/lib64")
+    set (CMAKE_INSTALL_RPATH "/selected/sdk/lib")
+    if (TEST_CASE STREQUAL "runtime-linux-no-rpath")
+        set (CMAKE_INSTALL_RPATH "")
+    endif ()
+    add_executable (runtime_probe IMPORTED)
+    set_target_properties (runtime_probe PROPERTIES
+                           INSTALL_RPATH "${CMAKE_INSTALL_RPATH}")
+    osl_hart_runtime_target (runtime_probe)
+    get_target_property (actual_rpath runtime_probe INSTALL_RPATH)
+    set (expected_rpath "")
+    if (CMAKE_INSTALL_RPATH)
+        set (expected_rpath "$ORIGIN/../lib64;/selected/sdk/lib")
+    endif ()
+    if (NOT actual_rpath STREQUAL expected_rpath)
+        message (FATAL_ERROR "Unexpected installed HART runtime path: ${actual_rpath}")
+    endif ()
 endif ()
 
 if (TEST_CASE IN_LIST bitcode_test_cases)

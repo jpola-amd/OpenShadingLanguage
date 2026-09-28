@@ -172,9 +172,22 @@ function (osl_hart_target target)
 endfunction ()
 
 
-# Deploy the selected runtime next to each executable, not via Windows PATH.
+# Windows needs app-local SDK binaries; Linux retains the selected SDK layout.
 function (osl_hart_runtime_target target)
-    if (NOT OSL_USE_HART OR NOT WIN32)
+    if (NOT OSL_USE_HART)
+        return ()
+    endif ()
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if (CMAKE_INSTALL_RPATH)
+            file (RELATIVE_PATH hart_relative_libdir
+                  "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
+            get_target_property (hart_install_rpath ${target} INSTALL_RPATH)
+            set_property (TARGET ${target} PROPERTY INSTALL_RPATH
+                "$ORIGIN/${hart_relative_libdir};${hart_install_rpath}")
+        endif ()
+        return ()
+    endif ()
+    if (NOT WIN32)
         return ()
     endif ()
     find_package (hiprtc CONFIG REQUIRED

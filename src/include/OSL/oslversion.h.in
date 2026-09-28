@@ -102,7 +102,7 @@ namespace OSL = @PROJ_NAMESPACE@;
 #define @PROJ_NAME@_BUILD_CPP20 (@CMAKE_CXX_STANDARD@ >= 20)
 #define @PROJ_NAME@_BUILD_CPP23 (@CMAKE_CXX_STANDARD@ >= 20)
 
-#define OSL_SHADER_INSTALL_DIR "@OSL_SHADER_INSTALL_DIR@"
+#define OSL_SHADER_INSTALL_DIR "@OSL_SHADER_FULL_INSTALL_DIR@"
 
 // Macro helpers to build function names based on other macros
 #define __OSL_CONCAT_INDIRECT(A, B) A ## B

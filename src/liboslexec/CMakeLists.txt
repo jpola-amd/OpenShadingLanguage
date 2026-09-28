@@ -561,7 +561,9 @@ foreach(batched_target ${BATCHED_TARGET_LIST})
 
     target_include_directories (${batched_target_lib}
         PUBLIC
-            ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
+            $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
             ${IMATH_INCLUDES}
         PRIVATE
             ${ROBINMAP_INCLUDES}
@@ -581,7 +583,9 @@ endforeach(batched_target)
 add_library (${local_lib} ${lib_src})
 target_include_directories (${local_lib}
     PUBLIC
-        ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
+        $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         ${IMATH_INCLUDES}
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
