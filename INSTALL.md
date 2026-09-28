@@ -294,8 +294,12 @@ Each point receives real `ShaderGlobals` and separately aligned group
 storage. Generated output placement uses a checked, contiguous output arena;
 the renderer does not assume offsets inside the group.
 
-With no `-o` options, this path still selects `output color Cout` on the final
-layer. Explicit `-o NAME FILE` options select one or more numeric outputs:
+With no `-o` options, this path selects `output color Cout` on the final layer
+when present. If there is no output named `Cout`, the group executes without an
+output arena or image; this includes diagnostic-only and empty shaders.
+Diagnostics, warmup, repeated launches and error reporting still run normally.
+An explicitly requested missing output remains an error.
+Explicit `-o NAME FILE` options select one or more numeric outputs:
 integers, floats, triples, matrices, numeric arrays, and numeric struct fields.
 Use `layer.parameter` to disambiguate layers; unqualified names select the last
 matching layer. Struct fields retain their dotted parameter names. Whole

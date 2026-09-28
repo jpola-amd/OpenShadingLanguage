@@ -61,6 +61,8 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                             span<testshade::HartClosureSummary> summaries,
                             size_t capacity = testshade::HartClosureCapacity);
 
+// With no explicit outputs, retain the RGB Cout default when present. If Cout
+// is absent and output_file is "null", execute without an output arena.
 bool
 testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          ShaderGroup& group, const HartOptions& options,

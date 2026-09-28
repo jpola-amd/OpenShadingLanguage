@@ -197,7 +197,9 @@ try:
         command(testshade, base + selection([name], ["absent.exr"]) + graph,
                 error=error)
         assert not (root / "absent.exr").exists()
-    command(testshade, base + ["hart_output_array"], error="RGB color")
+    command(testshade, base + ["hart_output_array"], launch=True)
+    command(testshade, base + ["hart_output_array"] + selection(["Cout"]),
+            error="Unknown HART output")
     # Existing Cout-only printing still works with additional unselected outputs.
     check(command(testshade, base + ["--print"] + graph, launch=True), ["Cout"])
     filenames = ["index.tif", "value.tif", "matrix.tif", "codes.tif", "index-copy.tif"]

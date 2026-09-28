@@ -1,0 +1,3 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:8, point 0): 2*2 = 4
+HART shader 'test' (test.osl:17, point 0): x = 2, y = 4

@@ -489,7 +489,12 @@ public:
         const size_t params_size = group_alignment
                                        ? sizeof(testshade::HartGeneratedParams)
                                        : sizeof(testshade::HartGridParams);
-        if (!hip_check(hipMalloc(&m_output, bytes), "hipMalloc output")
+        if (!bytes && !group_alignment) {
+            m_err.errorfmt("External HART grids require an output buffer");
+            return false;
+        }
+        if ((bytes
+             && !hip_check(hipMalloc(&m_output, bytes), "hipMalloc output"))
             || !hip_check(hipMalloc(&m_params, params_size),
                           "hipMalloc parameters"))
             return false;
@@ -579,9 +584,10 @@ public:
                 return false;
             // Explicit entries may leave outputs untouched. Other modes
             // retain the unwritten-output marker.
-            if (!hip_check(hipMemsetAsync(m_output, zero_outputs ? 0 : 0xff,
-                                          bytes, m_stream),
-                           "hipMemsetAsync output"))
+            if (bytes
+                && !hip_check(hipMemsetAsync(m_output, zero_outputs ? 0 : 0xff,
+                                             bytes, m_stream),
+                              "hipMemsetAsync output"))
                 return false;
             if (m_verbose)
                 m_err.infofmt("Launching HART grid {} x {}", width, height);
@@ -619,9 +625,10 @@ public:
                 "HART synchronized launches: {} iterations, {:.6f} ms total, {:.6f} ms mean\n",
                 iterations, launch_timer() * 1000.0,
                 launch_timer() * 1000.0 / iterations);
-        return hip_check(hipMemcpy(pixels.data(), m_output, bytes,
-                                   hipMemcpyDeviceToHost),
-                         "hipMemcpy output");
+        return !bytes
+               || hip_check(hipMemcpy(pixels.data(), m_output, bytes,
+                                      hipMemcpyDeviceToHost),
+                            "hipMemcpy output");
     }
 
     bool clear()
@@ -1053,7 +1060,10 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     const bool default_output = requests.empty();
     const HartOutputRequest default_request { "Cout",
                                               std::string(output_file) };
-    if (default_output)
+    // An absent implicit Cout is valid for diagnostic-only shaders, as on CPU.
+    // A filename supplied through the API still requests the default output.
+    if (default_output
+        && (output_file != "null" || find_parameter("Cout", true).second))
         requests = { &default_request, 1 };
     struct OutputBinding {
         int layer;
@@ -1294,9 +1304,11 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
     HartGridRenderer runtime(err);
     const char* entry = options.fused ? "__raygen__testshade_generated_fused"
                                       : "__raygen__testshade_generated";
-    if (verbose)
+    if (verbose) {
         err.infofmt("HART callable mode: {}",
                     options.fused ? "fused" : "split");
+        err.infofmt("HART output arena: {} bytes", count * stride);
+    }
     if (!runtime.initialize(options.device, verbose, modules, options.no_cache)
         || !runtime.load(modules, entry, callables, options.runstats))
         return false;

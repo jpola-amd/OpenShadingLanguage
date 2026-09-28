@@ -4334,12 +4334,16 @@ try:
                          or args.fused_local or args.fused_benchmark):
         for shader, error in (
             ("hart_wrong_output", "RGB color"),
-            ("hart_missing_output", "RGB color"),
             ("hart_closure", "does not support parameter"),
             ("hart_string", "unsupported operation 'strlen'"),
             ("hart_texture", "HART: texture requires explicit closest or linear interpolation"),
         ):
             run(["--hart", "-v", shader], error)
+        output = run(["--hart", "-v", "hart_missing_output"])
+        assert "Launching HART grid" in output, output
+        assert "HART output arena: 0 bytes" in output, output
+        run(["--hart", "-v", "-o", "Cout", "null", "hart_missing_output"],
+            "Unknown HART output")
         run(["--hart", "--shader", "hart_surface_incident", "unused",
              "--shader", "hart_first", "middle",
              "--shader", "hart_sine", "surface", "-v"],
