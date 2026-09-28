@@ -2999,6 +2999,41 @@ check_math_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_isconstant_modules(string_view arch, string_view stdosl)
+{
+    const string_view source = R"osl(
+shader hart_constants(float A=1, string label="literal", output color Cout=0) {
+    float twice=2*A;
+    string selected_label=u>v ? "left" : "right";
+    Cout=color(isconstant(3)+2*isconstant(2.0)+4*isconstant("literal"),
+               isconstant(u)+2*isconstant(P)+4*isconstant(selected_label),
+               isconstant(A)+2*isconstant(twice)+4*isconstant(label));
+}
+)osl";
+    OSLCompiler compiler;
+    std::string bytecode;
+    if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+        return false;
+    for (int osl_optimize : { 0, 2 }) {
+        for (int optimize : { 10, 3 }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("llvm_optimize", optimize);
+            ss.attribute("optimize", osl_optimize);
+            auto group = make_group(ss, bytecode);
+            ss.optimize_group(group.get(), nullptr);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch, { }, optimize);
+        }
+    }
+    return true;
+}
+
+
+
+bool
 check_numeric_math_modules(string_view arch, string_view stdosl)
 {
     const struct {
@@ -13760,6 +13795,7 @@ main(int argc, char* argv[])
         || !check_topology_modules(arch, argv[2])
         || !check_material_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])
+        || !check_isconstant_modules(arch, argv[2])
         || !check_numeric_math_modules(arch, argv[2])
         || !check_spline_modules(arch, argv[2])
         || !check_color_modules(arch, argv[2])

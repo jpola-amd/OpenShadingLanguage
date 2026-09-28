@@ -324,6 +324,10 @@ closure pointers are never copied into image outputs.
 grid spacing `1/max(1, dimension-1)`. Without this option, border samples stay
 at zero and one; a one-point axis stays at one half in either mode.
 
+`isconstant` uses OSL's existing compile-time symbol classification, including
+numeric and string operands. Uniform runtime data is not necessarily constant;
+results can change when OSL optimization proves an expression constant.
+
 Each point owns one packed record containing each distinct selected symbol,
 in first-request order. Aliases of the same symbol share storage but may write
 different files. Integer printing and integer image buffers retain int32
@@ -1208,6 +1212,10 @@ are not changed or accepted in its place.
 An optional `out-noopt-hart.txt` is exclusive to the OSL 0 variant when
 optimization legitimately changes executed diagnostics; it cannot fall back
 to the optimized reference.
+An optional `out-fused-hart.txt` is exclusive to optimized fused dispatch,
+for example when it preserves a different floating-point signed zero. OSL 0
+keeps precedence over this variant. CPU reference selection excludes all HART
+variants; no numerical tolerance or diagnostic metadata is removed.
 
 Set `TESTSUITE_HART=1` when configuring to enable `hart-generated-runtime`,
 which compares arithmetic, `sin(u+v)`, and straight-line and conditional

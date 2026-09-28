@@ -1,0 +1,2 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:7, point 0): myparam = 1

@@ -1,0 +1,2 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:10, point 0): a = 26 (hex 1a), b = -1 (hex ffffffff)

@@ -1,0 +1,7 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:17, point 0): mul:
+HART shader 'test' (test.osl:18, point 0):   x  = 0.25, dx=1 dy=0
+HART shader 'test' (test.osl:19, point 0):   gx = 0.25, dx=1 dy=0
+HART shader 'test' (test.osl:24, point 0): div:
+HART shader 'test' (test.osl:25, point 0):   y  = 1, dx=0 dy=0
+HART shader 'test' (test.osl:26, point 0):   gy = 1, dx=0 dy=0

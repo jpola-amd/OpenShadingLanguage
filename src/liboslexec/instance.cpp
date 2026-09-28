@@ -583,6 +583,8 @@ ShaderInstance::validate_hart() const
         } else if (op.nargs() == 2 && name == ustring("arraylength")) {
             valid = type(0).is_int() && type(1).is_string_based()
                     && type(1).is_array();
+        } else if (op.nargs() == 2 && name == ustring("isconstant")) {
+            valid = type(0).is_int();
         } else if (op.nargs() == 3 && name == ustring("aref")) {
             valid = type(0).is_string() && type(1).is_string_based()
                     && type(1).is_array() && type(2).is_int();
@@ -1163,10 +1165,12 @@ ShaderInstance::validate_hart() const
             return false;
         }
     }
+    // clang-format off
     static const ustring supported[] = {
         ustring("nop"),
         ustring("end"),
         ustring("useparam"),
+        ustring("isconstant"),
         ustring("assign"),
         ustring("add"),
         ustring("sub"),
@@ -1290,6 +1294,7 @@ ShaderInstance::validate_hart() const
         ustring("surfacearea"),
         ustring("getattribute"),
     };
+    // clang-format on
     static const ustring readable_globals[] = {
         ustring("u"),    ustring("v"),  ustring("P"),
         ustring("N"),    ustring("Ng"), ustring("dPdu"),

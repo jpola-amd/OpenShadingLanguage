@@ -1,0 +1,47 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:7, point 0): Testing break: (should never let i get beyond 3)
+HART shader 'test' (test.osl:11, point 0):   i = 0
+HART shader 'test' (test.osl:11, point 0):   i = 1
+HART shader 'test' (test.osl:11, point 0):   i = 2
+HART shader 'test' (test.osl:11, point 0):   i = 3
+HART shader 'test' (test.osl:15, point 0): 
+Testing continue:
+HART shader 'test' (test.osl:17, point 0):   i = 0
+HART shader 'test' (test.osl:20, point 0):   should only print this if i <= 3.
+HART shader 'test' (test.osl:17, point 0):   i = 1
+HART shader 'test' (test.osl:20, point 0):   should only print this if i <= 3.
+HART shader 'test' (test.osl:17, point 0):   i = 2
+HART shader 'test' (test.osl:20, point 0):   should only print this if i <= 3.
+HART shader 'test' (test.osl:17, point 0):   i = 3
+HART shader 'test' (test.osl:20, point 0):   should only print this if i <= 3.
+HART shader 'test' (test.osl:17, point 0):   i = 4
+HART shader 'test' (test.osl:17, point 0):   i = 5
+HART shader 'test' (test.osl:17, point 0):   i = 6
+HART shader 'test' (test.osl:17, point 0):   i = 7
+HART shader 'test' (test.osl:17, point 0):   i = 8
+HART shader 'test' (test.osl:17, point 0):   i = 9
+HART shader 'test' (test.osl:24, point 0): 
+Testing nested break/continue:
+HART shader 'test' (test.osl:26, point 0): start of outer, j=0
+HART shader 'test' (test.osl:30, point 0):   i = 0
+HART shader 'test' (test.osl:30, point 0):   i = 2
+HART shader 'test' (test.osl:30, point 0):   i = 3
+HART shader 'test' (test.osl:30, point 0):   i = 4
+HART shader 'test' (test.osl:26, point 0): start of outer, j=1
+HART shader 'test' (test.osl:30, point 0):   i = 0
+HART shader 'test' (test.osl:30, point 0):   i = 2
+HART shader 'test' (test.osl:30, point 0):   i = 3
+HART shader 'test' (test.osl:30, point 0):   i = 4
+HART shader 'test' (test.osl:26, point 0): start of outer, j=2
+HART shader 'test' (test.osl:30, point 0):   i = 0
+HART shader 'test' (test.osl:30, point 0):   i = 2
+HART shader 'test' (test.osl:30, point 0):   i = 3
+HART shader 'test' (test.osl:30, point 0):   i = 4
+HART shader 'test' (test.osl:26, point 0): start of outer, j=3
+HART shader 'test' (test.osl:30, point 0):   i = 0
+HART shader 'test' (test.osl:30, point 0):   i = 2
+HART shader 'test' (test.osl:30, point 0):   i = 3
+HART shader 'test' (test.osl:30, point 0):   i = 4
+HART shader 'test' (test.osl:38, point 0): 
+Testing break in an infinite for loop:
+HART shader 'test' (test.osl:43, point 0): worked
