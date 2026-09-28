@@ -66,7 +66,8 @@ static bool use_optix              = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_OPTIX"));
 static bool use_hart = OIIO::Strutil::stoi(
     OIIO::Sysutil::getenv("TESTSHADE_HART"));
-static bool hart_fused = false;
+static bool hart_fused    = false;
+static bool hart_no_cache = false;
 static int hart_device = 0, hart_local_groupdata = 0, hart_bounces = 4;
 static bool optix_no_inline             = false;
 static bool optix_no_inline_layer_funcs = false;
@@ -167,6 +168,8 @@ getargs(int argc, const char* argv[])
             "(or set TESTSHADE_HART=1)");
     ap.arg("--hart-device %d:DEVICE", &hart_device)
       .help("HART device ordinal (default: 0)");
+    ap.arg("--hart-no-cache", &hart_no_cache)
+      .help("Disable the HART pipeline cache");
     ap.arg("--hart-fused", &hart_fused)
       .help("Use fused HART shader callables "
             "(or set TESTSHADE_FUSED=1 with HART)");
@@ -335,7 +338,8 @@ main(int argc, const char* argv[])
         auto* hart = new HartRaytracer;
         rend       = hart;
         if (!hart->initialize(hart_device, hart_fused,
-                              size_t(hart_local_groupdata))) {
+                              size_t(hart_local_groupdata), !hart_no_cache,
+                              runstats)) {
             delete rend;
             return EXIT_FAILURE;
         }
@@ -420,6 +424,11 @@ main(int argc, const char* argv[])
         return finish(EXIT_FAILURE);
     double warmuptime = timer.lap();
 
+#if OSL_TESTRENDER_HART
+    if (use_hart && runstats)
+        static_cast<HartRaytracer*>(rend)->reset_launch_statistics();
+#endif
+
     // Launch the kernel to render the scene
     for (int i = 0; i < iters; ++i) {
         rend->render(xres, yres);
@@ -448,6 +457,16 @@ main(int argc, const char* argv[])
         rend->errhandler().errorfmt("Unable to write output image: {}",
                                     rend->pixelbuf.geterror());
     double writetime = timer.lap();
+
+#if OSL_TESTRENDER_HART
+    if (use_hart && runstats) {
+        static_cast<HartRaytracer*>(rend)->print_statistics();
+        print("HART native frames: {} iterations, {:.6f} ms total, {:.6f} ms "
+              "mean, {:.6f} ms warmup\n",
+              iters, runtime * 1000.0, runtime * 1000.0 / iters,
+              warmup ? warmuptime * 1000.0 : 0.0);
+    }
+#endif
 
     // Print some debugging info
     if (debug1 || runstats || profile) {

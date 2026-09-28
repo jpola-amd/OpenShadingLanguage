@@ -2,46 +2,66 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
+import json
 import math
 import os
 from pathlib import Path
 import re
+import statistics
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 
 if len(sys.argv) not in (5, 6) or (len(sys.argv) == 6
                                  and sys.argv[5] not in ("--materials", "--lighting",
-                                                        "--volumes", "--textures")):
+                                                        "--volumes", "--textures",
+                                                        "--benchmark")):
     raise SystemExit("Usage: check-pathtracer.py renderer compiler stdosl "
                      "{split|fused|fused-local|unoptimized} "
-                     "[--materials|--lighting|--volumes|--textures]")
+                     "[--materials|--lighting|--volumes|--textures|--benchmark]\n"
+                     "--benchmark rotates split/fused/fused-local, starting "
+                     "with the supplied optimized mode; includes no-cache "
+                     "samples and separate cache-enabled priming")
 renderer, compiler, stdosl, mode = sys.argv[1:5]
 materials = len(sys.argv) == 6 and sys.argv[5] == "--materials"
 lighting = len(sys.argv) == 6 and sys.argv[5] == "--lighting"
 volumes = len(sys.argv) == 6 and sys.argv[5] == "--volumes"
 textures = len(sys.argv) == 6 and sys.argv[5] == "--textures"
+benchmark = len(sys.argv) == 6 and sys.argv[5] == "--benchmark"
+if benchmark and mode not in ("split", "fused", "fused-local"):
+    raise SystemExit("--benchmark requires split, fused or fused-local as its starting mode")
 env = os.environ.copy()
 for key in ("TESTSHADE_OPTIX", "TESTSHADE_HART", "TESTSHADE_FUSED",
             "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
     env.pop(key, None)
-flags = {
+if benchmark:
+    for key in ("OSL_OPTIONS", "OSL_LLVM_DEBUG", "OSL_DEBUG_OUTPUT_CPP",
+                "TESTSHADE_LLVM_JIT_FMA"):
+        env.pop(key, None)
+mode_flags = {
     "split": ["--llvm_opt", "3"],
     "fused": ["--hart-fused", "--llvm_opt", "3"],
     "fused-local": ["--hart-fused", "--hart-local-groupdata", "4096",
                     "--llvm_opt", "3"],
     "unoptimized": ["-O0", "--llvm_opt", "10"],
-}[mode]
-width, height = 16, 12
+}
+flags = mode_flags[mode]
+width, height = (128, 96) if benchmark else (16, 12)
 
 
-def run(args, root, expected=0, extra_env=None):
+def run(args, root, expected=0, extra_env=None, wall_times=None):
+    start = time.perf_counter()
     result = subprocess.run(args, cwd=root, env={**env, **(extra_env or {})},
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=360)
+    wall_ms = (time.perf_counter() - start) * 1000
+    if wall_times is not None:
+        assert math.isfinite(wall_ms) and wall_ms >= 0
+        wall_times.append(wall_ms)
     print(result.stdout, end="")
     if result.returncode != expected:
         raise RuntimeError((args, result.returncode, expected))
@@ -647,6 +667,201 @@ def check_volumes():
         assert not image.exists(), out
 
 
+def check_native_benchmark(compile_ms):
+    iterations, trials, aa, bounces = 20, 3, 4, 1
+    modes = ("split", "fused", "fused-local")
+    first = modes.index(mode)
+    modes = modes[first:] + modes[:first]
+
+    def ranges(values):
+        return {"median": statistics.median(values),
+                "range": [min(values), max(values)], "trials": values}
+
+    def statistics_for(output, trial_mode, count, warmup, no_cache):
+        def one(pattern):
+            rows = re.findall("^" + pattern + r"\r?$", output, re.MULTILINE)
+            assert len(rows) == 1, output
+            return rows[0]
+
+        osl_ms, pipeline_ms = map(float, one(
+            r"HART native preparation: (\S+) ms OSL groups, (\S+) ms pipeline"))
+        cache_policy = one(
+            r"HART native pipeline cache: (disabled|enabled) "
+            r"\(SDK policy; hit status unavailable\)")
+        assert cache_policy == ("disabled" if no_cache else "enabled"), output
+        launch_count, launch_total = one(
+            r"HART native synchronized launches: (\d+) launches, (\S+) ms total")
+        launch_count, launch_total = int(launch_count), float(launch_total)
+        owned, stride, budget = map(int, one(
+            r"HART native memory: (\d+) context-owned bytes, "
+            r"(\d+) groupdata stride bytes, (\d+) local budget bytes"))
+        traversal, state, continuation = map(int, one(
+            r"HART native stack estimates: traversal (\d+) bytes, "
+            r"state (\d+) bytes, continuation (\d+) bytes"))
+        frame_count, total, mean, warmup_ms = one(
+            r"HART native frames: (\d+) iterations, (\S+) ms total, "
+            r"(\S+) ms mean, (\S+) ms warmup")
+        total, mean, warmup_ms = map(float, (total, mean, warmup_ms))
+        assert int(frame_count) == count and count > 0, output
+        # This furnace has no background prepass: one launch per timed frame.
+        assert launch_count == count, output
+        assert all(math.isfinite(value) and value >= 0 for value in
+                   (osl_ms, pipeline_ms, launch_total, total, mean, warmup_ms)), output
+        assert math.isclose(total / count, mean, abs_tol=1e-6, rel_tol=0), output
+        if not warmup:
+            assert warmup_ms == 0, output
+        assert owned > 0 and budget == (4096 if trial_mode == "fused-local" else 0)
+        assert (stride == 0) == (trial_mode == "fused-local"), output
+        storage = re.findall(r"(\d+) caller Groupdata bytes per pixel", output)
+        assert storage == [str(stride)], output
+        compiled = re.findall(r"HART compiled (\d+) materials, (\d+) callables", output)
+        assert compiled == [("2", "4" if trial_mode == "split" else "2")], output
+        marker = (f"HART path tracer rendered {width}x{height} with "
+                  f"{aa * aa} samples per pixel")
+        assert output.count(marker) == count + int(warmup), output
+        return {
+            "osl_groups_ms": osl_ms, "pipeline_ms": pipeline_ms,
+            "synchronized_launch_total_ms": launch_total,
+            "synchronized_launch_mean_ms": launch_total / launch_count,
+            "frames_total_ms": total, "frame_mean_ms": mean, "warmup_ms": warmup_ms,
+            "iterations": count, "warmup_frames": int(warmup),
+            "cache_policy": cache_policy, "cache_hit_status": "unavailable",
+            "timed_launches": launch_count, "context_owned_bytes": owned,
+            "groupdata_stride_bytes": stride, "local_budget_bytes": budget,
+            "stack_estimate_bytes": {"traversal": traversal, "state": state,
+                                     "continuation": continuation},
+        }
+
+    cpu_image = root / "benchmark-cpu.pfm"
+    run([renderer] + common + ["-O2", "--llvm_opt", "3", "-aa", str(aa),
+                              "--max-bounces", str(bounces), "furnace.xml",
+                              str(cpu_image)], root)
+    cpu = pixels(cpu_image)
+    expected = [struct.unpack("e", struct.pack("e", value))[0]
+                for value in (0.4, 0.4, 0.3)] * (width * height)
+    compare(cpu, expected)
+    assert max(cpu) > 0
+    samples = {trial_mode: [] for trial_mode in modes}
+    storage_by_mode = {}
+    stacks_by_mode = {}
+    scratch_stride = None
+    baseline = None
+    image = root / "benchmark-gpu.pfm"
+
+    def sample(trial_mode, count, warmup, no_cache):
+        nonlocal baseline, scratch_stride
+        if image.exists():
+            image.unlink()
+        arguments = ([renderer] + common
+                     + ["--hart", "-v", "-O2", "--runstats", "--iters", str(count),
+                        "-aa", str(aa), "--hart-bounces", str(bounces)]
+                     + mode_flags[trial_mode])
+        if warmup:
+            arguments += ["--warmup"]
+        if no_cache:
+            arguments += ["--hart-no-cache"]
+        wall = []
+        output = run(arguments + ["furnace.xml", str(image)], root, wall_times=wall)
+        record = statistics_for(output, trial_mode, count, warmup, no_cache)
+        record["process_wall_ms"] = wall[0]
+        storage = (record["context_owned_bytes"], record["groupdata_stride_bytes"],
+                   record["local_budget_bytes"])
+        stacks = record["stack_estimate_bytes"]
+        if trial_mode in storage_by_mode:
+            assert storage == storage_by_mode[trial_mode], (trial_mode, storage)
+            assert stacks == stacks_by_mode[trial_mode], (trial_mode, stacks)
+        storage_by_mode[trial_mode] = storage
+        stacks_by_mode[trial_mode] = stacks
+        if trial_mode != "fused-local":
+            if scratch_stride is not None:
+                assert record["groupdata_stride_bytes"] == scratch_stride
+            scratch_stride = record["groupdata_stride_bytes"]
+        actual = pixels(image)
+        assert max(actual) > 0
+        # Isolated stochastic image differences are diagnostic, not a pixel-
+        # equality gate. Preserve the furnace's energy and radiance bounds.
+        mean_rgb = [statistics.mean(actual[channel::3]) for channel in range(3)]
+        compare(mean_rgb, expected[:3])
+        assert all(0 <= value <= expected[i % 3] + 3e-5
+                   for i, value in enumerate(actual)), trial_mode
+        if baseline is None:
+            baseline = actual
+        compare(mean_rgb, [statistics.mean(baseline[channel::3])
+                           for channel in range(3)])
+        record["image_diagnostics"] = {
+            "mean_rgb": mean_rgb,
+            "different_cpu_pixels": sum(
+                actual[i:i+3] != cpu[i:i+3] for i in range(0, len(actual), 3)),
+            "cpu_max_abs_error": max(abs(a - b) for a, b in zip(actual, cpu)),
+            "cpu_relative_rmse": math.sqrt(
+                sum((a - b) ** 2 for a, b in zip(actual, cpu))
+                / sum(value ** 2 for value in cpu)),
+            "baseline_max_abs_error": max(abs(a - b)
+                                         for a, b in zip(actual, baseline)),
+        }
+        return record
+
+    # Cache policy is observable, but the native API exposes no hit status.
+    # Neither this sample nor priming flushes OS or driver caches.
+    cold = {trial_mode: sample(trial_mode, 1, False, True) for trial_mode in modes}
+    priming = {trial_mode: sample(trial_mode, 1, False, False) for trial_mode in modes}
+    for trial in range(trials):
+        for trial_mode in modes[trial:] + modes[:trial]:
+            samples[trial_mode].append(sample(trial_mode, iterations, True, False))
+
+    for trial_mode in modes:
+        owned, stride, budget = storage_by_mode[trial_mode]
+        print(json.dumps({
+            "benchmark": "hart-native", "scene": "furnace",
+            "mode": "fused-scratch" if trial_mode == "fused" else trial_mode,
+            "cli_mode": trial_mode, "resolution": [width, height],
+            "samples_per_pixel": aa * aa, "max_bounces": bounces,
+            "osl_opt": 2, "llvm_opt": 3, "warmup_frames": 1,
+            "iterations": iterations, "trials": trials,
+            "timed_launches_per_trial": iterations,
+            "trial_mode_order": [modes[i:] + modes[:i] for i in range(trials)],
+            "cold_no_cache": cold[trial_mode],
+            "cache_priming_outside_trials": priming[trial_mode],
+            "cache_policy": "enabled", "cache_hit_status": "unavailable",
+            "cold_scope": "HART SDK pipeline cache disabled; OS/driver caches untouched",
+            "oslc_process_wall_ms": {
+                "scope": "sum of source compiler subprocesses; includes startup, "
+                         "separate from in-process OSL group preparation",
+                "sources": list(compile_ms), "oslc_opt": 1,
+                **ranges([sum(values[i] for values in compile_ms.values())
+                          for i in range(trials)]),
+            },
+            "timings_ms": {
+                key: ranges([record[key] for record in samples[trial_mode]])
+                for key in ("osl_groups_ms", "pipeline_ms",
+                            "synchronized_launch_total_ms", "synchronized_launch_mean_ms",
+                            "frames_total_ms", "frame_mean_ms", "warmup_ms",
+                            "process_wall_ms")
+            },
+            "timing_scope": "OSL groups include compile_materials and binding preparation, "
+                            "not source parsing; pipeline includes modules, groups, "
+                            "link, deferred stack-query compilation and SBT setup, "
+                            "not context initialization or acceleration build; "
+                            "synchronized launches include hartLaunch plus stream wait, "
+                            "not uploads, clears, readbacks or warmup; frames include "
+                            "full render/allocation/bindings/background/readback/"
+                            "publication, not warmup or final disk write; process "
+                            "includes all setup, warmup, frames, disk IO and teardown",
+            "context_owned_bytes": owned, "groupdata_stride_bytes": stride,
+            "local_budget_bytes": budget,
+            "stack_estimate_bytes": stacks_by_mode[trial_mode],
+            "image_diagnostics_by_trial": [
+                record["image_diagnostics"] for record in samples[trial_mode]],
+            "image_acceptance": "finite bounded furnace radiance and analytic mean "
+                                "energy; per-pixel differences are diagnostics, "
+                                "visually qualified with identical display conversion",
+            "memory_scope": "native context ownership excludes textures, group-owned "
+                            "interactive buffers and SDK/driver allocations; "
+                            "logical groupdata and SDK stack estimates are not "
+                            "physical VRAM, register or spill measurements",
+        }, allow_nan=False), flush=True)
+
+
 with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     root = Path(temporary)
     if materials:
@@ -734,11 +949,24 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
                 Ci += (u+1)*diffuse(normalize(N + vector(0.01*i,0,0)));
         }""",
     }
+    compile_ms = {}
     for name, source in shaders.items():
+        if benchmark and name not in ("path_emit", "path_diffuse"):
+            continue
         (root / (name + ".osl")).write_text(source, encoding="ascii")
-        run([compiler, "-I" + str(Path(stdosl).parent), name + ".osl"], root)
-    (root / "path_texture.pfm").write_bytes(
-        b"PF\n4 4\n-1.0\n" + struct.pack("<48f", *([0.25, 0.5, 1.0] * 16)))
+        if benchmark:
+            compile_ms[name] = []
+        else:
+            run([compiler, "-I" + str(Path(stdosl).parent), name + ".osl"], root)
+    if benchmark:
+        for trial in range(3):
+            names = list(compile_ms)
+            for name in names[trial:] + names[:trial]:
+                run([compiler, "-O1", "-I" + str(Path(stdosl).parent), name + ".osl"],
+                    root, wall_times=compile_ms[name])
+    else:
+        (root / "path_texture.pfm").write_bytes(
+            b"PF\n4 4\n-1.0\n" + struct.pack("<48f", *([0.25, 0.5, 1.0] * 16)))
 
     camera = '<Camera eye="0,0,4" dir="0,0,-1" fov="90"/>'
     emission = f"""<World>{camera}
@@ -761,6 +989,12 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
       <Quad corner="-10,-10,0" edge_x="0,20,0" edge_y="0,0,6"/>
       <Quad corner="10,-10,0" edge_x="0,20,0" edge_y="0,0,6"/>
       </World>"""
+    if benchmark:
+        (root / "furnace.xml").write_text(furnace, encoding="ascii")
+        check_native_benchmark(compile_ms)
+        print("HART native benchmark correctness and timing records passed; "
+              "no performance thresholds")
+        sys.exit(0)
     multiple = furnace.replace(
         '<ShaderGroup>color tint 2 1 0.5 [[int interactive=1]];',
         '<Quad corner="0.7,-1,2" edge_x="1.5,0,0" edge_y="0,2,0"/>'

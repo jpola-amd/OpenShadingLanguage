@@ -369,6 +369,7 @@ public:
               cspan<std::string> callable_names = { }, bool runstats = false)
     {
         m_runstats = runstats;
+        OIIO::Timer pipeline_timer(m_runstats);
         OptixModuleCompileOptions module_options { };
         OptixPipelineCompileOptions compile_options { };
         compile_options.pipelineLaunchParamsVariableName
@@ -433,7 +434,6 @@ public:
         size_t log_size            = log.size();
         if (m_verbose)
             m_err.infofmt("Compiling HART pipeline");
-        OIIO::Timer pipeline_timer;
         if (!hart_check(optixPipelineCreate(m_context, &compile_options,
                                             &link_options, m_groups.data(),
                                             m_group_count, log.data(),
@@ -445,8 +445,6 @@ public:
             return false;
         }
         if (m_runstats) {
-            print("HART pipeline creation: {:.3f} ms\n",
-                  pipeline_timer() * 1000.0);
             unsigned int raygen_stack = 0, callable_stack = 0;
             for (unsigned int i = 0; i < m_group_count; ++i) {
                 HartStackSizes sizes { };
@@ -470,10 +468,15 @@ public:
                 return false;
         }
         const size_t bytes = m_group_count * sizeof(HartSbtRecord);
-        return hip_check(hipMalloc(&m_record, bytes), "hipMalloc SBT")
-               && hip_check(hipMemcpy(m_record, records.data(), bytes,
-                                      hipMemcpyHostToDevice),
-                            "hipMemcpy SBT");
+        if (!hip_check(hipMalloc(&m_record, bytes), "hipMalloc SBT")
+            || !hip_check(hipMemcpy(m_record, records.data(), bytes,
+                                    hipMemcpyHostToDevice),
+                          "hipMemcpy SBT"))
+            return false;
+        if (m_runstats)
+            print("HART pipeline creation: {:.6f} ms\n",
+                  pipeline_timer() * 1000.0);
+        return true;
     }
 
     bool render(int width, int height, int iterations, bool warmup,
@@ -612,8 +615,12 @@ public:
                 launch_timer.stop();
             return !textures || textures->check_errors();
         };
+        OIIO::Timer warmup_timer(m_runstats && warmup);
         if (warmup && !launch(false))
             return false;
+        if (m_runstats)
+            print("HART grid warmup: {} launches, {:.6f} ms total\n",
+                  warmup ? 1 : 0, warmup_timer() * 1000.0);
         for (int i = 0; i < iterations; ++i) {
             if (!launch(m_runstats))
                 return false;
@@ -1287,6 +1294,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
             locations.push_back(binding.location);
         shadingsys.add_symlocs(&group, locations);
     }
+    OIIO::Timer group_timer(options.runstats);
     shadingsys.optimize_group(&group, nullptr);
 
     int group_size = -1, group_alignment = 0, local_groupdata = 0;
@@ -1296,6 +1304,9 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                         group_size, group_alignment, local_groupdata, err)
         || !embedded_raygen(arch, modules[0], err))
         return false;
+    if (options.runstats)
+        print("HART OSL group preparation: {:.6f} ms\n",
+              group_timer() * 1000.0);
     auto& textures = generated->textures();
     if (!generated->prepare_bindings(shadingsys, options.userdata_bindings,
                                      count)
@@ -1340,7 +1351,7 @@ testshade_hart_generated(SimpleRenderer& renderer, ShadingSystem& shadingsys,
                          options.fused ? size_t(local_groupdata) : 0,
                          closure_capacity, entry_count > 0, interactive,
                          options.update_parameters, options.pixelcenters);
-    const bool cleared  = runtime.clear();
+    const bool cleared = runtime.clear();
     if (!rendered || !cleared)
         return false;
     if (print_pixels) {
@@ -1518,7 +1529,7 @@ testshade_hart(int argc, const char* argv[])
         = renderer.render(width, height, iterations, warmup,
                           { reinterpret_cast<std::byte*>(pixels.data()),
                             pixels.size() * sizeof(float) });
-    const bool cleared  = renderer.clear();
+    const bool cleared = renderer.clear();
     if (!rendered || !cleared)
         return EXIT_FAILURE;
 

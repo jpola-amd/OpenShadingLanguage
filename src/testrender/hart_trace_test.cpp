@@ -336,6 +336,8 @@ check_lifecycle(Diagnostics& diagnostics)
     OIIO_CHECK_EQUAL(resident_usage.program_groups, size_t(3));
     OIIO_CHECK_ASSERT(resident_usage.context && resident_usage.stream
                       && resident_usage.pipeline);
+    OIIO_CHECK_EQUAL(resident.statistics().launches, size_t(0));
+    OIIO_CHECK_EQUAL(resident.statistics().pipeline_seconds, 0.0);
     int expected_errors = 0;
     auto reject         = [&](auto operation, string_view expected) {
         OIIO_CHECK_EQUAL(diagnostics.errors, expected_errors);
@@ -349,20 +351,36 @@ check_lifecycle(Diagnostics& diagnostics)
     reject([&]() { return reused.init(-1, arch); }, "nonnegative");
     check_resources(reused.resource_usage());
     for (unsigned cycle = 0; cycle < 3; ++cycle) {
-        if (!reused.init(0, arch))
+        if (!reused.init(0, arch, cycle != 0, true))
             return false;
         HartProbeParams params { };
         const float distance = 2.0f + cycle;
         if (!prepare_probe(reused, module, distance, cycle, params)
             || !launch_probe(reused, params, distance, cycle))
             return false;
-        const auto usage = reused.resource_usage();
+        const auto usage       = reused.resource_usage();
+        const auto preparation = reused.statistics();
+        OIIO_CHECK_ASSERT(std::isfinite(preparation.pipeline_seconds)
+                          && preparation.pipeline_seconds >= 0);
+        OIIO_CHECK_ASSERT(std::isfinite(preparation.launch_seconds)
+                          && preparation.launch_seconds >= 0);
+        OIIO_CHECK_EQUAL(preparation.launches, size_t(1));
+        reused.reset_launch_statistics();
+        OIIO_CHECK_EQUAL(reused.statistics().launches, size_t(0));
+        OIIO_CHECK_EQUAL(reused.statistics().launch_seconds, 0.0);
+        OIIO_CHECK_EQUAL(reused.statistics().pipeline_seconds,
+                         preparation.pipeline_seconds);
+        OIIO_CHECK_EQUAL(reused.statistics().state_stack,
+                         preparation.state_stack);
         for (int repeat = 0; repeat < 3; ++repeat) {
             if (!launch_probe(resident, resident_params, 7, 2)
                 || !launch_probe(reused, params, distance, cycle))
                 return false;
             check_resources(resident.resource_usage(), resident_usage);
             check_resources(reused.resource_usage(), usage);
+            OIIO_CHECK_EQUAL(reused.statistics().launches, size_t(repeat + 1));
+            OIIO_CHECK_ASSERT(std::isfinite(reused.statistics().launch_seconds)
+                              && reused.statistics().launch_seconds >= 0);
         }
         const std::array<unsigned char, 1> byte { 0 };
         reject([&]() { return reused.upload(resident_params.hits, byte); },
@@ -374,10 +392,20 @@ check_lifecycle(Diagnostics& diagnostics)
         reject([&]() { return reused.launch(&params, sizeof(params), 2, 1, 1); },
                "raygen index");
         check_resources(reused.resource_usage(), usage);
+        OIIO_CHECK_EQUAL(reused.statistics().launches, size_t(3));
         if (!launch_probe(resident, resident_params, 7, 2)
-            || !launch_probe(reused, params, distance, cycle)
-            || !reused.clear())
+            || !launch_probe(reused, params, distance, cycle))
             return false;
+        OIIO_CHECK_EQUAL(reused.statistics().launches, size_t(4));
+        if (!reused.clear())
+            return false;
+        const auto cleared = reused.statistics();
+        OIIO_CHECK_EQUAL(cleared.pipeline_seconds, 0.0);
+        OIIO_CHECK_EQUAL(cleared.launch_seconds, 0.0);
+        OIIO_CHECK_EQUAL(cleared.launches, size_t(0));
+        OIIO_CHECK_EQUAL(cleared.traversal_stack, 0u);
+        OIIO_CHECK_EQUAL(cleared.state_stack, 0u);
+        OIIO_CHECK_EQUAL(cleared.continuation_stack, 0u);
         OIIO_CHECK_EQUAL(reused.traversable(), uint64_t(0));
         check_resources(reused.resource_usage());
         OIIO_CHECK_ASSERT(reused.clear());

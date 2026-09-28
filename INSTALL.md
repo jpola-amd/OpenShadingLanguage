@@ -426,9 +426,15 @@ Only a renderer selecting that fused wrapper may omit its scratch buffer.
 Private storage may become registers or spill, so a larger budget is not
 necessarily faster.
 
-For generated groups, `--runstats` reports pipeline creation time separately
-from synchronized launch latency. Use `--warmup --iters N` to exclude one
-warmup launch and average the following N launches. The host timer includes
+For generated groups, `--runstats` separates OSL group preparation, pipeline
+construction, warmup and synchronized launch latency. Pipeline construction
+includes module/program-group creation, linking, deferred compilation triggered
+by stack queries, and SBT setup. Earlier reporting stopped before the stack
+query, so those older pipeline measurements are not directly comparable.
+Group preparation includes optimization and compiled-artifact extraction, not
+the separate `oslc` source-compilation process.
+Use `--warmup --iters N` to exclude one warmup launch and average the following
+N launches. Warmup includes its clears and error checks. The launch timer includes
 HART submission and waiting for GPU completion, but excludes output clears,
 resource setup, compilation, error-buffer readback and image copies. This
 is not a pure GPU kernel time. The tested Windows ROCm SDK returned negative
@@ -441,9 +447,10 @@ Callable estimates may be conservative floors; they are not measured VGPR,
 spill, or total per-thread physical stack usage. The current public API does
 not expose those hardware metrics.
 
-The manual comparison uses the existing chain, diamond and textured-material
-fixtures, comparing full float images across split, fused-scratch and
-fused-local modes:
+The manual comparison uses a nine-layer numeric chain, a connected textured
+material and an eight-lobe closure-construction shader. It compares full float
+images with CPU references and across split, fused-scratch and fused-local
+modes:
 
 ```powershell
 python .\testsuite\cmake-hart\check-generated.py `
@@ -451,11 +458,17 @@ python .\testsuite\cmake-hart\check-generated.py `
     --oslc .\build\hart-validation\bin\Release\oslc.exe --gpu --fused-benchmark
 ```
 
-It runs a 256x256 grid, one warmup and 100 measured launches per process,
-with three trials in rotated mode order. JSON rows report timing medians
-and ranges, stack estimates and storage requirements. Pipeline creation
-can include a first cache miss. There is no timing-based pass/fail threshold
-or automatic mode selection; compare on the intended GPU and workload.
+For each workload/mode it runs a single cache-disabled sample, a separate
+cache-enabled priming process, then three trials in rotated mode order.
+Trials use a 256x256 grid, one warmup and 100 measured launches per process.
+JSON rows retain individual trials, medians and ranges for source-compiler
+subprocess wall time, in-process group preparation, full pipeline construction,
+warmup, synchronized launch latency and process wall time. OSLC wall time
+includes process startup, not just parsing. Observed cache-hit keys are separate
+from the cache-enabled policy; disabling the HART pipeline cache does not flush
+OS or driver caches. Logical storage and SDK stack estimates are also recorded.
+There is no timing-based pass/fail threshold or automatic mode selection;
+compare on the intended GPU and workload.
 
 Numeric comparisons and `if`/`else` can also use connected inputs
 conditionally. For example, replace the consumer with:
@@ -1598,6 +1611,51 @@ visualization modes remain explicitly unsupported.
 shows directly visible emission and background only. `--no-jitter` fixes primary
 rays at pixel centers while retaining deterministic BSDF and light sampling.
 The scene's `rr_depth` option controls when roulette starts (default 5).
+
+Native `--runstats --warmup --iters N` also reports separate OSL material-group
+preparation, pipeline construction, synchronized launches and full frame times,
+all in milliseconds. Pipeline time includes modules, groups, linking, deferred
+stack-query compilation and SBT setup, but not context initialization or
+acceleration construction. Group preparation can include compilation-time
+texture/binding work; it is not a source-parser-only measurement.
+Launch counters and timing reset after warmup. They include background-table
+launches as well as the main frame, but exclude parameter uploads, output clears,
+error readbacks and image downloads. Full frame time includes the entire
+`render()` operation, including those operations, background preparation and
+pixel publication, but excludes the final image-file write. These are
+instrumented host timings, including submission/wait overhead, not GPU event
+times. Verbose diagnostics also contribute to process and frame wall time.
+
+`--hart-no-cache` disables the native SDK pipeline cache. Otherwise the SDK
+cache remains enabled; native statistics report the policy, **not an observed
+cache hit**. Warmup rendering and cross-process cache priming are different
+operations. Native memory statistics report context-owned allocation bytes,
+caller Groupdata stride and the configured local-storage budget, not physical
+VRAM usage. Textures, group-owned interactive allocations and opaque SDK/driver
+caches are excluded. Traversal/state/continuation stack estimates are SDK
+requirements, not measured registers, spills or physical per-thread stack use.
+
+The native benchmark reuses the analytic two-material white-furnace fixture:
+
+```powershell
+python .\testsuite\cmake-hart\check-pathtracer.py `
+  (Resolve-Path .\build\hart-validation\bin\Release\testrender.exe) `
+  (Resolve-Path .\build\hart-validation\bin\Release\oslc.exe) `
+  (Resolve-Path .\src\shaders\stdosl.h) split --benchmark
+```
+
+It runs all three optimized modes (the positional mode chooses the starting
+rotation), at 128x96, 16 samples per pixel and one bounce. Each mode has a
+cache-disabled single-frame sample, a separate cache-enabled priming frame,
+and three trials of one warmup plus 20 measured frames. Local mode uses a
+4096-byte budget. Finite bounded radiance, analytic mean furnace energy and
+cross-mode energy checks remain required. Per-pixel CPU/GPU differences are
+recorded as diagnostics, not equality gates; qualify visual equivalence under
+the same display conversion/exposure. JSON records separate individual timings,
+medians/ranges, cache policy, logical memory and SDK stack estimates; there are
+no speed thresholds.
+Neither benchmark is a cross-vendor throughput comparison. Record the build,
+device, driver/SDK, flags and trial ranges with any reported results.
 
 A positive `<Background resolution="N"/>` uses at least 32 samples per axis.
 OSL background values are evaluated on HART in batches of at most 65,536 texels;

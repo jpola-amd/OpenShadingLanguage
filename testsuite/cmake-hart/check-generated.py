@@ -14,6 +14,7 @@ import shutil
 import statistics
 import struct
 import subprocess
+import time
 import uuid
 
 
@@ -83,8 +84,9 @@ suites.add_argument("--fused", action="store_true",
 suites.add_argument("--fused-local", action="store_true",
                     help="Compare scratch and callable-local HART group storage")
 suites.add_argument("--fused-benchmark", action="store_true",
-                    help="Benchmark host-synchronized launch latency for split, "
-                         "fused-scratch and fused-local execution")
+                    help="Benchmark numeric, textured and closure-heavy grids: "
+                         "cold no-cache, separate cache priming and three rotated "
+                         "split/fused-scratch/fused-local trials")
 args = parser.parse_args()
 if (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.interactive_userdata or args.derivatives or args.surface or args.filterwidth
         or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors
@@ -103,15 +105,25 @@ env["TESTSHADE_HART"] = "0"
 env["TESTSHADE_FUSED"] = "0"
 env["TESTSHADE_BATCHED"] = "0"
 env["TESTSHADE_RS_BITCODE"] = "0"
+if args.fused_benchmark:
+    for key in ("TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTSHADE_LLVM_JIT_FMA",
+                "OSL_OPTIONS", "OSL_LLVM_DEBUG", "OSL_DEBUG_OUTPUT_CPP"):
+        env.pop(key, None)
 root = Path.cwd() / ("hart-generated-check-" + uuid.uuid4().hex)
 root.mkdir()
 
 
-def run(arguments, error=None, extra_env=None, error_after_launch=False):
+def run(arguments, error=None, extra_env=None, error_after_launch=False,
+        wall_times=None):
+    start = time.perf_counter()
     result = subprocess.run(
         [testshade] + arguments, cwd=root, env={**env, **(extra_env or {})},
         capture_output=True, text=True, timeout=300,
     )
+    wall_ms = (time.perf_counter() - start) * 1000
+    if wall_times is not None:
+        assert math.isfinite(wall_ms) and wall_ms >= 0
+        wall_times.append(wall_ms)
     output = result.stdout + result.stderr
     if error is None:
         assert result.returncode == 0, output
@@ -122,14 +134,19 @@ def run(arguments, error=None, extra_env=None, error_after_launch=False):
     return output
 
 
-def compile_fixture(source, name=None, defines=()):
+def compile_fixture(source, name=None, defines=(), options=()):
+    start = time.perf_counter()
     result = subprocess.run(
-        [oslc, "-I" + str(fixtures.parents[1] / "src" / "shaders")]
+        [oslc] + list(options)
+        + ["-I" + str(fixtures.parents[1] / "src" / "shaders")]
         + ["-D" + define for define in defines]
         + ["-o", str(root / ((name or source.stem) + ".oso")), str(source)],
         cwd=root, env=env, capture_output=True, text=True, timeout=30,
     )
+    wall_ms = (time.perf_counter() - start) * 1000
     assert result.returncode == 0, result.stdout + result.stderr
+    assert math.isfinite(wall_ms) and wall_ms >= 0
+    return wall_ms
 
 
 def pixels(output, width, height):
@@ -2208,77 +2225,184 @@ def check_fused_benchmark():
     width = height = 256
     iterations, trials = 100, 3
     modes = ("split", "fused-scratch", "fused-local")
-    cases = (("chain9", group_arguments(9, "3")),
-             ("diamond", topology_arguments("3")),
-             ("material", material_arguments("3", report=1)))
+    closure_source = root / "benchmark_closures.osl"
+    closure_source.write_text("""shader benchmark_closures(output color Cout=0) {
+    Ci=0;
+    for (int i=0; i<8; ++i) {
+        normal n=normalize(normal(u+0.0625*i, v-0.03125*i, 1));
+        color weight=color(0.125+0.0625*i, 0.25+0.125*u, 0.125+0.125*v);
+        Ci += weight*diffuse(n);
+    }
+    if (Ci) Cout=color(1, 0.25+u, 0.5+v);
+}
+""", encoding="ascii")
+    cases = (
+        ("chain9", "numeric", group_arguments(9, "3"),
+         ("hart_group_chain", "hart_group_probe"), 0),
+        ("material", "textured", material_arguments("3", report=1),
+         ("hart_material_coords", "hart_material_uv", "hart_material_texture",
+          "hart_material_mask", "hart_material_mix"), 0),
+        ("closures8", "closure-heavy",
+         ["-O2", "--llvm_opt", "3", "benchmark_closures"],
+         ("benchmark_closures",), 1024),
+    )
+
+    def ranges(values):
+        return {"median": statistics.median(values),
+                "range": [min(values), max(values)], "trials": values}
+
+    sources = {name: (closure_source if name == closure_source.stem
+                      else fixtures / (name + ".osl"))
+               for _, _, _, names, _ in cases for name in names}
+    compile_ms = {name: [] for name in sources}
+    for trial in range(trials):
+        names = list(sources)
+        for name in names[trial:] + names[:trial]:
+            compile_ms[name].append(compile_fixture(sources[name], options=("-O1",)))
+
     image = root / "fused-benchmark.pfm"
-    for graph, shader_args in cases:
+    for graph, workload, shader_args, names, closure_pool in cases:
         print("Benchmarking HART " + graph, flush=True)
         samples = {mode: [] for mode in modes}
         storage_by_mode = {}
         stacks_by_mode = {}
+        cpu = noise_cpu_image(shader_args, width, height)
+        assert all(math.isfinite(value) for value in cpu) and max(cpu) > 0, graph
+        if graph == "chain9":
+            compare(cpu, group_reference(9, width, height))
+        elif graph == "closures8":
+            compare(cpu, reference(width, height, lambda u, v: (1, 0.25+u, 0.5+v)))
         baseline = None
+
+        def sample(mode, count, warmup, no_cache):
+            nonlocal baseline
+            if image.exists():
+                image.unlink()
+            flags = ["--hart", "--runstats", "-v", "--iters", str(count),
+                     "-g", str(width), str(height), "-o", "Cout", str(image)]
+            if warmup:
+                flags += ["--warmup"]
+            if no_cache:
+                flags += ["--hart-no-cache"]
+            if mode != "split":
+                flags += ["--hart-fused", "--hart-local-groupdata",
+                          "2147483647" if mode == "fused-local" else "0"]
+            wall = []
+            output = run(flags + shader_args, wall_times=wall)
+            callable_mode = "split" if mode == "split" else "fused"
+            assert "HART callable mode: " + callable_mode in output, output
+            assert ("HART pipeline cache disabled" in output) == no_cache, output
+            assert output.count("Launching HART grid") == count + int(warmup), output
+            pools = re.findall(r"HART closure pool: (\d+) bytes per point", output)
+            assert pools == [str(closure_pool)], output
+            pipeline_ms, launch_mean_ms = check_hart_runstats(output, count)
+            preparation = re.findall(
+                r"^HART OSL group preparation: (\S+) ms\r?$", output, re.MULTILINE)
+            warmup_records = re.findall(
+                r"^HART grid warmup: ([01]) launches, (\S+) ms total\r?$",
+                output, re.MULTILINE)
+            assert len(preparation) == 1 and len(warmup_records) == 1, output
+            preparation_ms = float(preparation[0])
+            warmup_count, warmup_time = warmup_records[0]
+            warmup_count, warmup_ms = int(warmup_count), float(warmup_time)
+            assert warmup_count == int(warmup), output
+            assert all(math.isfinite(value) and value >= 0
+                       for value in (preparation_ms, warmup_ms)), output
+            if not warmup:
+                assert warmup_ms == 0, output
+            stacks = hart_stack_estimates(output)
+            if mode in stacks_by_mode:
+                assert stacks_by_mode[mode] == stacks, (graph, mode, stacks)
+            stacks_by_mode[mode] = stacks
+            storage = hart_group_storage(output)
+            size, alignment, local, scratch = storage
+            assert local == (size if mode == "fused-local" else 0), storage
+            stride = ((size + alignment - 1) // alignment) * alignment
+            assert scratch == (0 if local else width * height * stride), storage
+            if mode in storage_by_mode:
+                assert storage_by_mode[mode] == storage, storage
+            storage_by_mode[mode] = storage
+            assert storage[:2] == storage_by_mode["split"][:2], storage
+            actual = image_pixels(image, width, height)
+            assert all(math.isfinite(value) for value in actual) and max(actual) > 0
+            compare(actual, cpu)
+            if baseline is None:
+                assert mode == "split"
+                baseline = actual
+            compare(actual, baseline)
+            return {
+                "osl_group_preparation_ms": preparation_ms,
+                "pipeline_ms": pipeline_ms,
+                "warmup_ms": warmup_ms,
+                "launch_mean_ms": launch_mean_ms,
+                "process_wall_ms": wall[0],
+                "iterations": count, "warmup_launches": warmup_count,
+                "cache_policy": "disabled" if no_cache else "enabled-default",
+                "observed_cache_hit_keys": re.findall(
+                    r"cache hit for key[ \t]+(\S+)", output),
+            }
+
+        # Cold means bypassing HART's pipeline cache, not flushing OS/driver
+        # caches. Prime each mode separately, outside the repeated trials.
+        cold = {mode: sample(mode, 1, False, True) for mode in modes}
+        priming = {mode: sample(mode, 1, False, False) for mode in modes}
         for trial in range(trials):
             for mode in modes[trial:] + modes[:trial]:
-                if image.exists():
-                    image.unlink()
-                flags = ["--hart", "--runstats", "-v", "--warmup",
-                         "--iters", str(iterations), "-g", str(width), str(height),
-                         "-o", "Cout", str(image)]
-                if mode != "split":
-                    flags += ["--hart-fused", "--hart-local-groupdata",
-                              "2147483647" if mode == "fused-local" else "0"]
-                output = run(flags + shader_args)
-                callable_mode = "split" if mode == "split" else "fused"
-                assert "HART callable mode: " + callable_mode in output, output
-                assert "HART pipeline cache disabled" not in output, output
-                assert output.count("Launching HART grid") == iterations + 1, output
-                samples[mode].append(check_hart_runstats(output, iterations))
-                stacks = hart_stack_estimates(output)
-                if mode in stacks_by_mode:
-                    assert stacks_by_mode[mode] == stacks, (graph, mode, stacks)
-                stacks_by_mode[mode] = stacks
-                storage = hart_group_storage(output)
-                size, alignment, local, scratch = storage
-                assert local == (size if mode == "fused-local" else 0), storage
-                stride = ((size + alignment - 1) // alignment) * alignment
-                assert scratch == (0 if local else width * height * stride), storage
-                if mode in storage_by_mode:
-                    assert storage_by_mode[mode] == storage, storage
-                storage_by_mode[mode] = storage
-                assert storage[:2] == storage_by_mode["split"][:2], storage
-                actual = image_pixels(image, width, height)
-                assert all(math.isfinite(value) for value in actual), (graph, mode)
-                if baseline is None:
-                    assert mode == "split"
-                    baseline = actual
-                compare(actual, baseline)
+                samples[mode].append(sample(mode, iterations, True, False))
 
-        # Launch latency includes host submission and synchronization, not just
-        # GPU execution. Pipeline creation can include a first cache miss.
-        # Report trial ranges, not pass/fail speed thresholds.
         for mode in modes:
-            pipeline_ms, launch_mean_ms = zip(*samples[mode])
             size, alignment, local, scratch = storage_by_mode[mode]
             print(json.dumps({
                 "benchmark": "hart-fused",
                 "measurement": "host-synchronized-launch",
-                "graph": graph, "mode": mode, "grid": [width, height],
+                "graph": graph, "workload": workload,
+                "mode": mode, "grid": [width, height],
                 "llvm_opt": 3, "osl_opt": 2,
                 "warmup": 1, "iterations": iterations, "trials": trials,
-                "launch_mean_ms": {
-                    "median": statistics.median(launch_mean_ms),
-                    "range": [min(launch_mean_ms), max(launch_mean_ms)],
-                    "trials": launch_mean_ms,
+                "trial_mode_order": [modes[i:] + modes[:i] for i in range(trials)],
+                "oslc_process_wall_ms": {
+                    "scope": "sum of source compiler subprocesses; includes startup, "
+                             "not in-process OSL group compilation",
+                    "sources": names, "oslc_opt": 1,
+                    **ranges([sum(compile_ms[name][i] for name in names)
+                              for i in range(trials)]),
                 },
-                "pipeline_ms": {
-                    "median": statistics.median(pipeline_ms),
-                    "range": [min(pipeline_ms), max(pipeline_ms)],
-                    "trials": pipeline_ms,
-                },
+                "cold_no_cache": cold[mode],
+                "cache_priming_outside_trials": priming[mode],
+                "cache_policy": "enabled-default",
+                "observed_cache_hit_keys_by_trial": [
+                    record["observed_cache_hit_keys"] for record in samples[mode]],
+                "launch_mean_ms": ranges([
+                    record["launch_mean_ms"] for record in samples[mode]]),
+                "osl_group_preparation_ms": ranges([
+                    record["osl_group_preparation_ms"] for record in samples[mode]]),
+                "pipeline_ms": ranges([
+                    record["pipeline_ms"] for record in samples[mode]]),
+                "warmup_ms": ranges([
+                    record["warmup_ms"] for record in samples[mode]]),
+                "process_wall_ms": ranges([
+                    record["process_wall_ms"] for record in samples[mode]]),
+                "timing_scope": "OSL group preparation includes optimize_group and "
+                                "compiled artifact/metadata extraction, not source "
+                                "parsing; pipeline covers full load(): modules, "
+                                "program groups, pipeline, deferred stack-query "
+                                "compilation and SBT setup; warmup includes its "
+                                "launch, clears and error checks, not allocation "
+                                "or readback; timed launch is synchronized host "
+                                "latency excluding warmup, clears and error checks; "
+                                "process includes setup, warmup, launches, image "
+                                "IO and teardown",
+                "pipeline_timing_comparison": "full-load timings are not directly "
+                                              "comparable to the old T10 interval "
+                                              "ending before the stack query",
+                "cold_scope": "HART pipeline cache disabled; OS/driver caches untouched",
                 "group_bytes": size, "alignment": alignment,
                 "local_bytes": local, "scratch_bytes": scratch,
+                "closure_pool_bytes_per_point": closure_pool,
+                "closure_lobes": 8 if workload == "closure-heavy" else 0,
                 "stack_estimate_bytes": stacks_by_mode[mode],
+                "memory_scope": "logical group/pool storage and SDK stack estimates, "
+                                "not physical VRAM, registers or spills",
             }, allow_nan=False), flush=True)
 
 
@@ -3986,6 +4110,12 @@ def check_numeric_math_suite():
 
 
 try:
+    if args.fused_benchmark:
+        check_fused_benchmark()
+        print("Generated HART benchmark correctness and timing records passed; "
+              "no performance thresholds")
+        raise SystemExit(0)
+
     for source in fixtures.glob("hart_*.osl"):
         compile_fixture(source)
 
@@ -4320,9 +4450,6 @@ try:
 
     if args.fused_local:
         check_fused_local_suite()
-
-    if args.fused_benchmark:
-        check_fused_benchmark()
 
     if args.gpu and not (args.loops or args.control_flow or args.aggregates or args.strings or args.selectors or args.diagnostics or args.interactive_userdata or args.derivatives or args.surface or args.filterwidth
                          or args.noise or args.noise_families or args.gabor or args.math or args.numeric_math or args.splines or args.colors

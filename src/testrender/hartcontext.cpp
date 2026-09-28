@@ -13,6 +13,8 @@
 #include "hartcontext.h"
 #include "hartparams.h"
 
+#include <OpenImageIO/timer.h>
+
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -157,10 +159,12 @@ struct HartContext::Impl {
     };
 
     ErrorHandler& m_err;
-    int m_device                       = -1;
-    bool m_initialized                 = false;
-    bool m_scene_ready                 = false;
-    bool m_pipeline_ready              = false;
+    int m_device              = -1;
+    bool m_initialized        = false;
+    bool m_scene_ready        = false;
+    bool m_pipeline_ready     = false;
+    bool m_collect_statistics = false;
+    Statistics m_statistics;
     unsigned m_scene_material_count    = 0;
     unsigned m_pipeline_material_count = 0;
     unsigned m_max_primitives          = 0;
@@ -198,7 +202,8 @@ HartContext::~HartContext()
 
 
 bool
-HartContext::init(int device, std::string& arch)
+HartContext::init(int device, std::string& arch, bool cache_enabled,
+                  bool statistics)
 {
     auto& ctx = *m_impl;
     arch.clear();
@@ -258,7 +263,12 @@ HartContext::init(int device, std::string& arch)
             "hartDeviceContextGetProperty max SBT records")
         || !ctx.hip_check(hipStreamCreate(&ctx.m_stream), "hipStreamCreate"))
         return false;
-    ctx.m_initialized = true;
+    if (!ctx.hart_check(hartDeviceContextSetCacheEnabled(ctx.m_context,
+                                                         cache_enabled),
+                        "hartDeviceContextSetCacheEnabled"))
+        return false;
+    ctx.m_collect_statistics = statistics;
+    ctx.m_initialized        = true;
     arch.assign(selected_arch.data(), selected_arch.size());
     return true;
 }
@@ -476,6 +486,7 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                              string_view secondary_raygen_entry)
 {
     auto& ctx = *m_impl;
+    OIIO::Timer pipeline_timer(ctx.m_collect_statistics);
     if (!ctx.ready())
         return false;
     if (ctx.m_module || ctx.m_pipeline || !ctx.m_groups.empty()) {
@@ -677,14 +688,14 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
                        as_bytes(cspan<EmptyRecord>(callable_records))))
             return false;
     }
-    ctx.m_sbt.raygenRecord            = device_records;
-    ctx.m_secondary_raygen = secondary
-                                 ? device_records + 2 * sizeof(EmptyRecord)
-                                 : nullptr;
-    ctx.m_sbt.missRecordBase          = device_records + sizeof(EmptyRecord);
-    ctx.m_sbt.missRecordStrideInBytes = sizeof(EmptyRecord);
-    ctx.m_sbt.missRecordCount         = 1;
-    ctx.m_sbt.hitgroupRecordBase      = device_hits;
+    ctx.m_sbt.raygenRecord   = device_records;
+    ctx.m_secondary_raygen   = secondary
+                                   ? device_records + 2 * sizeof(EmptyRecord)
+                                   : nullptr;
+    ctx.m_sbt.missRecordBase = device_records + sizeof(EmptyRecord);
+    ctx.m_sbt.missRecordStrideInBytes      = sizeof(EmptyRecord);
+    ctx.m_sbt.missRecordCount              = 1;
+    ctx.m_sbt.hitgroupRecordBase           = device_hits;
     ctx.m_sbt.hitgroupRecordStrideInBytes  = material_count ? sizeof(HitRecord)
                                                             : 0;
     ctx.m_sbt.hitgroupRecordCount          = material_count;
@@ -695,6 +706,12 @@ HartContext::create_pipeline(cspan<unsigned char> bitcode,
     ctx.m_sbt.callablesRecordCount = static_cast<unsigned>(callable_count);
     ctx.m_pipeline_material_count  = material_count;
     ctx.m_pipeline_ready           = true;
+    if (ctx.m_collect_statistics) {
+        ctx.m_statistics.pipeline_seconds   = pipeline_timer();
+        ctx.m_statistics.traversal_stack    = traversal_stack;
+        ctx.m_statistics.state_stack        = state_stack;
+        ctx.m_statistics.continuation_stack = continuation_stack;
+    }
     return true;
 }
 
@@ -736,12 +753,21 @@ HartContext::launch(const void* params, size_t param_bytes, unsigned width,
     auto sbt = ctx.m_sbt;
     if (raygen_index == 1)
         sbt.raygenRecord = ctx.m_secondary_raygen;
+    if (ctx.m_collect_statistics
+        && !ctx.hip_check(hipStreamSynchronize(ctx.m_stream),
+                          "hipStreamSynchronize before launch timing"))
+        return false;
+    OIIO::Timer launch_timer(ctx.m_collect_statistics);
     const bool launched
         = ctx.hart_check(hartLaunch(ctx.m_pipeline, ctx.m_stream, ctx.m_params,
                                     param_bytes, &sbt, width, height, 1),
                          "hartLaunch");
     const bool synchronized = ctx.hip_check(hipStreamSynchronize(ctx.m_stream),
                                             "hipStreamSynchronize after launch");
+    if (launched && synchronized && ctx.m_collect_statistics) {
+        ctx.m_statistics.launch_seconds += launch_timer();
+        ++ctx.m_statistics.launches;
+    }
     return launched && synchronized;
 }
 
@@ -828,8 +854,25 @@ HartContext::clear()
     ctx.m_param_capacity          = 0;
     ctx.m_scene_material_count    = 0;
     ctx.m_pipeline_material_count = 0;
+    ctx.m_statistics              = { };
+    ctx.m_collect_statistics      = false;
     ctx.m_device                  = -1;
     return true;
+}
+
+
+
+HartContext::Statistics
+HartContext::statistics() const
+{ return m_impl->m_statistics; }
+
+
+
+void
+HartContext::reset_launch_statistics()
+{
+    m_impl->m_statistics.launches       = 0;
+    m_impl->m_statistics.launch_seconds = 0;
 }
 
 

@@ -24,10 +24,13 @@ public:
     HartRaytracer();
     ~HartRaytracer() override;
 
-    bool initialize(int device, bool fused, size_t local_budget);
+    bool initialize(int device, bool fused, size_t local_budget,
+                    bool cache_enabled = true, bool statistics = false);
     bool failed() const;
     /// Native context ownership only; excludes textures and group allocations.
     HartContext::ResourceUsage resource_usage() const;
+    void reset_launch_statistics();
+    void print_statistics() const;
 
     int supports(string_view feature) const override;
     TextureHandle* get_texture_handle(ustring filename, ShadingContext* context,

@@ -10,6 +10,8 @@
 #include "hartparams.h"
 #include "hartpathparams.h"
 
+#include <OpenImageIO/timer.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -95,8 +97,8 @@ struct HartRaytracer::Impl {
         m_params.max_bounces = unsigned(bounces);
         m_params.no_jitter   = renderer.options.get_int("no_jitter") != 0;
         m_params.fused       = m_fused;
-        m_params.rr_depth            = renderer.options.get_int("rr_depth", 5);
-        m_params.background_material = background;
+        m_params.rr_depth    = renderer.options.get_int("rr_depth", 5);
+        m_params.background_material   = background;
         m_params.background_resolution = unsigned(resolution);
         m_params.background_offset     = 0;
         return true;
@@ -238,8 +240,8 @@ struct HartRaytracer::Impl {
             ss.optimize_group(group, nullptr);
             if (m_failed)
                 return false;
-            const void* data = nullptr;
-            uint64_t bytes   = 0;
+            const void* data  = nullptr;
+            uint64_t bytes    = 0;
             void* interactive = nullptr;
             int size = 0, alignment = 0, local = 0;
             HartCallable callable;
@@ -467,6 +469,9 @@ struct HartRaytracer::Impl {
     bool m_published             = false;
     bool m_failed                = false;
     bool m_fused                 = false;
+    bool m_collect_statistics    = false;
+    bool m_cache_enabled         = true;
+    double m_compile_seconds     = 0;
     size_t m_local_budget        = 0;
     size_t m_scratch_alignment   = 1;
     size_t m_scratch_capacity    = 0;
@@ -491,7 +496,8 @@ HartRaytracer::~HartRaytracer()
 
 
 bool
-HartRaytracer::initialize(int device, bool fused, size_t local_budget)
+HartRaytracer::initialize(int device, bool fused, size_t local_budget,
+                          bool cache_enabled, bool statistics)
 {
     auto& impl = *m_impl;
     if (impl.m_failed)
@@ -503,14 +509,16 @@ HartRaytracer::initialize(int device, bool fused, size_t local_budget)
         || (!fused && local_budget))
         return impl.fail("HART local groupdata requires fused callables and a "
                          "budget in [0,INT_MAX]");
-    if (!impl.m_context.init(device, impl.m_arch)) {
+    if (!impl.m_context.init(device, impl.m_arch, cache_enabled, statistics)) {
         impl.m_failed = true;
         return false;
     }
-    impl.m_fused        = fused;
-    impl.m_device       = device;
-    impl.m_local_budget = local_budget;
-    impl.m_initialized  = true;
+    impl.m_fused              = fused;
+    impl.m_device             = device;
+    impl.m_local_budget       = local_budget;
+    impl.m_collect_statistics = statistics;
+    impl.m_cache_enabled      = cache_enabled;
+    impl.m_initialized        = true;
     return true;
 }
 
@@ -525,6 +533,35 @@ HartRaytracer::failed() const
 HartContext::ResourceUsage
 HartRaytracer::resource_usage() const
 { return m_impl->m_context.resource_usage(); }
+
+
+
+void
+HartRaytracer::reset_launch_statistics()
+{ m_impl->m_context.reset_launch_statistics(); }
+
+
+
+void
+HartRaytracer::print_statistics() const
+{
+    const auto& impl = *m_impl;
+    const auto stats = impl.m_context.statistics();
+    print(
+        "HART native pipeline cache: {} (SDK policy; hit status unavailable)\n",
+        impl.m_cache_enabled ? "enabled" : "disabled");
+    print("HART native preparation: {:.6f} ms OSL groups, {:.6f} ms pipeline\n",
+          impl.m_compile_seconds * 1000.0, stats.pipeline_seconds * 1000.0);
+    print("HART native synchronized launches: {} launches, {:.6f} ms total\n",
+          stats.launches, stats.launch_seconds * 1000.0);
+    print("HART native memory: {} context-owned bytes, {} groupdata stride "
+          "bytes, {} local budget bytes\n",
+          impl.m_context.resource_usage().bytes, impl.m_params.scratch_stride,
+          impl.m_local_budget);
+    print("HART native stack estimates: traversal {} bytes, state {} bytes, "
+          "continuation {} bytes\n",
+          stats.traversal_stack, stats.state_stack, stats.continuation_stack);
+}
 
 
 
@@ -592,7 +629,7 @@ HartRaytracer::good(TextureHandle* handle)
 void
 HartRaytracer::prepare_render()
 {
-    auto& impl = *m_impl;
+    auto& impl       = *m_impl;
     impl.m_published = false;
     pixelbuf.clear();
     if (impl.m_failed)
@@ -611,8 +648,11 @@ HartRaytracer::prepare_render()
         return;
     std::vector<HartCallable> callables;
     std::vector<HartMaterialBinding> bindings;
+    OIIO::Timer compile_timer(impl.m_collect_statistics);
     if (!impl.compile_materials(*this, callables, bindings))
         return;
+    if (impl.m_collect_statistics)
+        impl.m_compile_seconds = compile_timer();
     cspan<unsigned char> raygen;
     for (const auto& module : hart_pathtracer_modules) {
         if (module.arch && impl.m_arch == module.arch && module.data
@@ -772,6 +812,7 @@ HartRaytracer::clear()
     impl.m_initialized         = false;
     impl.m_prepared            = false;
     impl.m_published           = false;
+    impl.m_compile_seconds     = 0;
     impl.m_output_capacity     = 0;
     impl.m_scratch_capacity    = 0;
     impl.m_background_capacity = 0;

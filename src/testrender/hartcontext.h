@@ -33,7 +33,8 @@ public:
     HartContext(const HartContext&)            = delete;
     HartContext& operator=(const HartContext&) = delete;
 
-    bool init(int device, std::string& arch);
+    bool init(int device, std::string& arch, bool cache_enabled = true,
+              bool statistics = false);
     bool make_current();
     void* alloc(size_t bytes);
     bool upload(void* destination, cspan<unsigned char> source);
@@ -59,6 +60,15 @@ public:
         bool context = false, stream = false, pipeline = false;
     };
     ResourceUsage resource_usage() const;
+
+    /// Host-synchronized timings, not device-event or physical stack usage.
+    struct Statistics {
+        double pipeline_seconds = 0, launch_seconds = 0;
+        size_t launches          = 0;
+        unsigned traversal_stack = 0, state_stack = 0, continuation_stack = 0;
+    };
+    Statistics statistics() const;
+    void reset_launch_statistics();
 
 private:
     struct Impl;
