@@ -1406,7 +1406,7 @@ geometry produces an explicit error before acceleration construction.
 Codegen tests verify the device module for every configured architecture.
 Only execution on the selected physical device is runtime evidence.
 
-### Rendering surface materials with HART
+### Rendering materials with HART
 
 `testrender --hart scene.xml output.exr` uses the existing XML scene parser,
 triangle meshes, camera and sampling helpers with native HART traversal and
@@ -1424,9 +1424,10 @@ light sampling, power-heuristic MIS and Russian roulette, maintaining medium
 boundary state for dielectric surfaces. Mark emissive shader groups with
 `is_light="yes"` to include their triangles in direct-light sampling.
 Background shaders illuminate misses and can participate in importance
-sampling. Volume integration, displacement and diagnostic visualization modes
-remain explicitly unsupported.
-`--hart-bounces N` limits surface bounces to 0..64 (default 4);
+sampling. Homogeneous MaterialX anisotropic and medium VDFs use the shared
+reference volume integrator. Displacement, heterogeneous volumes and diagnostic
+visualization modes remain explicitly unsupported.
+`--hart-bounces N` limits surface and volume events to 0..64 (default 4);
 `-aa N` uses N squared samples per pixel, with N in 1..64. A limit of zero
 shows directly visible emission and background only. `--no-jitter` fixes primary
 rays at pixel centers while retaining deterministic BSDF and light sampling.
@@ -1441,6 +1442,20 @@ background shader evaluation on misses. Importance sampling requires finite,
 nonnegative radiance. Black maps and zero-energy rows remain black and use
 valid sampling distributions, without divisions by zero. The scene parser
 still requires geometry, even if every camera ray misses it.
+
+Volumes support absorption, scattering, anisotropy, weighted layers and
+dielectric boundaries. Up to eight nested medium entries, including vacuum
+entries, retain the reference priority and IOR rules. Equal highest-priority
+media combine their coefficients. Coefficients must be finite and nonnegative;
+IOR must be finite and positive, and anisotropy must satisfy `abs(g) < 1`.
+Medium VDF transmission colors must lie in `[0,1]` with positive transmission
+depth, except that the reference black-albedo/black-transmission vacuum may
+use zero depth. Albedo is clamped to `[0,1]` when forming scattering coefficients.
+Zero-extinction channels remain transparent, and complete absorption terminates
+a path without being mistaken for an error. Invalid parameters, samples or
+medium-capacity exhaustion fail explicitly without publishing an image.
+As in the reference renderer, volume integration occurs on finite-hit segments;
+this is not a new infinite-medium or transmissive-shadow implementation.
 
 Hit-point ShaderGlobals use real incident rays, interpolated normals/UVs,
 mesh surface areas, camera/ray-cone differentials and camera/diffuse/shadow ray
@@ -1464,7 +1479,7 @@ image. This traversal does not implement the OSL `trace()` renderer service.
 cmake --build build\hart-validation --config Release `
   --target testrender oslc hart_trace_test hart_material_test --parallel 8
 ctest --test-dir build\hart-validation -C Release `
-  -R "^hart-(pathtracer|raytracer|material|background|lighting)-" --output-on-failure
+  -R "^hart-(pathtracer|raytracer|material|background|lighting|volume)-" --output-on-failure
 ```
 
 The path tests compare connected textured emissive materials and geometry
@@ -1479,9 +1494,12 @@ than inferring it from matching pixels. CPU/OptiX renders can use
 default is unchanged.
 
 The material component probe compares unquantized GPU/CPU albedo, BSDF
-evaluation and sampling, PDFs, directions and roughness for 14 cases at three
-inputs. It also checks seven invalid/boundary cases, including cycles,
-truncated records, the 32/33 lobe limit and overflowing PDFs.
+evaluation and sampling, PDFs, directions and roughness for 14 surface cases
+at three inputs. Twelve additional volume cases check independent absorption
+and scattering values, clear channels, phase directions, layers, IOR and
+priorities. Fourteen invalid/boundary cases cover cycles, truncated records,
+the 32/33 lobe limit, overflowing PDFs, malformed media and the eight-entry
+medium limit, including rollback after a failed update.
 Its float tolerance is `2e-6 + 2e-5*abs(CPU)`; delta PDFs and rejection flags
 have exact checks. Material rendering tests exercise 21 CPU/HART scene pairs
 in all four dispatch/storage modes with direct-light sampling disabled.
@@ -1491,8 +1509,7 @@ reflection/transparent references and zero-bounce output remain exact.
 Invalid runtime distributions must fail without publishing an image.
 Weighted layer records preserve the scaling of explicit closure multiplication,
 including base lobes and opacity. The layered scene also compares CPU OSL 0
-and OSL 2 to catch optimizer-dependent energy changes. Host-only medium scaling
-checks do not imply HART volume-rendering support.
+and OSL 2 to catch optimizer-dependent energy changes.
 
 Lighting tests compare 17 CPU/HART render pairs per execution mode, including
 direct and importance-sampled backgrounds, black/partially black maps,
@@ -1502,6 +1519,19 @@ background crosses the prepass batch boundary; forced early roulette and
 repeated renders exercise their respective paths. Invalid background closure
 types must fail without publishing an image. Codegen checks verify both raygen
 entries for every configured architecture.
+
+Volume tests compare 15 CPU/HART scenes per execution mode, with independent
+Beer-Lambert references for absorption, vacuum, weighted layers and nested
+priorities. They cover clear channels, forward/backward scattering, dielectric
+boundaries, repeated rendering, CPU optimizer invariance and invalid-media
+rejection without image publication. Shared phase sampling uses paired
+sine/cosine evaluation to preserve unit ray directions; coarse independent
+`sinpi`/`cospi` approximations do not meet that invariant. A scatter event clears
+the previous-triangle exclusion so rays can exit through the entered face.
+Transmitted CPU/CUDA boundaries reuse HART's triangle-scaled origin offset to
+prevent neighboring triangles from recording the same medium entry repeatedly.
+Windows reference variants account for rare path changes from these corrections;
+existing references and comparison thresholds are retained.
 
 ### Testing external HART device code
 

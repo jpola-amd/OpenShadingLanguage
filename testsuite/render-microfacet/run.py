@@ -10,5 +10,6 @@ failpercent = 1
 allowfailures = 5
 idiff_program = "idiff"
 
+# The boundary-win reference uses robust transmitted-ray origin offsets.
 outputs = [ "out.exr" ]
 command = testrender("-r 160 120 -aa 8 scene.xml out.exr")

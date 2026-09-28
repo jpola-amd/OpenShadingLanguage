@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cfloat>
 #include <vector>
 
 #include <OpenImageIO/fmath.h>
@@ -218,6 +219,27 @@ struct Scene {
     Intersection intersect(const Ray& r, const float tmax,
                            const unsigned skipID1,
                            const unsigned skipID2 = ~0u) const;
+
+    OSL_HOSTDEVICE Vec3 offset_ray_origin(unsigned primID, const Vec3& point,
+                                          const Vec3& normal,
+                                          const Vec3& direction) const
+    {
+        const auto triangle = triangles[primID];
+        const Vec3 a        = verts[triangle.a];
+        const Vec3 b        = verts[triangle.b];
+        const Vec3 c        = verts[triangle.c];
+        float scale         = 0;
+        for (int axis = 0; axis < 3; ++axis)
+            scale = fmaxf(scale, fmaxf(fabsf(a[axis]),
+                                       fmaxf(fabsf(b[axis]), fabsf(c[axis]))));
+        const Vec3 n = normal.dot(direction) >= 0 ? normal : -normal;
+        Vec3 origin  = point + n * (32 * FLT_EPSILON * scale);
+        for (int axis = 0; axis < 3; ++axis)
+            if (n[axis] != 0)
+                origin[axis] = nextafterf(origin[axis],
+                                          copysignf(INFINITY, n[axis]));
+        return origin;
+    }
 
     OSL_HOSTDEVICE
     LightSample sample(int primID, const Vec3& x, float xi, float yi) const

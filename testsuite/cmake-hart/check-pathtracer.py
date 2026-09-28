@@ -14,12 +14,15 @@ import xml.etree.ElementTree as ET
 
 
 if len(sys.argv) not in (5, 6) or (len(sys.argv) == 6
-                                 and sys.argv[5] not in ("--materials", "--lighting")):
+                                 and sys.argv[5] not in ("--materials", "--lighting",
+                                                        "--volumes")):
     raise SystemExit("Usage: check-pathtracer.py renderer compiler stdosl "
-                     "{split|fused|fused-local|unoptimized} [--materials|--lighting]")
+                     "{split|fused|fused-local|unoptimized} "
+                     "[--materials|--lighting|--volumes]")
 renderer, compiler, stdosl, mode = sys.argv[1:5]
 materials = len(sys.argv) == 6 and sys.argv[5] == "--materials"
 lighting = len(sys.argv) == 6 and sys.argv[5] == "--lighting"
+volumes = len(sys.argv) == 6 and sys.argv[5] == "--volumes"
 env = os.environ.copy()
 for key in ("TESTSHADE_OPTIX", "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
     env.pop(key, None)
@@ -389,6 +392,147 @@ def check_lighting():
     assert "HART path tracer rendered" not in out and not image.exists(), out
 
 
+def check_volumes():
+    shaders = {
+        "path_volume_boundary": """volume path_volume_boundary(
+            int kind=0, color albedo=0, color extinction=color(0.2,0.4,0.6),
+            float anisotropy=0, float depth=1, color transmission=color(0.8,0.6,0.4),
+            float ior=1, int priority=0, float weight=1, int layered=0, int glass=0) {
+            closure color fog=0;
+            if (kind)
+                fog=medium_vdf(albedo,depth,transmission,anisotropy,ior,priority);
+            else
+                fog=anisotropic_vdf(albedo,extinction,anisotropy);
+            vector tangent=normalize(cross(N,dPdv));
+            closure color boundary=transparent();
+            if (glass)
+                boundary=dielectric_bsdf(
+                    N,tangent,color(1),color(1),0.1,0.1,ior,"ggx");
+            if (layered)
+                Ci=weight*layer(1.0e-6*reflection(N,1.5),boundary+fog);
+            else
+                Ci=weight*(boundary+fog);
+        }""",
+        "path_volume_emitter": "shader path_volume_emitter() { Ci=emission(); }",
+    }
+    for name, source in shaders.items():
+        (root / (name + ".osl")).write_text(source, encoding="ascii")
+        run([compiler, "-I" + str(Path(stdosl).parent), name + ".osl"], root)
+
+    camera = '<Camera eye="0.13,0.07,4" dir="0,0,-1" fov="90"/>'
+
+    def box(front, back):
+        height = front-back
+        return f"""
+            <Quad corner="-10,-10,{front}" edge_x="20,0,0" edge_y="0,20,0"/>
+            <Quad corner="-10,-10,{back}" edge_x="0,20,0" edge_y="20,0,0"/>
+            <Quad corner="-10,-10,{back}" edge_x="0,0,{height}" edge_y="0,20,0"/>
+            <Quad corner="10,-10,{back}" edge_x="0,20,0" edge_y="0,0,{height}"/>
+            <Quad corner="-10,-10,{back}" edge_x="20,0,0" edge_y="0,0,{height}"/>
+            <Quad corner="-10,10,{back}" edge_x="0,0,{height}" edge_y="20,0,0"/>"""
+
+    def boundary(name, params, front=1, back=0):
+        return (f'<ShaderGroup name="{name}" is_light="0">{params}'
+                ' shader path_volume_boundary m;</ShaderGroup>' + box(front, back))
+
+    enclosure = """<ShaderGroup name="enclosure" is_light="0">
+        shader path_volume_emitter e;</ShaderGroup>
+        <Quad corner="-12,-12,6" edge_x="24,0,0" edge_y="0,24,0"/>
+        <Quad corner="-12,-12,-3" edge_x="24,0,0" edge_y="0,24,0"/>
+        <Quad corner="-12,-12,-3" edge_x="24,0,0" edge_y="0,0,9"/>
+        <Quad corner="-12,12,-3" edge_x="24,0,0" edge_y="0,0,9"/>
+        <Quad corner="-12,-12,-3" edge_x="0,24,0" edge_y="0,0,9"/>
+        <Quad corner="12,-12,-3" edge_x="0,24,0" edge_y="0,0,9"/>"""
+    cases = {
+        "volume_absorb": ("", 2),
+        "volume_zero_channel": ("param color extinction 0 0.4 0.6;", 2),
+        "volume_vacuum": ("param color extinction 0 0 0;", 2),
+        "volume_medium": ("param int kind 1;", 2),
+        "volume_medium_clear": ("param int kind 1; param color transmission 1 0.6 0.4;", 2),
+        "volume_weighted": ("param float weight 0.5;", 2),
+        "volume_layered": ("param float weight 0.5; param int layered 1;", 2),
+        "volume_isotropic": ("param color albedo 0.5 0.6 0.7;", 8),
+        "volume_forward": ("param color albedo 0.5 0.6 0.7; param float anisotropy 0.4;", 8),
+        "volume_backward": ("param color albedo 0.5 0.6 0.7; param float anisotropy -0.4;", 8),
+        "volume_medium_scatter": ("param int kind 1; param color albedo 0.4 0.5 0.6;", 8),
+        "volume_glass": ("param int kind 1; param int glass 1; param float ior 1.3; "
+                         "param color transmission 0.8 0.8 0.8;", 8),
+    }
+    scenes = {name: boundary(name, params) for name, (params, _) in cases.items()}
+    outer = "param int kind 1; param int priority 1;"
+    inner = "param int kind 1; param color transmission 0.9 0.7 0.5;"
+    for name, priority in (("volume_nested_low", 0), ("volume_nested_equal", 1),
+                           ("volume_nested_high", 2)):
+        scenes[name] = (boundary("outer", outer, 1.5, 0)
+                        + boundary("inner", inner + f"param int priority {priority};",
+                                   1, 0.5))
+    scenes["volume_bad_extinction"] = boundary("bad", "param color extinction -1 0.4 0.6;")
+    scenes["volume_bad_anisotropy"] = boundary("bad", "param float anisotropy 2;")
+    scenes["volume_capacity"] = "".join(
+        boundary("nested" + str(i), "param color extinction 0 0 0;",
+                 2.8-0.1*i, -1.8+0.1*i) for i in range(9))
+    for name, scene in scenes.items():
+        (root / (name + ".xml")).write_text(
+            "<World>" + camera + scene + enclosure + "</World>", encoding="ascii")
+
+    def paired(name, count=2, bounces=2, repeat=False):
+        print("Checking HART volume: " + name + " (" + mode + ")", flush=True)
+        cpu = render(name, False, bounces=bounces, aa=4, material_count=count)
+        gpu = render(name, True, bounces=bounces, aa=4, repeat=repeat,
+                     material_count=count)
+        compare(gpu, cpu, half_output=True)
+        assert min(cpu) >= 0 and min(gpu) >= 0 and max(gpu) > 0, name
+        return gpu
+
+    def beer(sigma, scale=1):
+        expected = []
+        for y in range(height):
+            for x in range(width):
+                distance = math.sqrt(1 + ((x+0.5-width/2)/height)**2
+                                     + (0.5-(y+0.5)/height)**2)
+                for value in sigma:
+                    expected.append(struct.unpack("<e", struct.pack(
+                        "<e", scale*math.exp(-value*distance)))[0])
+        return expected
+
+    results = {}
+    for name, (_, bounces) in cases.items():
+        results[name] = paired(name, bounces=bounces, repeat=name == "volume_layered")
+    compare(results["volume_absorb"], beer((0.2, 0.4, 0.6)), half_output=True)
+    compare(results["volume_zero_channel"], beer((0, 0.4, 0.6)), half_output=True)
+    compare(results["volume_vacuum"], [1.0] * (width * height * 3), 0)
+    compare(results["volume_medium"], beer(tuple(-math.log(v) for v in (0.8, 0.6, 0.4))),
+            half_output=True)
+    compare(results["volume_medium_clear"],
+            beer(tuple(-math.log(v) for v in (1, 0.6, 0.4))), half_output=True)
+    compare(results["volume_weighted"], beer((0.1, 0.2, 0.3), 0.25), half_output=True)
+    compare(results["volume_layered"], results["volume_weighted"], half_output=True)
+    compare(results["volume_layered"],
+            render("volume_layered", False, bounces=2, aa=4, material_count=2,
+                   cpu_unoptimized=True), half_output=True)
+    outer_sigma = tuple(-math.log(v) for v in (0.8, 0.6, 0.4))
+    inner_sigma = tuple(-math.log(v) for v in (0.9, 0.7, 0.5))
+    for name, outer_width, inner_width in (
+            ("volume_nested_low", 1.5, 0), ("volume_nested_equal", 1.5, 0.5),
+            ("volume_nested_high", 1, 0.5)):
+        result = paired(name, count=3, bounces=4)
+        compare(result, beer(tuple(outer_width*a+inner_width*b
+                                   for a, b in zip(outer_sigma, inner_sigma))),
+                half_output=True)
+
+    image = root / "volume-rejected.pfm"
+    for name in ("volume_bad_extinction", "volume_bad_anisotropy", "volume_capacity"):
+        out = run([renderer, "--hart", "-v", "--hart-bounces", "12"] + flags
+                  + common + [name + ".xml", str(image)], root, 1)
+        assert "error bits 32" in out and "invalid closure tree" in out, out
+        assert "HART path tracer rendered" not in out and not image.exists(), out
+        out = run([renderer, "--max-bounces", "12"] + common
+                  + [name + ".xml", str(image)], root, 1)
+        operation = "medium entry" if name == "volume_capacity" else "surface closure"
+        assert "SEVERE ERROR: Invalid " + operation in out, out
+        assert not image.exists(), out
+
+
 with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     root = Path(temporary)
     if materials:
@@ -398,6 +542,10 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     if lighting:
         check_lighting()
         print("HART lighting path tracer verified: " + mode)
+        sys.exit(0)
+    if volumes:
+        check_volumes()
+        print("HART volume path tracer verified: " + mode)
         sys.exit(0)
 
     shaders = {

@@ -40,6 +40,8 @@ hart_closure_size(int id)
     case MX_SHEEN_ID: return sizeof(MxSheen::Data);
     case MX_UNIFORM_EDF_ID: return sizeof(MxUniformEdfParams);
     case MX_LAYER_ID: return sizeof(MxLayerParams);
+    case MX_ANISOTROPIC_VDF_ID: return sizeof(MxAnisotropicVdfParams);
+    case MX_MEDIUM_VDF_ID: return sizeof(MxMediumVdfParams);
     case SPI_THINLAYER: return sizeof(SpiThinLayer::Data);
     default: return 0;
     }
@@ -104,6 +106,12 @@ hart_valid_closure(const ClosureColor* root,
             const auto* comp = node->as_comp();
             if (!std::isfinite(comp->w.x) || !std::isfinite(comp->w.y)
                 || !std::isfinite(comp->w.z))
+                return false;
+            if (comp->id == MX_ANISOTROPIC_VDF_ID
+                && !valid_medium_params(*comp->as<MxAnisotropicVdfParams>()))
+                return false;
+            if (comp->id == MX_MEDIUM_VDF_ID
+                && !valid_medium_params(*comp->as<MxMediumVdfParams>()))
                 return false;
             if (comp->id == MX_LAYER_ID) {
                 if (count + 2 > 17)

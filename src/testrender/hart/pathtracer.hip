@@ -164,23 +164,12 @@ __device__ Vec3
 offset_origin(const Scene& scene, const HartTraceHit& hit, const Vec3& normal,
               const Vec3& direction)
 {
-    // Preserve the native path's geometry-derived offset, also at shadow endpoints.
     const auto triangle = scene.triangles[hit.primitive];
     const Vec3 a        = scene.verts[triangle.a];
     const Vec3 b        = scene.verts[triangle.b];
     const Vec3 c        = scene.verts[triangle.c];
     const Vec3 point    = a + hit.u * (b - a) + hit.v * (c - a);
-    float scale         = 0;
-    for (int axis = 0; axis < 3; ++axis)
-        scale = fmaxf(scale, fmaxf(fabsf(a[axis]),
-                                   fmaxf(fabsf(b[axis]), fabsf(c[axis]))));
-    const Vec3 n = normal.dot(direction) >= 0 ? normal : -normal;
-    Vec3 origin  = point + n * (32 * FLT_EPSILON * scale);
-    for (int axis = 0; axis < 3; ++axis)
-        if (n[axis] != 0)
-            origin[axis] = nextafterf(origin[axis],
-                                      copysignf(INFINITY, n[axis]));
-    return origin;
+    return scene.offset_ray_origin(hit.primitive, point, normal, direction);
 }
 
 
@@ -229,6 +218,20 @@ radiance(const Scene& scene, const Background& background, Ray ray,
                 }
             }
             break;
+        }
+        const auto event = medium_stack.integrate(ray, sampler, hit.t,
+                                                  throughput, bsdf_pdf);
+        if (event == MediumStack::Event::Error) {
+            hart_error(testshade::HartClosureInvalidTree);
+            return Color3(0);
+        }
+        if (event == MediumStack::Event::Absorbed)
+            break;
+        if (event == MediumStack::Event::Scatter) {
+            // A volume event moved the origin away from the last surface.
+            previous       = ~0u;
+            previous_point = ray.origin;
+            continue;
         }
         ShaderGlobals sg { };
         globals_from_hit(sg, scene, ray, hit);
@@ -394,8 +397,9 @@ radiance(const Scene& scene, const Background& background, Ray ray,
                              testshade::HartClosureInvalidTree);
                     return Color3(0);
                 }
-            } else {
-                medium_stack.pop_medium();
+            } else if (!medium_stack.pop_medium()) {
+                hart_error(testshade::HartClosureInvalidTree);
+                return Color3(0);
             }
         }
         ray.radius     = radius;

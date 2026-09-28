@@ -1286,13 +1286,42 @@ evaluate_layer_opacity(const ShaderGlobalsType& sg, float path_roughness,
     return accumulated_weight;
 }
 
-OSL_HOSTDEVICE void
+OSL_HOSTDEVICE bool
+valid_medium_params(const MxAnisotropicVdfParams& params)
+{
+    return MediumParams::nonnegative(params.albedo)
+           && MediumParams::nonnegative(params.extinction)
+           && std::isfinite(params.anisotropy) && fabsf(params.anisotropy) < 1;
+}
+
+
+
+OSL_HOSTDEVICE bool
+valid_medium_params(const MxMediumVdfParams& params)
+{
+    const bool vacuum = is_black(params.albedo)
+                        && is_black(params.transmission_color);
+    return MediumParams::nonnegative(params.albedo)
+           && MediumParams::nonnegative(params.transmission_color)
+           && params.transmission_color.x <= 1
+           && params.transmission_color.y <= 1
+           && params.transmission_color.z <= 1
+           && std::isfinite(params.transmission_depth)
+           && (vacuum ? params.transmission_depth >= 0
+                      : params.transmission_depth > 0)
+           && std::isfinite(params.anisotropy) && fabsf(params.anisotropy) < 1
+           && std::isfinite(params.ior) && params.ior > 0;
+}
+
+
+
+OSL_HOSTDEVICE bool
 process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                        ShadingResult& result, MediumStack& medium_stack,
                        const ClosureColor* closure, const Color3& w)
 {
     if (!closure)
-        return;
+        return true;
 
     // Non-recursive traversal stack
     const int STACK_SIZE = 16;
@@ -1309,16 +1338,20 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             break;
         }
         case ClosureColor::ADD: {
+            if (stack_idx >= STACK_SIZE)
+                return false;
             weight_stack[stack_idx] = weight;
             ptr_stack[stack_idx++]  = closure->as_add()->closureB;
             closure                 = closure->as_add()->closureA;
             break;
         }
         case MX_LAYER_ID: {
+            if (stack_idx >= STACK_SIZE)
+                return false;
             const ClosureComponent* comp = closure->as_comp();
             const MxLayerParams* params  = comp->as<MxLayerParams>();
             weight *= comp->w;
-            Color3 base_w                = weight
+            Color3 base_w = weight
                             * (Color3(1)
                                - clamp(evaluate_layer_opacity(sg, path_roughness,
                                                               params->top),
@@ -1332,9 +1365,11 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             const ClosureComponent* comp = closure->as_comp();
             Color3 cw                    = weight * comp->w;
             const auto& params           = *comp->as<MxAnisotropicVdfParams>();
-            result.medium_data.sigma_t   = cw * params.extinction;
-            result.medium_data.sigma_s   = params.albedo
-                                         * result.medium_data.sigma_t;
+            if (!valid_medium_params(params) || !MediumParams::nonnegative(cw))
+                return false;
+            result.medium_data.sigma_t  = cw * params.extinction;
+            result.medium_data.sigma_s  = clamp(params.albedo, 0.f, 1.f)
+                                          * result.medium_data.sigma_t;
             result.medium_data.medium_g = params.anisotropy;
             result.medium_data.priority = 0;  // always intersect
 
@@ -1346,6 +1381,8 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                              result.medium_data.sigma_t.y),
                     std::min(result.medium_data.sigma_s.z,
                              result.medium_data.sigma_t.z) };
+            if (!result.medium_data.valid())
+                return false;
 
             closure = nullptr;
             break;
@@ -1354,6 +1391,8 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             const ClosureComponent* comp = closure->as_comp();
             Color3 cw                    = weight * comp->w;
             const auto& params           = *comp->as<MxMediumVdfParams>();
+            if (!valid_medium_params(params) || !MediumParams::nonnegative(cw))
+                return false;
 
             // when both albedo and transmission_color are black, this is
             // a vacuum medium used only to carry the IOR for dielectric
@@ -1372,8 +1411,13 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                              -OIIO::fast_log(fmaxf(t_color.y, epsilon)),
                              -OIIO::fast_log(fmaxf(t_color.z, epsilon)));
 
-                result.medium_data.sigma_t *= cw / params.transmission_depth;
-                result.medium_data.sigma_s = params.albedo
+                // Divide last so clear or zero-weight channels stay zero even
+                // when the reciprocal depth is not representable.
+                for (int c = 0; c < 3; ++c)
+                    result.medium_data.sigma_t[c]
+                        = (result.medium_data.sigma_t[c] * cw[c])
+                          / params.transmission_depth;
+                result.medium_data.sigma_s = clamp(params.albedo, 0.f, 1.f)
                                              * result.medium_data.sigma_t;
 
                 // clamp sigma_s to be less than sigma_t
@@ -1392,6 +1436,8 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
                                                     ? 1.0f / params.ior
                                                     : params.ior;
             result.medium_data.priority       = params.priority;
+            if (!result.medium_data.valid())
+                return false;
 
             closure = nullptr;
             break;
@@ -1449,6 +1495,7 @@ process_medium_closure(const ShaderGlobalsType& sg, float path_roughness,
             weight  = weight_stack[stack_idx];
         }
     }
+    return result.medium_data.valid();
 }
 
 // recursively walk through the closure tree, creating bsdfs as we go
@@ -1708,9 +1755,10 @@ process_closure(const ShaderGlobalsType& sg, float path_roughness,
                 ShadingResult& result, MediumStack& medium_stack,
                 const ClosureColor* Ci, bool light_only)
 {
-    if (!light_only)
-        process_medium_closure(sg, path_roughness, result, medium_stack, Ci,
-                               Color3(1));
+    // Invalid medium records must also fail emission-only evaluations.
+    if (!process_medium_closure(sg, path_roughness, result, medium_stack, Ci,
+                                Color3(1)))
+        return false;
     return process_bsdf_closure(sg, path_roughness, result, medium_stack, Ci,
                                 Color3(1), light_only);
 }

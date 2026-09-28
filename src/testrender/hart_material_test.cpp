@@ -36,6 +36,29 @@ public:
 
 
 void
+check_boundary_offsets()
+{
+    for (float scale : { .001f, 1.f, 1000.f }) {
+        Scene scene;
+        scene.verts     = { Vec3(scale, 0, 0), Vec3(0, scale, 0),
+                            Vec3(0, 0, scale) };
+        scene.triangles = { { 0, 1, 2 } };
+        const Vec3 point(scale / 3);
+        const Vec3 normal = Vec3(1).normalized();
+        for (float side : { -1.f, 1.f }) {
+            const Vec3 direction   = side * normal;
+            const Vec3 origin      = scene.offset_ray_origin(0, point, normal,
+                                                             direction);
+            const float separation = (origin - point).dot(direction);
+            OIIO_CHECK_ASSERT(separation > 0);
+            OIIO_CHECK_ASSERT(separation < 1e-5f * scale);
+        }
+    }
+}
+
+
+
+void
 check_layer_weights()
 {
     const Vec3 N(0, 0, 1);
@@ -85,7 +108,6 @@ check_layer_weights()
         for (int c = 0; c < 3; ++c)
             OIIO_CHECK_EQUAL_THRESH(opacity[c], weight[c], 2e-6f);
 
-        // Host-only medium invariance does not qualify HART volume rendering.
         MxAnisotropicVdfParams volume { };
         volume.albedo     = Color3(.5f);
         volume.extinction = Color3(.2f, .4f, .6f);
@@ -99,8 +121,8 @@ check_layer_weights()
                                      weight);
             ShadingResult shading;
             MediumStack medium;
-            process_medium_closure(sg, .2f, shading, medium, medium_layer,
-                                   Color3(1));
+            OIIO_CHECK_ASSERT(process_medium_closure(sg, .2f, shading, medium,
+                                                     medium_layer, Color3(1)));
             for (int c = 0; c < 3; ++c) {
                 OIIO_CHECK_EQUAL_THRESH(shading.medium_data.sigma_t[c],
                                         weight[c] * volume.extinction[c],
@@ -111,6 +133,157 @@ check_layer_weights()
             }
         }
     }
+}
+
+
+
+bool
+material_probe_rejection(unsigned test)
+{
+    return (test >= 14 && test < HartSurfaceCases)
+           || test >= HartSurfaceCases
+                          + static_cast<unsigned>(
+                              MediumProbeCase::InvalidCoefficients);
+}
+
+
+
+void
+check_medium_values()
+{
+    for (unsigned row = 0; row < HartMaterialRows; ++row)
+        for (unsigned index = HartSurfaceCases; index < HartMaterialCases;
+             ++index) {
+            const auto actual = material_probe(index, row);
+            if (material_probe_rejection(index)) {
+                OIIO_CHECK_EQUAL(actual.valid, 0);
+                OIIO_CHECK_EQUAL(actual.extent, 0);
+                for (float value : actual.values)
+                    OIIO_CHECK_EQUAL(value, 0);
+                continue;
+            }
+            OIIO_CHECK_EQUAL(actual.valid, 1);
+            for (float value : actual.values)
+                OIIO_CHECK_ASSERT(std::isfinite(value));
+            const auto test = static_cast<MediumProbeCase>(index
+                                                           - HartSurfaceCases);
+            const float distance = .5f + .25f * row;
+            Color3 expected(1), sigma_t(0, .5f, 1), sigma_s(0);
+            const bool scatter = test == MediumProbeCase::Scatter
+                                 || test == MediumProbeCase::Overlap;
+            if (scatter) {
+                sigma_t = test == MediumProbeCase::Scatter
+                              ? (row == 0   ? Color3(0, 2, 4)
+                                 : row == 1 ? Color3(2, 0, 4)
+                                            : Color3(2, 4, 0))
+                              : Color3(0, 1, 2);
+                sigma_s = test == MediumProbeCase::Scatter
+                              ? sigma_t
+                              : Color3(0, .25f, .5f);
+                Sampler sampler(13, int(row), 7 + int(row));
+                const Vec3 random = sampler.get();
+                const int first   = test == MediumProbeCase::Overlap || row == 0
+                                        ? 1
+                                        : 0;
+                const int last    = test == MediumProbeCase::Scatter && row == 2
+                                        ? 1
+                                        : 2;
+                const int channel = random.y < .5f ? first : last;
+                const float t     = -std::log(1 - random.x) / sigma_t[channel];
+                const Color3 transmittance(std::exp(-sigma_t.x * t),
+                                           std::exp(-sigma_t.y * t),
+                                           std::exp(-sigma_t.z * t));
+                const float density = .5f
+                                      * (sigma_t.x * transmittance.x
+                                         + sigma_t.y * transmittance.y
+                                         + sigma_t.z * transmittance.z);
+                expected            = transmittance * sigma_s / density;
+                OIIO_CHECK_EQUAL_THRESH(actual.values[5], 3 + t, 2e-6f);
+                const Vec3 direction(actual.values[7], actual.values[8],
+                                     actual.values[9]);
+                OIIO_CHECK_EQUAL_THRESH(direction.length2(), 1, 2e-6f);
+                OIIO_CHECK_ASSERT(actual.values[6] > 0);
+                if (test == MediumProbeCase::Scatter)
+                    OIIO_CHECK_EQUAL_THRESH(actual.values[6],
+                                            float(M_1_PI) * .25f, 2e-6f);
+            } else {
+                OIIO_CHECK_EQUAL(actual.values[5], 3);
+                OIIO_CHECK_EQUAL(actual.values[6], .25f);
+                OIIO_CHECK_EQUAL(actual.values[7], 0);
+                OIIO_CHECK_EQUAL(actual.values[8], 0);
+                OIIO_CHECK_EQUAL(actual.values[9], 1);
+                switch (test) {
+                case MediumProbeCase::Absorption:
+                    sigma_t  = Color3(0, .4f, .6f);
+                    expected = Color3(1, std::exp(-.4f * distance),
+                                      std::exp(-.6f * distance));
+                    break;
+                case MediumProbeCase::Priority:
+                    expected = Color3(1, std::exp(-.5f * distance),
+                                      std::exp(-distance));
+                    break;
+                case MediumProbeCase::Vacuum:
+                case MediumProbeCase::VacuumIor: sigma_t = Color3(0); break;
+                case MediumProbeCase::InfiniteAbsorption:
+                    expected = Color3(1, 0, 0);
+                    break;
+                case MediumProbeCase::ZeroSegment:
+                    sigma_s = .5f * sigma_t;
+                    break;
+                case MediumProbeCase::LayerTop:
+                case MediumProbeCase::LayerBase: {
+                    const Color3 scale = row == 0   ? Color3(0)
+                                         : row == 1 ? Color3(.2f, .4f, .6f)
+                                                    : Color3(1);
+                    sigma_t            = scale * Color3(.2f, .4f, .6f);
+                    sigma_s            = .5f * sigma_t;
+                    OIIO_CHECK_EQUAL(actual.values[18], .3f);
+                    OIIO_CHECK_ASSERT(actual.extent > 0);
+                    break;
+                }
+                case MediumProbeCase::Medium:
+                    sigma_t  = Color3(0, -std::log(.5f) / 2,
+                                      -std::log(.25f) / 2);
+                    expected = Color3(1, std::exp(-sigma_t.y * distance),
+                                      std::exp(-sigma_t.z * distance));
+                    break;
+                case MediumProbeCase::Absorbed:
+                    sigma_t  = Color3(1);
+                    expected = Color3(0);
+                    break;
+                default: OIIO_CHECK_ASSERT(false); break;
+                }
+            }
+            const auto event = scatter ? MediumStack::Event::Scatter
+                               : test == MediumProbeCase::Absorbed
+                                   ? MediumStack::Event::Absorbed
+                                   : MediumStack::Event::Surface;
+            OIIO_CHECK_EQUAL(actual.values[20], float(event));
+            OIIO_CHECK_EQUAL(actual.values[3], 1);
+            OIIO_CHECK_EQUAL(actual.values[4], 2);
+            OIIO_CHECK_EQUAL(actual.values[10],
+                             test == MediumProbeCase::Overlap ? 2 : 1);
+            OIIO_CHECK_EQUAL(actual.values[21], actual.values[10]);
+            float ior = 1, priority = 0;
+            if (test == MediumProbeCase::Medium
+                || test == MediumProbeCase::VacuumIor) {
+                ior      = row == 1 ? 1 / 1.5f : 1.5f;
+                priority = 2 + float(row);
+                OIIO_CHECK_ASSERT(actual.extent > 0);
+            } else if (test == MediumProbeCase::Priority) {
+                ior      = 1.25f;
+                priority = 1;
+            }
+            OIIO_CHECK_EQUAL(actual.values[11], ior);
+            OIIO_CHECK_EQUAL(actual.values[19], priority);
+            for (int c = 0; c < 3; ++c) {
+                OIIO_CHECK_EQUAL_THRESH(actual.values[c], expected[c], 2e-6f);
+                OIIO_CHECK_EQUAL_THRESH(actual.values[12 + c], sigma_t[c],
+                                        2e-6f);
+                OIIO_CHECK_EQUAL_THRESH(actual.values[15 + c], sigma_s[c],
+                                        2e-6f);
+            }
+        }
 }
 
 
@@ -155,7 +328,7 @@ run_cases(MaterialDiagnostics& errors)
     for (unsigned row = 0; row < HartMaterialRows; ++row)
         for (unsigned test = 0; test < HartMaterialCases; ++test) {
             const auto& actual = output[row * HartMaterialCases + test];
-            if (test >= 14) {
+            if (material_probe_rejection(test)) {
                 OIIO_CHECK_EQUAL(actual.valid, 0);
                 OIIO_CHECK_EQUAL(actual.extent, 0);
                 for (float value : actual.values)
@@ -199,10 +372,12 @@ int
 main()
 {
     MaterialDiagnostics errors;
+    check_boundary_offsets();
     check_layer_weights();
+    check_medium_values();
     OIIO_CHECK_ASSERT(run_cases(errors));
     OIIO_CHECK_EQUAL(errors.errors, 2);
-    print(
-        "HART material probe: 14 value cases and 7 rejection cases, 3 rows\n");
+    print("HART material probe: 26 value cases and 14 rejection cases, "
+          "3 rows\n");
     return unit_test_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

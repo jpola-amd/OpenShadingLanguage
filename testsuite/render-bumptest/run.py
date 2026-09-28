@@ -8,6 +8,7 @@ failthresh = 0.01
 failpercent = 0.5
 hardfail = 0.035
 
+# The boundary-win reference uses robust transmitted-ray origin offsets.
 outputs = [ "out.exr" ]
 command = testrender("-r 128 128 -aa 4 --llvm_opt 13 bumptest.xml out.exr")
 

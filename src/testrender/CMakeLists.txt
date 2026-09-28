@@ -207,6 +207,13 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}" --lighting)
             set_tests_properties (hart-lighting-render-${mode} PROPERTIES
                                   LABELS "gpu;hart" RUN_SERIAL TRUE)
+            add_test (NAME hart-volume-render-${mode}
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-pathtracer.py"
+                    "$<TARGET_FILE:testrender>" "$<TARGET_FILE:oslc>"
+                    "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}" --volumes)
+            set_tests_properties (hart-volume-render-${mode} PROPERTIES
+                                  LABELS "gpu;hart" RUN_SERIAL TRUE)
         endforeach ()
     endif ()
 endif ()
