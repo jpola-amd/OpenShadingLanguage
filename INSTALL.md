@@ -295,6 +295,12 @@ Serialized `--group` (or `-group`) specifications use the same inline-string
 or file parser as CPU testshade. `--oslquery` prints the actual group
 serialization, layers and parameter types before optimization; `-v` also
 prints group serialization and layer names.
+`--print-groupdata` reports the compiled group's logical storage size through
+the same checked query as CPU testshade; this is not hardware stack usage.
+HART also accepts `--options opt_groupdata=0` or `opt_groupdata=1` to control
+that layout optimization. Other `--options` settings remain unsupported and
+are rejected before launch. The original `groupdata-opt` fixture checks the
+optimized layout and preservation of connected output parameters.
 The renderer embeds a separate raygen module for every configured
 architecture; execution does not read device code from build-tree paths.
 Each point receives real `ShaderGlobals` and separately aligned group

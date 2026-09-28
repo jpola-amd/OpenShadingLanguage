@@ -805,6 +805,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.exit_on_error(false);
     std::string device = "0";
     std::string format;
+    std::string shading_options;
     bool has_shader = false;
     // clang-format off
     ap.arg("filename")
@@ -828,6 +829,8 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("--center");
     ap.arg("--inbuffer");
     ap.arg("--oslquery");
+    ap.arg("--print-groupdata");
+    ap.arg("--options %s:OPTIONS", &shading_options);
     ap.arg("--group %s:GROUPSPEC")
       .action([&](cspan<const char*>) { has_shader = true; });
     ap.arg("--groupname %s:NAME");
@@ -849,6 +852,13 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     if (ap.parse_args(argc, argv) < 0) {
         err.errorfmt("Generated HART mode: unsupported option or argument: {}",
                      ap.geterror());
+        return false;
+    }
+    if (!shading_options.empty() && shading_options != "opt_groupdata=0"
+        && shading_options != "opt_groupdata=1") {
+        err.errorfmt("Generated HART mode: unsupported option in --options '{}'; "
+                     "expected opt_groupdata=0 or opt_groupdata=1",
+                     shading_options);
         return false;
     }
     if (options.has_local_groupdata && !options.fused) {

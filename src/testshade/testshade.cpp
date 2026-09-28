@@ -2205,6 +2205,20 @@ test_shade(int argc, const char* argv[])
         std::cout << "\n";
     }
 
+    auto report_groupdata_size = [&]() {
+        if ((!debug1 && !print_groupdata) || batched)
+            return true;
+        int groupdata_size = 0;
+        if (!shadingsys->getattribute(shadergroup.get(), "llvm_groupdata_size",
+                                      groupdata_size)) {
+            rend->errhandler().errorfmt(
+                "Cannot retrieve compiled Groupdata size");
+            return false;
+        }
+        OSL::print("Groupdata size: {}\n", groupdata_size);
+        return true;
+    };
+
 #if OSL_TESTSHADE_HART
     if (use_hart) {
         setup_transformations(*rend, Mshad, Mobj);
@@ -2224,12 +2238,14 @@ test_shade(int argc, const char* argv[])
         std::vector<HartOutputRequest> hart_outputs;
         for (size_t i = 0; i < outputvars.size(); ++i)
             hart_outputs.push_back({ outputvars[i], outputfiles[i] });
-        const bool ok = testshade_hart_generated(
+        bool ok = testshade_hart_generated(
             *rend, *shadingsys, *shadergroup, hart, hart_arch, xres, yres,
             iters, warmup, verbose || debug1,
             shadingsys->raytype_bit(ustring(raytype_name)), print_outputs,
             outputfiles.empty() ? string_view("null") : outputfiles[0],
             dataformatname, Mobj, Mshad, hart_outputs);
+        if (ok)
+            ok = report_groupdata_size();
         shadergroup.reset();
         delete shadingsys;
         shadingsys = nullptr;
@@ -2457,14 +2473,7 @@ test_shade(int argc, const char* argv[])
         std::cout << ustring::getstats() << "\n";
     }
 
-    // TODO: Include batched support
-    if ((debug1 || print_groupdata) && !batched) {
-        int groupdata_size;
-        shadingsys->getattribute(shadergroup.get(), "llvm_groupdata_size",
-                                 TypeDesc::INT, &groupdata_size);
-
-        std::cout << "Groupdata size: " << groupdata_size << "\n";
-    }
+    const bool groupdata_reported = report_groupdata_size();
 
     if (print_group_stats && !batched) {
         static const char* metrics[] = { "active_layers", "network_depth",
@@ -2511,7 +2520,7 @@ test_shade(int argc, const char* argv[])
     shadergroup.reset();  // Must release this before destroying shadingsys
 
     delete shadingsys;
-    int retcode = EXIT_SUCCESS;
+    int retcode = groupdata_reported ? EXIT_SUCCESS : EXIT_FAILURE;
 
     // Double check that there were no uncaught errors in the texture
     // system and image cache.
