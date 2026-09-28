@@ -1864,6 +1864,166 @@ run_raytypes(string_view stdosl, string_view mode, Diagnostics& diagnostics)
 
 
 
+bool
+run_lifecycle(string_view stdosl, string_view mode, Diagnostics& diagnostics)
+{
+    const Matrix44 identity(1);
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        OutputFiles files;
+        if (!files.create(diagnostics))
+            return false;
+        print("HART lifecycle cycle {}\n", cycle);
+        std::fflush(stdout);
+        // Groups must die before their systems, and systems before renderers.
+        std::array<std::unique_ptr<SimpleRenderer>, 2> renderers;
+        std::array<std::unique_ptr<ShadingSystem>, 2> systems;
+        std::array<ShaderGroupRef, 2> groups;
+        std::array<std::string, 2> arches, bitcode;
+        std::array<const void*, 2> addresses { };
+        std::array<void*, 2> interactive { };
+        std::array<int, 2> factors { cycle == 1 ? 5 : 3, cycle == 1 ? 11 : 7 };
+        for (int context = 0; context < 2; ++context) {
+            renderers[context] = testshade_hart_renderer(0, arches[context]);
+            if (!renderers[context])
+                return false;
+            auto& renderer = *renderers[context];
+            renderer.errhandler().verbosity(ErrorHandler::VERBOSE);
+            systems[context] = std::make_unique<ShadingSystem>(&renderer,
+                                                               nullptr,
+                                                               &diagnostics);
+            auto& ss         = *systems[context];
+            renderer.init_shadingsys(&ss);
+            if (!ss.attribute("hart_arch", arches[context])
+                || !ss.attribute("llvm_debugging_symbols", 0)
+                || !ss.attribute("llvm_profiling_events", 0)
+                || !ss.attribute("max_hart_groupdata_alloc",
+                                 mode == "fused-local" ? 1048576 : 0)
+                || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3)
+                || !ss.attribute("optimize", mode == "unoptimized" ? 0 : 2))
+                return false;
+            const auto source
+                = fmtformat("shader hart_lifecycle("
+                            "int index=0 [[int interactive=1]],"
+                            "float values[2]={{2,4}} [[int interactive=1]],"
+                            "output color Cout=0) {{"
+                            "Cout=color({}*values[index]+u, Dx(u), Dy(v)); }}",
+                            factors[context]);
+            OSLCompiler compiler(&diagnostics);
+            std::string oso;
+            if (!compiler.compile_buffer(source, oso, { }, stdosl)
+                || !ss.LoadMemoryCompiledShader("hart_lifecycle", oso))
+                return false;
+            groups[context] = ss.ShaderGroupBegin("hart_lifecycle_group");
+            if (!groups[context]
+                || !ss.Shader("surface", "hart_lifecycle", "out")
+                || !ss.ShaderGroupEnd())
+                return false;
+            const SymLocationDesc output("out.Cout", TypeColor, false,
+                                         SymArena::Outputs, 0, 12);
+            ss.add_symlocs(groups[context].get(), { &output, 1 });
+            ss.optimize_group(groups[context].get(), nullptr);
+            if (!artifact(ss, *groups[context], bitcode[context],
+                          addresses[context], diagnostics)
+                || !ss.getattribute(groups[context].get(),
+                                    "device_interactive_params", TypeDesc::PTR,
+                                    &interactive[context])
+                || !interactive[context])
+                return false;
+        }
+        OIIO_CHECK_ASSERT(interactive[0] != interactive[1]);
+        OIIO_CHECK_ASSERT(bitcode[0] != bitcode[1]);
+        HartOptions options;
+        options.fused = mode == "fused" || mode == "fused-local";
+        auto render   = [&](int context, int iterations, string_view filename) {
+            return testshade_hart_generated(*renderers[context],
+                                            *systems[context], *groups[context],
+                                            options, arches[context], width,
+                                            height, iterations, false, true, 0,
+                                            false, filename, "float", identity,
+                                            identity);
+        };
+        auto check = [&](int context, float value, string_view filename) {
+            OIIO::ImageBuf image(filename);
+            if (!image.read(0, 0, true, TypeFloat)
+                || image.spec().width != width || image.spec().height != height
+                || image.nchannels() != 3) {
+                diagnostics.errorfmt("Invalid lifecycle output: {}",
+                                     image.geterror());
+                return false;
+            }
+            std::array<float, width * height * 3> pixels;
+            if (!image.get_pixels(image.roi(), TypeFloat, pixels.data())) {
+                diagnostics.errorfmt("Cannot read lifecycle output: {}",
+                                     image.geterror());
+                return false;
+            }
+            for (int y = 0; y < height; ++y)
+                for (int x = 0; x < width; ++x) {
+                    const size_t offset = 3 * (width * y + x);
+                    OIIO_CHECK_EQUAL(pixels[offset],
+                                     factors[context] * value
+                                         + float(x) / (width - 1));
+                    OIIO_CHECK_EQUAL(pixels[offset + 1], 1.0f / (width - 1));
+                    OIIO_CHECK_EQUAL(pixels[offset + 2], 1.0f / (height - 1));
+                }
+            return true;
+        };
+        print("HART lifecycle initial {}\n", cycle);
+        if (!render(0, 1, files.files[0]) || !check(0, 2, files.files[0]))
+            return false;
+        if (!systems[0]->ReParameter(*groups[0], "out", "index", 2))
+            return false;
+        print("HART lifecycle bounded failure {}\n", cycle);
+        OIIO_CHECK_ASSERT(!render(0, 1, files.files[2]));
+        OIIO_CHECK_ASSERT(!OIIO::Filesystem::exists(files.files[2]));
+        // A's failure must not poison B, even with identical shader/group names.
+        print("HART lifecycle independent {}\n", cycle);
+        if (!systems[1]->ReParameter(*groups[1], "out", "index", 1)
+            || !render(1, 1, files.files[1]) || !check(1, 4, files.files[1]))
+            return false;
+        if (!systems[0]->ReParameter(*groups[0], "out", "index", 0))
+            return false;
+        int updates               = 0;
+        options.update_parameters = [&]() {
+            ++updates;
+            return false;
+        };
+        print("HART lifecycle update failure {}\n", cycle);
+        OIIO_CHECK_ASSERT(!render(0, 2, files.files[3]));
+        OIIO_CHECK_EQUAL(updates, 1);
+        OIIO_CHECK_ASSERT(!OIIO::Filesystem::exists(files.files[3]));
+        options.update_parameters = { };
+        const float values[]      = { 13, 17 };
+        print("HART lifecycle recovered {}\n", cycle);
+        if (!systems[0]->ReParameter(*groups[0], "out", "values",
+                                     TypeDesc(TypeDesc::FLOAT, 2), values)
+            || !render(0, 1, files.files[4]) || !check(0, 13, files.files[4]))
+            return false;
+        for (int context = 0; context < 2; ++context) {
+            std::string current;
+            const void* address = nullptr;
+            void* arena         = nullptr;
+            if (!artifact(*systems[context], *groups[context], current, address,
+                          diagnostics)
+                || !systems[context]->getattribute(groups[context].get(),
+                                                   "device_interactive_params",
+                                                   TypeDesc::PTR, &arena))
+                return false;
+            OIIO_CHECK_EQUAL(current, bitcode[context]);
+            OIIO_CHECK_EQUAL(address, addresses[context]);
+            OIIO_CHECK_EQUAL(arena, interactive[context]);
+        }
+        groups    = { };
+        systems   = { };
+        renderers = { };
+        print("HART lifecycle destroyed {}\n", cycle);
+        std::fflush(stdout);
+    }
+    return diagnostics.errors == 0 && diagnostics.warnings == 0;
+}
+
+
+
 }  // namespace
 
 
@@ -1878,24 +2038,27 @@ main(int argc, char* argv[])
     const bool raytypes    = argc == 4 && string_view(argv[3]) == "raytypes";
     const bool attributes  = argc == 4 && string_view(argv[3]) == "attributes";
     const bool spaces      = argc == 4 && string_view(argv[3]) == "spaces";
+    const bool lifecycle   = argc == 4 && string_view(argv[3]) == "lifecycle";
     const bool library     = argc == 5 && string_view(argv[3]) == "library";
     const string_view mode(argc >= 3 ? argv[2] : "split");
     if ((argc != 2 && argc != 3 && !color && !outputs && !interactive
-         && !userdata && !raytypes && !library && !attributes && !spaces)
+         && !userdata && !raytypes && !library && !attributes && !spaces
+         && !lifecycle)
         || (mode != "split" && mode != "fused" && mode != "fused-local"
             && !((color || outputs || interactive || userdata || raytypes
-                  || library || attributes || spaces)
+                  || library || attributes || spaces || lifecycle)
                  && mode == "unoptimized"))) {
         print(
             stderr,
             "Usage: hart_transform_test stdosl.h "
             "[split|fused|fused-local|unoptimized] "
-            "[color|outputs|interactive|userdata|raytypes|attributes|spaces|library BITCODE_DIR]\n");
+            "[color|outputs|interactive|userdata|raytypes|attributes|spaces|lifecycle|library BITCODE_DIR]\n");
         return 1;
     }
     Diagnostics diagnostics;
     OIIO_CHECK_ASSERT(
-        spaces       ? run_spaces(argv[1], mode, diagnostics)
+        lifecycle    ? run_lifecycle(argv[1], mode, diagnostics)
+        : spaces     ? run_spaces(argv[1], mode, diagnostics)
         : attributes ? run_attributes(argv[1], mode, diagnostics)
         : library    ? run_renderer_library(argv[1], mode, argv[4], diagnostics)
         : raytypes   ? run_raytypes(argv[1], mode, diagnostics)

@@ -1416,6 +1416,32 @@ matrix queries, values and derivatives against CPU and analytical references.
 matrices, checks the artifact remains unchanged, and requires matching pipeline
 cache hits while the rendered values and derivatives change and change back.
 
+The four `hart-grid-lifecycle-*` tests repeat three complete renderer/system/group
+lifetimes in one process. Two live renderer instances deliberately reuse shader
+and group names with different shader code and independent interactive arenas.
+Exact pixels and derivatives check isolation and changed bindings; artifact and
+arena addresses remain stable within each lifetime. Bounded device-array errors
+and failed between-iteration updates must publish no partial image. Another
+renderer remains usable after failure, and the failed renderer must recover with
+matching pipeline-cache keys. These are serialized GPU tests, not a guarantee
+of concurrent host submission or multi-GPU support. They do not infer leak
+freedom from process-wide free VRAM, which other applications and SDK caches
+can change.
+
+`hart-context-lifecycle` repeatedly initializes, traces, clears and reuses one
+native context while a second context remains live. It checks owned allocation
+counts and bytes, module/program-group/pipeline ownership, cross-context pointer
+rejection, invalid bounded operations and cleanup of a partially created
+pipeline. The four `hart-native-lifecycle-*` tests add two materials per renderer,
+exact emission images, interactive A-B-A updates, output growth/reuse/shrinkage,
+and failure after one material has compiled. Native renderer errors are terminal:
+`clear()` releases resources and invalidates the published image but does not
+erase the error history. Recovery uses a fresh renderer in the same process.
+Preparation also invalidates an old image before any possible failure, so a
+failed operation cannot expose an earlier successful frame as its result.
+Ownership snapshots cover the native context's resources, not SDK caches,
+texture storage or group-owned interactive allocations.
+
 `hart-geometry-runtime` checks initial `I` and `time`, their derivatives and
 filter widths against the grid's exact-zero defaults. It also composes named
 transforms, procedural UVs and texture sampling in standalone and connected

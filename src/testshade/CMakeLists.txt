@@ -537,6 +537,14 @@ if (BUILD_TESTING AND OSL_USE_HART)
             set_target_properties (hart_transform_test PROPERTIES FOLDER "Unit Tests")
             if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
                 foreach (mode IN ITEMS split fused fused-local unoptimized)
+                    add_test (NAME hart-grid-lifecycle-${mode}
+                        COMMAND "${Python3_EXECUTABLE}"
+                            "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-lifecycle.py"
+                            "$<TARGET_FILE:hart_transform_test>"
+                            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" ${mode})
+                    set_tests_properties (hart-grid-lifecycle-${mode} PROPERTIES
+                        LABELS "hart;gpu" RUN_SERIAL TRUE TIMEOUT 660
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
                     add_test (NAME hart-space-rebind-${mode}
                         COMMAND "${Python3_EXECUTABLE}"
                             "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-transform-rebind.py"

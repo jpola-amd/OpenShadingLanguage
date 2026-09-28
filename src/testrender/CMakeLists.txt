@@ -144,6 +144,18 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
     osl_hart_target (testrender)
     osl_hart_runtime_target (testrender)
     if (BUILD_TESTING)
+        add_executable (hart_lifecycle_test hart_lifecycle_test.cpp
+                        hartcontext.cpp hartraytracer.cpp
+                        shading.cpp simpleraytracer.cpp scene.cpp bvh.cpp
+                        ../testshade/harttexture.cpp ${hart_path_sources})
+        target_include_directories (hart_lifecycle_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+        target_include_directories (hart_lifecycle_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+        target_link_libraries (hart_lifecycle_test PRIVATE oslexec oslquery oslcomp BSDL
+                              pugixml::pugixml Threads::Threads)
+        osl_hart_target (hart_lifecycle_test)
+        osl_optix_target (hart_lifecycle_test)
+        osl_hart_runtime_target (hart_lifecycle_test)
+        set_target_properties (hart_lifecycle_test PROPERTIES FOLDER "Unit Tests")
         set (hart_material_declarations "")
         set (hart_material_entries "")
         set (hart_material_sources)
@@ -186,6 +198,11 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
     endif ()
     if (BUILD_TESTING AND "$ENV{TESTSUITE_HART}" STREQUAL "1")
         foreach (mode split fused fused-local unoptimized)
+            add_test (NAME hart-native-lifecycle-${mode}
+                COMMAND hart_lifecycle_test
+                    "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" "${mode}")
+            set_tests_properties (hart-native-lifecycle-${mode} PROPERTIES
+                                  LABELS "gpu;hart" RUN_SERIAL TRUE TIMEOUT 900)
             add_test (NAME hart-pathtracer-${mode}
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-pathtracer.py"
@@ -273,5 +290,8 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE AND BUILD_TESTING)
         add_test (NAME hart-raytracer-traversal COMMAND hart_trace_test)
         set_tests_properties (hart-raytracer-traversal PROPERTIES
                               LABELS "gpu;hart" RUN_SERIAL TRUE)
+        add_test (NAME hart-context-lifecycle COMMAND hart_trace_test --lifecycle)
+        set_tests_properties (hart-context-lifecycle PROPERTIES
+                              LABELS "gpu;hart" RUN_SERIAL TRUE TIMEOUT 900)
     endif ()
 endif ()

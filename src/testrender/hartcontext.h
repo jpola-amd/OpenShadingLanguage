@@ -52,6 +52,14 @@ public:
     /// Synchronize and release resources; failed releases remain owned for retry.
     bool clear();
 
+    /// Host ownership accounting, excluding opaque SDK/driver cache storage.
+    /// Query only between synchronous operations on this context.
+    struct ResourceUsage {
+        size_t allocations = 0, bytes = 0, modules = 0, program_groups = 0;
+        bool context = false, stream = false, pipeline = false;
+    };
+    ResourceUsage resource_usage() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

@@ -832,4 +832,27 @@ HartContext::clear()
     return true;
 }
 
+
+
+HartContext::ResourceUsage
+HartContext::resource_usage() const
+{
+    const auto& ctx = *m_impl;
+    ResourceUsage usage;
+    for (const auto& allocation : ctx.m_allocations)
+        if (allocation.pointer) {
+            ++usage.allocations;
+            usage.bytes += allocation.bytes;
+        }
+    usage.modules = ctx.m_module ? 1 : 0;
+    for (const auto module : ctx.m_callable_modules)
+        usage.modules += module != nullptr;
+    for (const auto group : ctx.m_groups)
+        usage.program_groups += group != nullptr;
+    usage.context  = ctx.m_context != nullptr;
+    usage.stream   = ctx.m_stream != nullptr;
+    usage.pipeline = ctx.m_pipeline != nullptr;
+    return usage;
+}
+
 OSL_NAMESPACE_END

@@ -522,6 +522,12 @@ HartRaytracer::failed() const
 
 
 
+HartContext::ResourceUsage
+HartRaytracer::resource_usage() const
+{ return m_impl->m_context.resource_usage(); }
+
+
+
 int
 HartRaytracer::supports(string_view feature) const
 {
@@ -587,6 +593,8 @@ void
 HartRaytracer::prepare_render()
 {
     auto& impl = *m_impl;
+    impl.m_published = false;
+    pixelbuf.clear();
     if (impl.m_failed)
         return;
     if (!impl.m_initialized || !shadingsys || impl.m_prepared) {
@@ -761,21 +769,18 @@ HartRaytracer::clear()
     const bool context_cleared  = impl.m_context.clear();
     const bool textures_cleared = context_cleared && impl.m_textures.clear();
     impl.m_failed |= !context_cleared || !textures_cleared;
-    impl.m_initialized              = false;
-    impl.m_prepared                 = false;
-    impl.m_published                = false;
-    impl.m_output_capacity          = 0;
-    impl.m_scratch_capacity         = 0;
-    impl.m_background_capacity      = 0;
-    impl.m_params.background_values = nullptr;
-    impl.m_params.background_rows   = nullptr;
-    impl.m_params.background_cols   = nullptr;
+    impl.m_initialized         = false;
+    impl.m_prepared            = false;
+    impl.m_published           = false;
+    impl.m_output_capacity     = 0;
+    impl.m_scratch_capacity    = 0;
+    impl.m_background_capacity = 0;
+    impl.m_params              = { };
     impl.m_pixels.clear();
     impl.m_background_values.clear();
     impl.m_background_rows.clear();
     impl.m_background_cols.clear();
-    if (impl.m_failed)
-        pixelbuf.clear();
+    pixelbuf.clear();
     SimpleRaytracer::clear();
 }
 

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "hartcontext.h"
 #include "simpleraytracer.h"
 
 #include <cstddef>
@@ -15,7 +16,9 @@ OSL_NAMESPACE_BEGIN
 /// Check failed() after the inherited void lifecycle operations.
 /// Background values are shaded on HART in bounded batches each render; only
 /// their importance CDFs are prepared on the host. Surface and light calls
-/// retain independent closure pools. Volumes and displacement are unsupported.
+/// retain independent closure pools. Displacement is unsupported.
+/// Errors are terminal for this renderer; clear() releases resources and
+/// invalidates pixels, but does not reset the inherited error history.
 class HartRaytracer final : public SimpleRaytracer {
 public:
     HartRaytracer();
@@ -23,6 +26,8 @@ public:
 
     bool initialize(int device, bool fused, size_t local_budget);
     bool failed() const;
+    /// Native context ownership only; excludes textures and group allocations.
+    HartContext::ResourceUsage resource_usage() const;
 
     int supports(string_view feature) const override;
     TextureHandle* get_texture_handle(ustring filename, ShadingContext* context,
