@@ -288,6 +288,9 @@ testshade --hart --hart-no-cache --warmup --iters 3 -g 37 5 `
 The frontend uses its normal shader/parameter/layer setup. It selects the
 actual HIP device architecture before optimizing the shader group, then
 passes verified AMDGPU bitcode and the generated init/entry names to HART.
+`--inbuffer` uses the existing source-buffer compiler and memory-loaded shader
+API for each named layer; it does not require or write `.oso` files. A missing
+or invalid `.osl` source is an error even if a compiled file exists.
 The renderer embeds a separate raygen module for every configured
 architecture; execution does not read device code from build-tree paths.
 Each point receives real `ShaderGlobals` and separately aligned group

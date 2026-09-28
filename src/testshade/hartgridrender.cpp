@@ -826,6 +826,7 @@ testshade_hart_validate_generated(int argc, const char* argv[],
     ap.arg("-d %s:FORMAT", &format);
     ap.arg("-od %s:FORMAT", &format);
     ap.arg("--center");
+    ap.arg("--inbuffer");
     ap.arg("--groupname %s:NAME");
     ap.arg("--layer %s:NAME");
     ap.arg("--entry %s:LAYERNAME");
