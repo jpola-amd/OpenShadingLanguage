@@ -1546,14 +1546,21 @@ than inferring it from matching pixels. CPU/OptiX renders can use
 default is unchanged.
 
 The material component probe compares unquantized GPU/CPU albedo, BSDF
-evaluation and sampling, PDFs, directions and roughness for 14 surface cases
+evaluation and sampling, PDFs, directions and roughness for 20 surface cases
 at three inputs. Twelve additional volume cases check independent absorption
 and scattering values, clear channels, phase directions, layers, IOR and
 priorities. Fourteen invalid/boundary cases cover cycles, truncated records,
 the 32/33 lobe limit, overflowing PDFs, malformed media and the eight-entry
 medium limit, including rollback after a failed update.
-Its float tolerance is `2e-6 + 2e-5*abs(CPU)`; delta PDFs and rejection flags
-have exact checks. Material rendering tests exercise 21 CPU/HART scene pairs
+Grazing microfacet cases check stable density and masking; subnormal MIS
+densities have independent balance/power-heuristic expectations. Captured
+near-normal anisotropic samples check finite PDFs and unit transmitted rays.
+The renderer bounds normalized sampling cosines, avoids underflowed squared
+cotangents, and normalizes subnormal PDF pairs before HIP reciprocal division.
+Its float tolerance is `2e-6 + 2e-5*abs(CPU)`; only the re-evaluated PDFs of the
+two captured `.001`-roughness sampling cases use `1e-4` relative tolerance for
+direction-rounding amplification. Delta PDFs and rejection flags have exact
+checks. Material rendering tests exercise 21 CPU/HART scene pairs
 in all four dispatch/storage modes with direct-light sampling disabled.
 Image comparisons use `3e-5` absolute tolerance or adjacent HALF values:
 `testrender` quantizes output to HALF even for float PFM files. Constant

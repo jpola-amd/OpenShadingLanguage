@@ -42,7 +42,7 @@ enum class MediumProbeCase : unsigned {
     Count
 };
 
-constexpr unsigned HartSurfaceCases = 21;
+constexpr unsigned HartSurfaceCases = 27;
 constexpr unsigned HartMaterialCases
     = HartSurfaceCases + static_cast<unsigned>(MediumProbeCase::Count);
 constexpr unsigned HartMaterialRows  = 3;
@@ -343,12 +343,203 @@ medium_probe(MediumProbeCase test, unsigned row)
 
 
 OSL_HOSTDEVICE HartMaterialResult
+grazing_microfacet_probe(unsigned test, unsigned row)
+{
+    HartMaterialResult result { };
+    alignas(16) unsigned char memory[1024];
+    testshade::HartClosurePool pool { memory, sizeof(memory) };
+    const Vec3 N(0, 0, 1), T(1, 0, 0);
+    const float z = row == 0 ? 1e-12f : row == 1 ? 1e-20f : 1e-21f;
+    const Vec3 wo = Vec3(1, 0, z).normalized();
+    const Vec3 wi = Vec3(-.8f, .6f, 2 * z).normalized();
+    const MicrofacetParams params { test == 21
+                                        ? ustringhash(strhash("beckmann"))
+                                        : ustringhash(strhash("ggx")),
+                                    N,
+                                    T,
+                                    .001f,
+                                    .01f,
+                                    1.5f,
+                                    0 };
+    auto* root = material_component(pool, MICROFACET_ID, params);
+    ShaderGlobals sg { };
+    sg.N = sg.Ng = N;
+    sg.I         = -wo;
+    ShadingResult shading;
+    MediumStack medium;
+    if (!hart_valid_closure(root, pool)
+        || !process_closure(sg, .2f, shading, medium, root, false)
+        || !shading.bsdf.prepare(wo, Color3(1), false))
+        return result;
+    const auto eval  = shading.bsdf.eval(wo, wi);
+    result.values[0] = eval.pdf;
+    for (int c = 0; c < 3; ++c)
+        result.values[1 + c] = eval.weight[c];
+    result.values[4] = eval.roughness;
+    result.valid     = 1;
+    result.extent    = uint32_t(pool.used);
+    return result;
+}
+
+
+
+OSL_HOSTDEVICE HartMaterialResult
+mis_density_probe(unsigned row)
+{
+    HartMaterialResult result { };
+    const float scale = row == 0   ? std::numeric_limits<float>::denorm_min()
+                        : row == 1 ? std::numeric_limits<float>::min()
+                                   : 1.0f;
+    // Keep division operands live; constant folding would bypass device math.
+    volatile float inputs[] = { 4 * scale, 8 * scale, 0 };
+    const float a = inputs[0], b = inputs[1], zero = inputs[2];
+    Color3 weight(0);
+    float pdf = zero;
+    MIS::update_eval(&weight, &pdf, Color3(.125f, .25f, .375f), a, .25f);
+    result.values[21] = pdf;
+    MIS::update_eval(&weight, &pdf, Color3(.5f, .25f, .125f), b, .5f);
+    result.values[0] = pdf;
+    for (int c = 0; c < 3; ++c)
+        result.values[1 + c] = weight[c];
+    const float pairs[][2]
+        = { { a, b }, { b, a }, { zero, b }, { b, zero }, { a, a } };
+    for (unsigned i = 0; i < std::size(pairs); ++i) {
+        result.values[4 + 3 * i]
+            = MIS::power_heuristic<MIS::WEIGHT_WEIGHT>(pairs[i][0],
+                                                       pairs[i][1]);
+        result.values[5 + 3 * i]
+            = MIS::power_heuristic<MIS::WEIGHT_EVAL>(pairs[i][0], pairs[i][1]);
+        result.values[6 + 3 * i]
+            = MIS::power_heuristic<MIS::EVAL_WEIGHT>(pairs[i][0], pairs[i][1]);
+    }
+    result.values[19] = a;
+    result.values[20] = b;
+    result.valid      = 1;
+    return result;
+}
+
+
+
+OSL_HOSTDEVICE HartMaterialResult
+captured_microfacet_probe(unsigned row)
+{
+    HartMaterialResult result { };
+    alignas(16) unsigned char memory[1024];
+    testshade::HartClosurePool pool { memory, sizeof(memory) };
+    const Vec3 N(.652908266f, .259998649f, .711415112f);
+    const Vec3 U(.736752808f, 0, -.676162183f);
+    const Vec3 wo(-.114152454f, .362606257f, .924924791f);
+    const Vec3 wi(.580448151f, .402788311f, .707701564f);
+    const float alpha = .05f + .001f * row;
+    MicrofacetParams params {
+        ustringhash(strhash("beckmann")), N, U, alpha, alpha, 1.5f, 1
+    };
+    const auto* transmission = material_component(pool, MICROFACET_ID, params,
+                                                  Color3(1));
+    params.refract           = 0;
+    const auto* reflection   = material_component(pool, MICROFACET_ID, params,
+                                                  Color3(1));
+    const auto* root         = material_add(pool, transmission, reflection);
+    ShaderGlobals sg { };
+    sg.N  = N;
+    sg.Ng = Vec3(.668885171f, .242914349f, .702556312f);
+    sg.I  = -wo;
+    ShadingResult shading;
+    MediumStack medium;
+    if (!hart_valid_closure(root, pool)
+        || !process_closure(sg, 0, shading, medium, root, false)
+        || !shading.bsdf.prepare(wo, Color3(1), false))
+        return result;
+    const auto eval  = shading.bsdf.eval(wo, wi);
+    result.values[0] = eval.pdf;
+    result.values[4] = eval.roughness;
+    for (int c = 0; c < 3; ++c) {
+        result.values[1 + c]  = eval.weight[c];
+        result.values[5 + c]  = wo[c];
+        result.values[8 + c]  = wi[c];
+        result.values[11 + c] = N[c];
+    }
+    result.values[14] = params.eta;
+    result.valid      = 1;
+    result.extent     = uint32_t(pool.used);
+    return result;
+}
+
+
+
+OSL_HOSTDEVICE HartMaterialResult
+captured_microfacet_sample(unsigned test, unsigned row)
+{
+    HartMaterialResult result { };
+    alignas(16) unsigned char memory[1024];
+    testshade::HartClosurePool pool { memory, sizeof(memory) };
+    volatile float inputs[] = { -.223643467f, .347753167f, .91052264f,
+                                .971134841f,  0,           .238531098f,
+                                -.309215724f, .345641434f, .88595587f };
+    const Vec3 N(inputs[0], inputs[1], inputs[2]);
+    const Vec3 U(inputs[3], inputs[4], inputs[5]);
+    const Vec3 wo(inputs[6], inputs[7], inputs[8]);
+    MicrofacetParams params { test == 25 ? ustringhash(strhash("beckmann"))
+                                         : ustringhash(strhash("ggx")),
+                              N,
+                              U,
+                              .001f,
+                              .01f,
+                              1.5f,
+                              1 };
+    const auto* transmission = material_component(pool, MICROFACET_ID, params,
+                                                  Color3(1));
+    params.refract           = 0;
+    const auto* reflection   = material_component(pool, MICROFACET_ID, params,
+                                                  Color3(1));
+    const auto* root         = material_add(pool, transmission, reflection);
+    ShaderGlobals sg { };
+    sg.N = sg.Ng = N;
+    sg.I         = -wo;
+    ShadingResult shading;
+    MediumStack medium;
+    if (!hart_valid_closure(root, pool)
+        || !process_closure(sg, 0, shading, medium, root, false)
+        || !shading.bsdf.prepare(wo, Color3(1), false))
+        return result;
+    const auto sample = shading.bsdf.sample(wo, .279518962f + .1f * row,
+                                            .655218065f, .120993137f);
+    const auto eval   = shading.bsdf.eval(wo, sample.wi);
+    result.values[0]  = sample.pdf;
+    result.values[4]  = sample.roughness;
+    result.values[8]  = eval.pdf;
+    result.values[12] = eval.roughness;
+    for (int c = 0; c < 3; ++c) {
+        result.values[1 + c] = sample.weight[c];
+        result.values[5 + c] = sample.wi[c];
+        result.values[9 + c] = eval.weight[c];
+    }
+    Vec3 stretched = TangentFrame::from_normal_and_tangent(N, U).tolocal(wo);
+    stretched.x *= params.xalpha;
+    stretched.y *= params.yalpha;
+    result.values[13] = stretched.normalized().z;
+    result.valid      = 1;
+    result.extent     = uint32_t(pool.used);
+    return result;
+}
+
+
+
+OSL_HOSTDEVICE HartMaterialResult
 material_probe(unsigned test, unsigned row)
 {
     if (test >= HartSurfaceCases)
         return medium_probe(static_cast<MediumProbeCase>(test
                                                          - HartSurfaceCases),
                             row);
+    if (test == 21 || test == 22)
+        return grazing_microfacet_probe(test, row);
+    if (test == 23)
+        return mis_density_probe(row);
+    if (test == 24)
+        return captured_microfacet_probe(row);
+    if (test == 25 || test == 26)
+        return captured_microfacet_sample(test, row);
     HartMaterialResult result { };
     alignas(16) unsigned char memory[4096];
     testshade::HartClosurePool pool { memory, sizeof(memory) };

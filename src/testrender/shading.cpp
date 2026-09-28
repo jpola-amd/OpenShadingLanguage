@@ -470,14 +470,17 @@ struct Ward final : public BSDF, WardParams {
  * is sufficient).
  */
 struct GGXDist {
-    static OSL_HOSTDEVICE float F(const float tan_m2)
+    static OSL_HOSTDEVICE float D(float cos_theta2, float slope2,
+                                  float alpha_product)
     {
-        return 1 / (float(M_PI) * (1 + tan_m2) * (1 + tan_m2));
+        const float q = cos_theta2 + slope2;
+        return 1 / (float(M_PI) * alpha_product * q * q);
     }
 
-    static OSL_HOSTDEVICE float Lambda(const float a2)
+    static OSL_HOSTDEVICE float Lambda(const float a)
     {
-        return 0.5f * (-1.0f + sqrtf(1.0f + 1.0f / a2));
+        // Keep the cotangent unsquared at grazing angles.
+        return 0.5f * (hypotf(1.0f, 1.0f / a) - 1.0f);
     }
 
     static OSL_HOSTDEVICE Vec2 sampleSlope(float cos_theta, float randu,
@@ -508,14 +511,21 @@ struct GGXDist {
 };
 
 struct BeckmannDist {
-    static OSL_HOSTDEVICE float F(const float tan_m2)
+    static OSL_HOSTDEVICE float D(float cos_theta2, float slope2,
+                                  float alpha_product)
     {
-        return float(1 / M_PI) * OIIO::fast_exp(-tan_m2);
+        const float tan_m2 = slope2 / cos_theta2;
+        if (std::isinf(tan_m2) && tan_m2 > 0)
+            return 0;
+        // Avoid both a clamped fast_exp tail and division by an underflowed
+        // projected area. The logarithmic density has the correct zero limit.
+        return expf(-tan_m2 - logf(float(M_PI) * alpha_product)
+                    - 2 * logf(cos_theta2));
     }
 
-    static OSL_HOSTDEVICE float Lambda(const float a2)
+    static OSL_HOSTDEVICE float Lambda(const float a)
     {
-        const float a = sqrtf(a2);
+        const float a2 = a * a;
         return a < 1.6f ? (1.0f - 1.259f * a + 0.396f * a2)
                               / (3.535f * a + 2.181f * a2)
                         : 0.0f;
@@ -715,11 +725,8 @@ private:
 
     OSL_HOSTDEVICE float evalLambda(const Vec3 w) const
     {
-        float cosTheta2 = SQR(w.z);
-        /* Have these two multiplied by sinTheta^2 for convenience */
-        float cosPhi2st2 = SQR(w.x * xalpha);
-        float sinPhi2st2 = SQR(w.y * yalpha);
-        return Distribution::Lambda(cosTheta2 / (cosPhi2st2 + sinPhi2st2));
+        const float a = fabsf(w.z) / hypotf(w.x * xalpha, w.y * yalpha);
+        return Distribution::Lambda(a);
     }
 
     static OSL_HOSTDEVICE float evalG2(float Lambda_i, float Lambda_o)
@@ -741,12 +748,9 @@ private:
             float cosPhi2st2 = SQR(Hr.x / xalpha);
             float sinPhi2st2 = SQR(Hr.y / yalpha);
             float cosThetaM2 = SQR(cosThetaM);
-            float cosThetaM4 = SQR(cosThetaM2);
-
-            float tanThetaM2 = (cosPhi2st2 + sinPhi2st2) / cosThetaM2;
-
-            const float val = Distribution::F(tanThetaM2)
-                              / (xalpha * yalpha * cosThetaM4);
+            const float val  = Distribution::D(cosThetaM2,
+                                               cosPhi2st2 + sinPhi2st2,
+                                               xalpha * yalpha);
 #ifndef __CUDACC__
             return val;
 #else
@@ -771,7 +775,8 @@ private:
 #endif
 
         // figure out angles for the incoming vector
-        float cos_theta = std::max(swo.z, 0.0f);
+        // Normalization can round the cosine just above one.
+        float cos_theta = std::clamp(swo.z, 0.0f, 1.0f);
         float cos_phi   = 1;
         float sin_phi   = 0;
         /* Normal incidence special case gets phi 0 */
@@ -996,11 +1001,10 @@ private:
 
     OSL_HOSTDEVICE float evalLambda(const Vec3 w) const
     {
-        float cosTheta2 = SQR(w.z);
-        /* Have these two multiplied by sinTheta^2 for convenience */
-        float cosPhi2st2 = SQR(w.x * MxMicrofacetParams::roughness_x);
-        float sinPhi2st2 = SQR(w.y * MxMicrofacetParams::roughness_y);
-        return Distribution::Lambda(cosTheta2 / (cosPhi2st2 + sinPhi2st2));
+        const float a = fabsf(w.z)
+                        / hypotf(w.x * MxMicrofacetParams::roughness_x,
+                                 w.y * MxMicrofacetParams::roughness_y);
+        return Distribution::Lambda(a);
     }
 
     static OSL_HOSTDEVICE float evalG2(float Lambda_i, float Lambda_o)
@@ -1022,14 +1026,10 @@ private:
             float cosPhi2st2 = SQR(Hr.x / MxMicrofacetParams::roughness_x);
             float sinPhi2st2 = SQR(Hr.y / MxMicrofacetParams::roughness_y);
             float cosThetaM2 = SQR(cosThetaM);
-            float cosThetaM4 = SQR(cosThetaM2);
-
-            float tanThetaM2 = (cosPhi2st2 + sinPhi2st2) / cosThetaM2;
-
-            const float val = Distribution::F(tanThetaM2)
-                              / (MxMicrofacetParams::roughness_x
-                                 * MxMicrofacetParams::roughness_y
-                                 * cosThetaM4);
+            const float val
+                = Distribution::D(cosThetaM2, cosPhi2st2 + sinPhi2st2,
+                                  MxMicrofacetParams::roughness_x
+                                      * MxMicrofacetParams::roughness_y);
 #ifndef __CUDACC__
             return val;
 #else
@@ -1050,7 +1050,7 @@ private:
         swo = swo.normalize();
 
         // figure out angles for the incoming vector
-        float cos_theta = std::max(swo.z, 0.0f);
+        float cos_theta = std::clamp(swo.z, 0.0f, 1.0f);
         float cos_phi   = 1;
         float sin_phi   = 0;
         /* Normal incidence special case gets phi 0 */
