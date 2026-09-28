@@ -1072,27 +1072,33 @@ LLVMGEN(llvm_gen_div)
     // The following should handle f/f, v/v, v/f, f/v, i/i
     // That's all that should be allowed by oslc.
     const char* safe_div = is_float ? "osl_safe_div_fff" : "osl_safe_div_iii";
-    bool deriv = (Result.has_derivs() && (A.has_derivs() || B.has_derivs()));
+    bool deriv  = (Result.has_derivs() && (A.has_derivs() || B.has_derivs()));
+    auto divide = [&](llvm::Value* a, llvm::Value* b) {
+        if (B.is_constant() && !rop.is_zero(B))
+            return rop.ll.op_div(a, b);
+        if (rop.use_hart() && is_float) {
+            // HIP shadeops permit approximate/reciprocal division. Emit the
+            // same strict fdiv as the constant path, retaining safe_div's
+            // nonfinite-result policy for both values and reciprocals.
+            llvm::Value* q      = rop.ll.op_div(a, b);
+            llvm::Value* finite = rop.ll.call_function("osl_isfinite_if", q);
+            return rop.ll.op_select(rop.ll.op_ne(finite, rop.ll.constant(0)), q,
+                                    rop.ll.constant(0.0f));
+        }
+        return rop.ll.call_function(safe_div, a, b);
+    };
     for (int i = 0; i < num_components; i++) {
         llvm::Value* a = rop.llvm_load_value(A, 0, i, type);
         llvm::Value* b = rop.llvm_load_value(B, 0, i, type);
         if (!a || !b)
             return false;
-        llvm::Value* a_div_b;
-        if (B.is_constant() && !rop.is_zero(B))
-            a_div_b = rop.ll.op_div(a, b);
-        else
-            a_div_b = rop.ll.call_function(safe_div, a, b);
+        llvm::Value* a_div_b = divide(a, b);
         llvm::Value *rx = NULL, *ry = NULL;
 
         if (deriv) {
             // Division of duals: (a/b, 1/b*(ax-a/b*bx), 1/b*(ay-a/b*by))
             OSL_DASSERT(is_float);
-            llvm::Value* binv;
-            if (B.is_constant() && !rop.is_zero(B))
-                binv = rop.ll.op_div(rop.ll.constant(1.0f), b);
-            else
-                binv = rop.ll.call_function(safe_div, rop.ll.constant(1.0f), b);
+            llvm::Value* binv           = divide(rop.ll.constant(1.0f), b);
             llvm::Value* ax             = rop.llvm_load_value(A, 1, i, type);
             llvm::Value* bx             = rop.llvm_load_value(B, 1, i, type);
             llvm::Value* a_div_b_mul_bx = rop.ll.op_mul(a_div_b, bx);
@@ -2882,7 +2888,8 @@ LLVMGEN(llvm_gen_texture)
     RendererServices::TextureHandle* texture_handle = NULL;
     ustring filename;
     if (rop.use_hart()) {
-        if (!rop.inst()->hart_texture_filename(Filename, filename)) {
+        if ((!Filename.is_constant() && Filename.symtype() != SymTypeParam)
+            || !rop.inst()->hart_texture_filename(Filename, filename)) {
             rop.shadingcontext()->errorfmt(
                 "HART: texture requires a literal filename or an immutable "
                 "nonempty input string parameter");
@@ -3826,17 +3833,18 @@ LLVMGEN(llvm_gen_spline)
 
     const int length = Knots.typespec().arraylength();
     int step         = 1;
+    ustring basis;
     if (rop.use_hart()) {
-        if (length < 4 || !Spline.is_constant()) {
+        if (length < 4 || !rop.inst()->hart_texture_filename(Spline, basis)) {
             rop.shadingcontext()->errorfmt(
-                "HART: spline requires a literal basis and at least four "
-                "resolved spline knots in '{}'",
+                "HART: spline requires a nonempty immutable basis and at "
+                "least four resolved spline knots in '{}'",
                 Knots.name());
             return false;
         }
-        step = Spline.get_string() == ustring("bezier")    ? 3
-               : Spline.get_string() == ustring("hermite") ? 2
-                                                           : 1;
+        step = basis == ustring("bezier")    ? 3
+               : basis == ustring("hermite") ? 2
+                                             : 1;
         if (!has_knot_count || Knot_count.is_constant()) {
             const int count = has_knot_count ? Knot_count.get_int() : length;
             if (count < 4 || count > length || (count - 4) % step) {
@@ -3878,7 +3886,8 @@ LLVMGEN(llvm_gen_spline)
 
     llvm::Value* args[] = {
         rop.llvm_void_ptr(Result),
-        rop.llvm_load_value(Spline),
+        rop.use_hart() ? rop.llvm_const_hash(basis)
+                       : rop.llvm_load_value(Spline),
         rop.llvm_void_ptr(Value),  // make things easy
         rop.llvm_void_ptr(Knots),
         has_knot_count ? rop.llvm_load_value(Knot_count)

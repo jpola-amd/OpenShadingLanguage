@@ -391,6 +391,58 @@ ShaderInstance::hart_texture_filename(const Symbol& sym,
         filename = sym.get_string();
         return !filename.empty();
     }
+    // Spline selectors share parameter binding resolution with textures, but
+    // can also use locals whose initialization proves a single static value.
+    if (sym.symtype() == SymTypeLocal || sym.symtype() == SymTypeTemp) {
+        const auto& code = m_instsymbols.empty() ? m_master->m_ops : m_instops;
+        const auto& args = m_instsymbols.empty() ? m_master->m_args
+                                                 : m_instargs;
+        const auto& syms = m_instsymbols.empty() ? m_master->m_symbols
+                                                 : m_instsymbols;
+        const int first = sym.firstwrite(), last = sym.lastwrite();
+        if (first < maincodebegin() || last < first || last >= int(code.size())
+            || sym.firstread() <= first)
+            return false;
+        // The first initialization must dominate every read. Functioncall
+        // marks an inlined body, not a conditional entry to that body.
+        for (int i = maincodebegin(); i < first; ++i) {
+            const Opcode& op = code[i];
+            if (op.opname() == ustring("functioncall")) {
+                if (op.farthest_jump() > i && op.farthest_jump() <= first)
+                    i = op.farthest_jump() - 1;
+                continue;
+            }
+            if (op.farthest_jump() > first || op.opname() == ustring("return")
+                || op.opname() == ustring("exit"))
+                return false;
+        }
+        bool initialized = false;
+        for (int i = first; i <= last; ++i) {
+            const Opcode& op = code[i];
+            for (int a = 0; a < op.nargs(); ++a) {
+                if (!op.argwrite(a) || &syms[args[op.firstarg() + a]] != &sym)
+                    continue;
+                if (op.opname() != ustring("assign") || op.nargs() != 2
+                    || a != 0 || (!initialized && i != first))
+                    return false;
+                const Symbol& src = syms[args[op.firstarg() + 1]];
+                // Strictly earlier definitions also bound alias recursion.
+                if ((src.symtype() == SymTypeLocal
+                     || src.symtype() == SymTypeTemp)
+                    && src.firstwrite() >= first)
+                    return false;
+                ustring value;
+                if (!hart_texture_filename(src, value)
+                    || (initialized && filename != value))
+                    return false;
+                filename    = value;
+                initialized = true;
+            }
+        }
+        // Inlining repeated calls can initialize the same local more than
+        // once. It is immutable only if every write resolves to one value.
+        return initialized;
+    }
     if (sym.symtype() != SymTypeParam || sym.everwritten()
         || sym.has_init_ops())
         return false;
@@ -866,7 +918,9 @@ ShaderInstance::validate_hart() const
             return fail("unsupported operation 'texture' "
                         "(renderer lacks HARTTextures)");
         ustring filename;
-        if (op.nargs() < 4 || !hart_texture_filename(symbol(1), filename))
+        if (op.nargs() < 4
+            || (!symbol(1).is_constant() && symbol(1).symtype() != SymTypeParam)
+            || !hart_texture_filename(symbol(1), filename))
             return fail("texture requires a literal filename or an immutable "
                         "nonempty input string parameter");
         const int first_option
@@ -1022,9 +1076,9 @@ ShaderInstance::validate_hart() const
         if (op.nargs() != 4 && op.nargs() != 5)
             return fail("invalid spline argument list");
         const Symbol& basis = symbol(1);
-        if (!basis.is_constant() || !basis.typespec().is_string())
-            return fail("spline basis must be a literal string");
-        const ustring name = basis.get_string();
+        ustring name;
+        if (!hart_texture_filename(basis, name))
+            return fail("spline basis must be a nonempty immutable string");
         if (name != ustring("catmull-rom") && name != ustring("bezier")
             && name != ustring("bspline") && name != ustring("hermite")
             && name != ustring("linear") && name != ustring("constant"))
@@ -1412,9 +1466,10 @@ ShaderInstance::validate_hart() const
                 continue;  // Validated literal constructor name, not a string.
             if (op.opname() == ustring("texture") && sym.typespec().is_string())
                 continue;
-            if (a == 1 && (op.opname() == ustring("spline")
-                           || op.opname() == ustring("splineinverse")))
-                continue;  // Validated literal basis, not a device string.
+            if (a == 1
+                && (op.opname() == ustring("spline")
+                    || op.opname() == ustring("splineinverse")))
+                continue;  // Validated immutable basis, not a device string.
             if ((op.opname() == ustring("color") && op.nargs() == 5 && a == 1)
                 || (op.opname() == ustring("transformc") && (a == 1 || a == 2)))
                 continue;  // Validated literal color spaces, not device strings.

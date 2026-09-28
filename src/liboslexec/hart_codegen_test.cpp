@@ -38,6 +38,7 @@
 #include <BSDL/MTX/bsdf_sheen_decl.h>
 #include "opcolor.h"
 
+#include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/unittest.h>
 
 #include <algorithm>
@@ -387,6 +388,27 @@ public:
     size_t requested_size = 0;
     std::unique_ptr<uint8_t[]> storage;
     std::vector<Copy> copies;
+};
+
+
+
+class HartMutableServices final : public HartServices {
+public:
+    using HartServices::HartServices;
+
+    int supports(string_view feature) const override
+    {
+        return feature == "HARTUserdata" || feature == "HARTInteractive"
+               || HartServices::supports(feature);
+    }
+    void* device_alloc(size_t size) override
+    { return arena.device_alloc(size); }
+    void device_free(void* pointer) override { arena.device_free(pointer); }
+    void* copy_to_device(void* destination, const void* source,
+                         size_t size) override
+    { return arena.copy_to_device(destination, source, size); }
+
+    HartInteractiveServices arena;
 };
 
 
@@ -1812,7 +1834,8 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
              int color_transforms = -1, int noise_guard_flags = -1,
              cspan<DiagnosticExpectation> diagnostics   = { },
              bool eager_layers                          = false,
-             cspan<std::pair<int, int>> closure_layouts = { })
+             cspan<std::pair<int, int>> closure_layouts = { },
+             ustring spline_basis                       = ustring())
 {
     const void* bytes = nullptr;
     uint64_t size     = 0;
@@ -2172,7 +2195,8 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     }
     OIIO_CHECK_EQUAL(callables, 3);
     if (spline_arraylen && optimize == 10) {
-        int spline_calls = 0;
+        int spline_calls  = 0;
+        int spline_checks = 0;
         for (auto& function : module) {
             if (function.getName().find("osl_layer_group_") != 0)
                 continue;
@@ -2182,6 +2206,22 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                     const auto* call   = llvm::dyn_cast<llvm::CallBase>(&inst);
                     const auto* callee = call ? call->getCalledFunction()
                                               : nullptr;
+                    if (callee && !spline_basis.empty()
+                        && callee->getName() == "osl_hart_spline_validate") {
+                        ++spline_checks;
+                        OIIO_CHECK_EQUAL(call->arg_size(), 5);
+                        if (call->arg_size() == 5) {
+                            const auto* step = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(2));
+                            OIIO_CHECK_ASSERT(step);
+                            if (step)
+                                OIIO_CHECK_EQUAL(
+                                    step->getSExtValue(),
+                                    spline_basis == ustring("bezier")    ? 3
+                                    : spline_basis == ustring("hermite") ? 2
+                                                                         : 1);
+                        }
+                    }
                     if (!callee
                         || (callee->getName().find("osl_spline_") != 0
                             && callee->getName().find("osl_splineinverse_")
@@ -2191,6 +2231,14 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                     OIIO_CHECK_EQUAL(call->arg_size(), 6);
                     if (call->arg_size() != 6)
                         continue;
+                    if (!spline_basis.empty()) {
+                        const auto* basis = llvm::dyn_cast<llvm::ConstantInt>(
+                            call->getArgOperand(1));
+                        OIIO_CHECK_ASSERT(basis);
+                        if (basis)
+                            OIIO_CHECK_EQUAL(basis->getLimitedValue(),
+                                             ustringhash(spline_basis).hash());
+                    }
                     const auto* length = llvm::dyn_cast<llvm::ConstantInt>(
                         call->getArgOperand(5));
                     OIIO_CHECK_ASSERT(length);
@@ -2214,6 +2262,8 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
                 }
         }
         OIIO_CHECK_ASSERT(spline_calls > 0);
+        if (!spline_basis.empty())
+            OIIO_CHECK_EQUAL(spline_checks, spline_calls);
     }
     if (looping && optimize == 10) {
         OIIO_CHECK_ASSERT(entry);
@@ -2918,8 +2968,176 @@ check_material_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_division_ir(ShadingSystem& ss, ShaderGroup& group, int optimize,
+                  bool safe)
+{
+    const void* bytes = nullptr;
+    uint64_t size     = 0;
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode", TypeDesc::PTR, &bytes));
+    OIIO_CHECK_ASSERT(
+        ss.getattribute(&group, "hart_bitcode_size", TypeUInt64, &size));
+    OIIO_CHECK_ASSERT(bytes && size);
+    if (!bytes || !size)
+        return false;
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(llvm::StringRef(static_cast<const char*>(bytes),
+                                              size),
+                              "hart_division"),
+        context);
+    if (!parsed) {
+        print(stderr, "{}\n", llvm::toString(parsed.takeError()));
+        return false;
+    }
+    std::vector<const llvm::Value*> divisions, guarded;
+    int reciprocals = 0;
+    for (const auto& function : **parsed) {
+        if (function.getName().find("osl_layer_group_") != 0
+            && (optimize == 10
+                || function.getName().find("__direct_callable__") != 0))
+            continue;
+        for (const char* name : { "unsafe-fp-math", "approx-func-fp-math",
+                                  "no-nans-fp-math", "no-infs-fp-math" }) {
+            const auto attr = function.getFnAttribute(name);
+            OIIO_CHECK_ASSERT(!attr.isStringAttribute()
+                              || attr.getValueAsString() != "true");
+        }
+        for (const auto& block : function)
+            for (const auto& inst : block) {
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&inst))
+                    if (const auto* callee = call->getCalledFunction())
+                        OIIO_CHECK_ASSERT(callee->getName()
+                                          != "osl_safe_div_fff");
+                if (inst.getOpcode() == llvm::Instruction::FDiv) {
+                    OIIO_CHECK_ASSERT(!inst.getFastMathFlags().any());
+                    divisions.push_back(&inst);
+                    const auto* numerator = llvm::dyn_cast<llvm::ConstantFP>(
+                        inst.getOperand(0));
+                    reciprocals += numerator && numerator->isExactlyValue(1.0);
+                }
+                if (optimize != 10)
+                    continue;
+                const auto* select = llvm::dyn_cast<llvm::SelectInst>(&inst);
+                const auto* cmp    = select ? llvm::dyn_cast<llvm::ICmpInst>(
+                                                  select->getCondition())
+                                            : nullptr;
+                const auto* finite = cmp ? llvm::dyn_cast<llvm::CallBase>(
+                                               cmp->getOperand(0))
+                                         : nullptr;
+                const auto* callee = finite ? finite->getCalledFunction()
+                                            : nullptr;
+                if (!callee || callee->getName() != "osl_isfinite_if")
+                    continue;
+                OIIO_CHECK_EQUAL(finite->arg_size(), 1);
+                OIIO_CHECK_EQUAL(cmp->getPredicate(), llvm::CmpInst::ICMP_NE);
+                const auto* test_zero = llvm::dyn_cast<llvm::ConstantInt>(
+                    cmp->getOperand(1));
+                OIIO_CHECK_ASSERT(test_zero && test_zero->isZero());
+                const auto* result_zero = llvm::dyn_cast<llvm::ConstantFP>(
+                    select->getFalseValue());
+                OIIO_CHECK_ASSERT(result_zero
+                                  && result_zero->getValueAPF().isZero()
+                                  && !result_zero->getValueAPF().isNegative());
+                if (finite->arg_size() != 1)
+                    continue;
+                OIIO_CHECK_EQUAL(select->getTrueValue(),
+                                 finite->getArgOperand(0));
+                guarded.push_back(select->getTrueValue());
+            }
+    }
+    OIIO_CHECK_ASSERT(!divisions.empty());
+    if (optimize == 10) {
+        for (const auto* division : divisions)
+            OIIO_CHECK_EQUAL(std::find(guarded.begin(), guarded.end(), division)
+                                 != guarded.end(),
+                             safe);
+        if (safe)
+            OIIO_CHECK_ASSERT(reciprocals > 0);
+        else
+            OIIO_CHECK_ASSERT(guarded.empty());
+    }
+    return !divisions.empty();
+}
+
+
+
+bool
+check_division_modules(string_view arch, string_view stdosl)
+{
+    auto check = [&](string_view source, bool safe) {
+        OSLCompiler compiler;
+        std::string bytecode;
+        const std::vector<std::string> options {
+            "-I" + OIIO::Filesystem::parent_path(stdosl)
+        };
+        if (!compiler.compile_buffer(source, bytecode, options, stdosl))
+            return false;
+        for (int osl_optimize : { 0, 2 })
+            for (int optimize : { 10, 3 }) {
+                HartServices renderer;
+                Diagnostics errors;
+                ShadingSystem ss(&renderer, nullptr, &errors);
+                OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+                OIIO_CHECK_ASSERT(ss.attribute("optimize", osl_optimize));
+                OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", optimize));
+                auto group = make_group(ss, bytecode);
+                ss.optimize_group(group.get(), nullptr);
+                if (errors.errors)
+                    print(stderr, "Division (OSL {}, LLVM {}): {}\n",
+                          osl_optimize, optimize, errors.last_error);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+                check_module(ss, *group, arch, { }, optimize);
+                OIIO_CHECK_ASSERT(
+                    check_division_ir(ss, *group, optimize, safe));
+            }
+        return true;
+    };
+    if (!check("shader scalar_division(float a=2, float b=1.5, "
+               "output color Cout=0) { float q=(a+u)/(b+v); "
+               "Cout=color(q,Dx(q),Dy(q)); }",
+               true)
+        || !check("shader color_division(output color Cout=0) { "
+                  "color a=color(2+u,4+u,8+u), b=color(.5+v,1.5+v,2.5+v); "
+                  "color q=a/b; Cout=q+Dx(q)+Dy(q); }",
+                  true)
+        || !check("shader literal_divisor(float a=2, output color Cout=0) { "
+                  "float q=(a+u)/1.5; Cout=color(q,Dx(q),Dy(q)); }",
+                  false))
+        return false;
+    const struct {
+        string_view type, initial, expected, component;
+    } aggregates[] = {
+        { "color2", "color2(.5,1.5)", "color2(4,2.0/1.5)", "a" },
+        { "color4", "color4(color(.5,1.5,2.5),1.5)",
+          "color4(color(4,2.0/1.5,2.0/2.5),2.0/1.5)", "a" },
+        { "vector2", "vector2(.5,1.5)", "vector2(4,2.0/1.5)", "y" },
+        { "vector4", "vector4(.5,1.5,2.5,3.5)",
+          "vector4(4,2.0/1.5,2.0/2.5,2.0/3.5)", "y" },
+    };
+    for (const auto& test : aggregates) {
+        // Keep a varying quotient live even when OSL2 folds the exact
+        // default-parameter comparison from the original standard fixtures.
+        const auto source = fmtformat(
+            "#include \"{0}.h\"\n"
+            "shader aggregate_division({0} param1={1}, output color Cout=0) {{ "
+            "{0} q=2/(param1+v); "
+            "int exact=(2/param1=={2}) && (2.0/param1=={2}); "
+            "Cout=color(exact,q.{3},Dx(q.{3})+Dy(q.{3})); }}",
+            test.type, test.initial, test.expected, test.component);
+        if (!check(source, true))
+            return false;
+    }
+    return true;
+}
+
+
+
+bool
 check_math_modules(string_view arch, string_view stdosl)
 {
+    if (!check_division_modules(arch, stdosl))
+        return false;
     for (string_view type : { "float", "color", "vector" }) {
         const auto body = fmtformat(
             "{0} x={0}(1.7*u-0.7), y={0}(v+0.4); "
@@ -10771,27 +10989,6 @@ check_texture_compatibility_modules(string_view arch, string_view stdosl)
     }
 
     // Reach the filename guard rather than rejecting the renderer capability.
-    class MutableTextureServices final : public HartServices {
-    public:
-        MutableTextureServices()
-            : HartServices(true, false, false, true, false, false, false, false,
-                           true)
-        {
-        }
-        int supports(string_view feature) const override
-        {
-            return feature == "HARTUserdata" || feature == "HARTInteractive"
-                   || HartServices::supports(feature);
-        }
-        void* device_alloc(size_t size) override
-        { return arena.device_alloc(size); }
-        void device_free(void* pointer) override { arena.device_free(pointer); }
-        void* copy_to_device(void* destination, const void* source,
-                             size_t size) override
-        { return arena.copy_to_device(destination, source, size); }
-
-        HartInteractiveServices arena;
-    };
     OSLCompiler producer_compiler;
     std::string producer;
     if (!producer_compiler.compile_buffer(
@@ -10873,7 +11070,8 @@ check_texture_compatibility_modules(string_view arch, string_view stdosl)
             bytecode.replace(offset + 1, sizeof("oparam") - 1, "param");
         }
         for (int optimize : { 0, 2 }) {
-            MutableTextureServices renderer;
+            HartMutableServices renderer(true, false, false, true, false,
+                                         false, false, false, true);
             {
                 Diagnostics errors;
                 ShadingSystem ss(&renderer, nullptr, &errors);
@@ -12852,8 +13050,197 @@ check_string_modules(string_view arch, string_view stdosl)
 
 
 bool
+check_spline_selector_modules(string_view arch, string_view stdosl)
+{
+    const struct {
+        int osl, llvm;
+    } variants[]          = { { 0, 10 }, { 0, 3 }, { 2, 10 }, { 2, 3 } };
+    auto overridden_group = [](ShadingSystem& ss, string_view bytecode,
+                               const char* value, ParamHints hints) {
+        if (!value)
+            return make_group(ss, bytecode);
+        OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("hart_test", bytecode));
+        auto group = ss.ShaderGroupBegin("hart_test_group");
+        const ustring basis(value);
+        OIIO_CHECK_ASSERT(ss.Parameter("basis", TypeString, &basis, hints));
+        OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+        OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+        const SymLocationDesc output("Cout", TypeColor, false,
+                                     SymArena::Outputs, 0, 3 * sizeof(float));
+        ss.add_symlocs(group.get(), { &output, 1 });
+        return group;
+    };
+    auto check = [&](string_view bytecode, const char* override_name,
+                     ustring expected, int arraylen) {
+        for (const auto& variant : variants) {
+            HartServices renderer(false, false, false, true, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", variant.osl));
+            OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", variant.llvm));
+            auto group = overridden_group(ss, bytecode, override_name,
+                                          ParamHints::none);
+            // Exercise resolution after overrides have been copied/released,
+            // including OSL0 where parameters retain Groupdata storage.
+            if (override_name)
+                ss.optimize_group(group.get(), nullptr, false);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "Spline selector {} (OSL {}, LLVM {}): {}\n",
+                      expected, variant.osl, variant.llvm, errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch, { "rs_hart_spline_error" },
+                         variant.llvm, false, false, false, 0, false, true,
+                         arraylen, -1, -1, { }, false, { }, expected);
+        }
+    };
+    const struct {
+        const char* initial;
+        const char* override_name;
+        bool alias;
+    } selectors[] = {
+        { "linear", nullptr, false },        { "bspline", nullptr, true },
+        { "linear", "bezier", false },       { "bezier", "hermite", true },
+        { "unknown", "catmull-rom", false }, { "", "constant", true },
+    };
+    for (const auto& test : selectors) {
+        const ustring basis(test.override_name ? test.override_name
+                                               : test.initial);
+        const int step = basis == ustring("bezier")    ? 3
+                         : basis == ustring("hermite") ? 2
+                                                       : 1;
+        const auto source
+            = fmtformat("shader spline_selector(string basis=\"{}\", "
+                        "output color Cout=0) {{ "
+                        "float k[10]={{0,1,2,3,4,5,6,7,8,9}}; {} "
+                        "int n=4+{}*int(u>v); "
+                        "float f=spline({},u,k); "
+                        "float inv=splineinverse({},1.2+.4*u,n,k); "
+                        "Cout=color(f,inv,Dx(f)+Dy(inv)); }}",
+                        test.initial,
+                        test.alias ? "string selected=basis;" : "", step,
+                        test.alias ? "selected" : "basis",
+                        test.alias ? "selected" : "basis");
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check(bytecode, test.override_name, basis, 10);
+    }
+    {
+        // spline-boundarybug calls this helper three times, reusing the
+        // local's symbol for three identical literal initializations.
+        const char* source = "float invspline(float x,float uu) { "
+                             "string basis=\"bspline\"; float knots[8]; "
+                             "for(int i=0;i<4;++i) knots[i]=x; "
+                             "for(int i=4;i<8;++i) knots[i]=1.0; "
+                             "return splineinverse(basis,uu,knots); } "
+                             "shader spline_local(output color Cout=0) { "
+                             "Cout=color(invspline(.6,u),invspline(.6,v),"
+                             "invspline(.6,time)); }";
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        check(bytecode, nullptr, ustring("bspline"), 8);
+    }
+    const struct {
+        string_view declaration, body, selector;
+        const char* override_name = nullptr;
+        ParamHints hints          = ParamHints::none;
+        int arraylen              = 4;
+        string_view error         = "spline basis must be a nonempty immutable";
+    } rejected[] = {
+        { "string basis=\"unknown\"", "", "basis", nullptr, ParamHints::none, 4,
+          "unsupported spline basis" },
+        { "string basis=\"\"", "", "basis" },
+        { "string basis=\"linear\"", "", "basis", "unknown", ParamHints::none,
+          4, "unsupported spline basis" },
+        { "string basis=\"linear\"", "", "basis", "" },
+        { "string basis=(u>v?\"linear\":\"bezier\")", "", "basis" },
+        { "string basis=(u>v?\"linear\":\"bezier\")", "", "basis", "linear" },
+        { "string basis=\"linear\" [[int interpolated=1]]", "", "basis" },
+        { "string basis=\"linear\" [[int interactive=1]]", "", "basis" },
+        { "string basis=\"linear\"", "", "basis", "bezier",
+          ParamHints::interpolated },
+        { "string basis=\"linear\"", "", "basis", "bezier",
+          ParamHints::interactive },
+        { "output string basis=\"linear\"", "", "basis" },
+        { "string basis=\"linear\"",
+          "string selected=u>v?\"linear\":\"bezier\";", "selected" },
+        { "string basis=\"linear\"",
+          "string selected=basis; if(u>v) selected=\"bezier\";", "selected" },
+        { "string basis=\"linear\"", "string selected; if(u>v) selected=basis;",
+          "selected" },
+        { "string basis=\"linear\"",
+          "string names[2]={\"linear\",\"bezier\"}; "
+          "string selected=names[int(u>v)];",
+          "selected" },
+        { "string basis=\"linear\"", "", "basis", "bezier", ParamHints::none, 5,
+          "invalid spline knot count for array/basis" },
+        { "string basis=\"linear\"", "", "basis", "hermite", ParamHints::none,
+          5, "invalid spline knot count for array/basis" },
+    };
+    for (const auto& test : rejected) {
+        const auto source = fmtformat(
+            "shader rejected_selector({},output color Cout=0) {{ {} "
+            "float k[{}]={{0,1,2,3{}}}; "
+            "float f=spline({},u,k); float inv=splineinverse({},u,k); "
+            "Cout=color(f+inv); }}",
+            test.declaration, test.body, test.arraylen,
+            test.arraylen == 5 ? ",4" : "", test.selector, test.selector);
+        OSLCompiler compiler;
+        std::string bytecode;
+        if (!compiler.compile_buffer(source, bytecode, { }, stdosl))
+            return false;
+        for (const auto& variant : variants) {
+            HartMutableServices renderer(false, false, false, true, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", variant.osl));
+            OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", variant.llvm));
+            auto group = overridden_group(ss, bytecode, test.override_name,
+                                          test.hints);
+            check_rejected_group(ss, *group, errors, test.error);
+        }
+    }
+    {
+        OSLCompiler producer_compiler, consumer_compiler;
+        std::string producer, consumer;
+        if (!producer_compiler.compile_buffer(
+                "shader basis_source(output string value=\"linear\") { "
+                "value=u>v?\"linear\":\"bezier\"; }",
+                producer, { }, stdosl)
+            || !consumer_compiler.compile_buffer(
+                "shader basis_sink(string value=\"linear\", "
+                "output color Cout=0) { float k[4]={0,1,2,3}; "
+                "Cout=color(splineinverse(value,u,k)); }",
+                consumer, { }, stdosl))
+            return false;
+        for (const auto& variant : variants) {
+            HartServices renderer(false, false, false, true, true);
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", variant.osl));
+            OIIO_CHECK_ASSERT(ss.attribute("llvm_optimize", variant.llvm));
+            auto group = make_connected_group(ss, producer, consumer);
+            check_rejected_group(ss, *group, errors,
+                                 "spline basis must be a nonempty immutable");
+        }
+    }
+    return true;
+}
+
+
+
+bool
 check_spline_modules(string_view arch, string_view stdosl)
 {
+    if (!check_spline_selector_modules(arch, stdosl))
+        return false;
     auto check = [&](string_view label, string_view producer,
                      string_view consumer,
                      std::initializer_list<string_view> shadeops,
@@ -13093,13 +13480,10 @@ check_spline_modules(string_view arch, string_view stdosl)
         { "shader bad(output color Cout=0) { float k[4]={0,1,2,3}; "
           "Cout=color(spline(\"unknown\",u,k)); }",
           "spline basis" },
-        { "shader bad(string basis=\"linear\", output color Cout=0) { "
-          "float k[4]={0,1,2,3}; Cout=color(spline(basis,u,k)); }",
-          "spline basis must be a literal string" },
         { "shader bad(output color Cout=0) { float k[4]={0,1,2,3}; "
           "string basis=u>v?\"linear\":\"bezier\"; "
           "Cout=color(splineinverse(basis,u,k)); }",
-          "spline basis must be a literal string" },
+          "spline basis must be a nonempty immutable string" },
         { "shader bad [[int range_checking=0]] (output color Cout=0) { "
           "float k[4]={0,1,2,3}; Cout=color(spline(\"linear\",u,3,k)); }",
           "spline knot" },

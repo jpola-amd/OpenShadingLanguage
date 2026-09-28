@@ -1,0 +1,4 @@
+Compiled test.osl -> test.oso
+HART shader 'test' (test.osl:21, point 0): (0.600000,0.000000)
+HART shader 'test' (test.osl:23, point 0): (0.600000,0.000000)
+HART shader 'test' (test.osl:25, point 0): (0.600000,0.306263)

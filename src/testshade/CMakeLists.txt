@@ -317,6 +317,12 @@ if (OSL_USE_HART AND USE_LLVM_BITCODE)
                     "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
             set_tests_properties (hart-isconstant-runtime PROPERTIES
                                   LABELS "hart;gpu" RUN_SERIAL TRUE)
+            add_test (NAME hart-spline-division-runtime
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${PROJECT_SOURCE_DIR}/testsuite/cmake-hart/check-spline-division.py"
+                    "$<TARGET_FILE:testshade>" --oslc "$<TARGET_FILE:oslc>" --gpu)
+            set_tests_properties (hart-spline-division-runtime PROPERTIES
+                                  LABELS "hart;gpu" RUN_SERIAL TRUE)
             if (TARGET OpenImageIO::oiiotool)
                 set (hart_output_oiiotool "$<TARGET_FILE:OpenImageIO::oiiotool>")
             else ()

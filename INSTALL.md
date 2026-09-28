@@ -531,8 +531,19 @@ derivative checks. The existing shared `atan2` duals' reversed derivative signs
 are preserved for backend parity, not corrected by this change.
 Additional noise selectors still require explicit support.
 
-HART also supports `spline` and `splineinverse` with literal `catmull-rom`,
-`bezier`, `bspline`, `hermite`, `linear` and `constant` bases. Renderers opt in
+Nonconstant HART float division uses unrelaxed LLVM division, rather than the
+HIP shadeop's approximate reciprocal path, so runtime and constant operands
+retain the same precision. Nonfinite quotients become positive zero, as in
+OSL's safe division; finite signed zeros are retained. Derivative reciprocals
+use the same guarded division. CPU, OptiX, integer and matrix division, and the
+existing nonzero constant-denominator path are unchanged.
+
+HART also supports `spline` and `splineinverse` with `catmull-rom`,
+`bezier`, `bspline`, `hermite`, `linear` and `constant` bases. Selectors may be
+literals, immutable input string parameters (including instance overrides),
+or locals whose initialization dominates their reads and whose writes all
+resolve to the same value. Dynamic, connected, output, interactive and
+interpolated selectors remain unsupported. Renderers opt in
 with `HARTSplineErrors` and provide `rs_hart_spline_error` in addition to array
 services. Knot arrays must have at least four resolved elements; the selected
 count must fit the array and the basis's segment cardinality. Statically invalid
@@ -545,6 +556,11 @@ ignores knot derivatives, and can drop derivatives at solver segment boundaries.
 `hart-spline-runtime` checks nonlinear bases, derivatives, connected/resized
 arrays, endpoints and pre/post-launch failures. Path-tracer tests also compose
 spline weights with textures and verify device failure propagation.
+`hart-spline-division-runtime` additionally checks live division equality,
+finite guards, signed zeros, derivatives, and default/overridden forward and
+inverse spline selectors against independent values in all four dispatch and
+storage modes. The original aggregate math and spline-boundary fixtures also
+run through the standard HART runner.
 
 The grid and path renderers bind color-system data through their device service
 state, not host addresses or general userdata. `HARTColorSystem` renderers
