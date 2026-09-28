@@ -382,6 +382,45 @@ hart_supports_noise(ustring name, bool periodic)
 
 
 bool
+ShaderInstance::hart_texture_filename(const Symbol& sym,
+                                      ustring& filename) const
+{
+    if (!sym.typespec().is_string() || sym.typespec().is_array())
+        return false;
+    if (sym.is_constant()) {
+        filename = sym.get_string();
+        return !filename.empty();
+    }
+    if (sym.symtype() != SymTypeParam || sym.everwritten()
+        || sym.has_init_ops())
+        return false;
+    const int index = findparam(sym.name(), m_instsymbols.empty());
+    if (index < 0)
+        return false;
+    // Validation precedes symbol copying; lowering also needs this at OSL O0.
+    const auto source       = m_instoverrides.empty()
+                                  ? sym.valuesource()
+                                  : m_instoverrides[index].valuesource();
+    const bool interpolated = m_instoverrides.empty()
+                                  ? sym.interpolated()
+                                  : m_instoverrides[index].interpolated();
+    const bool interactive  = m_instoverrides.empty()
+                                  ? sym.interactive()
+                                  : m_instoverrides[index].interactive();
+    if (interpolated || interactive
+        || (source != Symbol::DefaultVal && source != Symbol::InstanceVal))
+        return false;
+    // LLVM layout repurposes dataoffset for Groupdata. The copied symbol's
+    // data pointer still addresses its original default or instance value.
+    filename = m_instsymbols.empty()
+                   ? *static_cast<const ustring*>(param_storage(index))
+                   : sym.get_string();
+    return !filename.empty();
+}
+
+
+
+bool
 ShaderInstance::validate_hart() const
 {
     // Check the original code before constant folding can execute host-only
@@ -824,15 +863,17 @@ ShaderInstance::validate_hart() const
         if (!shadingsys().renderer()->supports("HARTTextures"))
             return fail("unsupported operation 'texture' "
                         "(renderer lacks HARTTextures)");
-        if (op.nargs() < 4 || !symbol(1).is_constant()
-            || !symbol(1).typespec().is_string()
-            || symbol(1).get_string().empty())
-            return fail("texture requires a literal filename");
+        ustring filename;
+        if (op.nargs() < 4 || !hart_texture_filename(symbol(1), filename))
+            return fail("texture requires a literal filename or an immutable "
+                        "nonempty input string parameter");
         const int first_option
             = op.nargs() > 4 && symbol(4).typespec().is_float() ? 8 : 4;
         if (op.nargs() < first_option || (op.nargs() - first_option) % 2)
             return fail("invalid texture argument list");
-        bool interp = false, swrap = false, twrap = false;
+        const bool defaults = shadingsys().renderer()->supports(
+            "HARTTextureDefaults");
+        bool interp = defaults, swrap = defaults, twrap = defaults;
         for (int a = first_option; a < op.nargs(); a += 2) {
             const Symbol& token = symbol(a);
             const Symbol& value = symbol(a + 1);

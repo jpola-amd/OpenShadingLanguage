@@ -2615,6 +2615,16 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
     rop.ll.call_function("osl_init_texture_options", rop.sg_void_ptr(), opt);
     llvm::Value* missingcolor = NULL;
     TextureOpt optdefaults;  // So we can check the defaults
+    if (rop.use_hart() && !tex3d
+        && rop.renderer()->supports("HARTTextureDefaults")) {
+        // Match the reference GPU renderer, not OIIO's smart-bicubic defaults.
+        optdefaults.swrap = optdefaults.twrap = TextureOpt::WrapPeriodic;
+        optdefaults.interpmode                = TextureOpt::InterpBilinear;
+        rop.ll.call_function("osl_texture_set_stwrap_code", opt,
+                             rop.ll.constant(int(optdefaults.swrap)));
+        rop.ll.call_function("osl_texture_set_interp_code", opt,
+                             rop.ll.constant(int(optdefaults.interpmode)));
+    }
     bool swidth_set = false, twidth_set = false, rwidth_set = false;
     bool sblur_set = false, tblur_set = false, rblur_set = false;
     bool swrap_set = false, twrap_set = false, rwrap_set = false;
@@ -2870,8 +2880,19 @@ LLVMGEN(llvm_gen_texture)
                                    errormessage);
 
     RendererServices::TextureHandle* texture_handle = NULL;
-    if (Filename.is_constant()
-        && (rop.use_hart() || rop.shadingsys().opt_texture_handle())) {
+    ustring filename;
+    if (rop.use_hart()) {
+        if (!rop.inst()->hart_texture_filename(Filename, filename)) {
+            rop.shadingcontext()->errorfmt(
+                "HART: texture requires a literal filename or an immutable "
+                "nonempty input string parameter");
+            return false;
+        }
+        texture_handle
+            = rop.renderer()->get_texture_handle(filename, rop.shadingcontext(),
+                                                 nullptr);
+    } else if (Filename.is_constant()
+               && rop.shadingsys().opt_texture_handle()) {
         texture_handle
             = rop.renderer()->get_texture_handle(Filename.get_string(),
                                                  rop.shadingcontext(), nullptr);
@@ -2881,7 +2902,7 @@ LLVMGEN(llvm_gen_texture)
     if (rop.use_hart()
         && (!texture_handle || !rop.renderer()->good(texture_handle))) {
         rop.shadingcontext()->errorfmt("HART: cannot prepare texture '{}'",
-                                       Filename.get_string());
+                                       filename);
         return false;
     }
 

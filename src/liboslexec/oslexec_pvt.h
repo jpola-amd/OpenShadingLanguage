@@ -1523,6 +1523,7 @@ public:
     /// Make our own version of the code and args from the master.
     void copy_code_from_master(ShaderGroup& group);
     bool validate_hart() const;
+    bool hart_texture_filename(const Symbol& sym, ustring& filename) const;
 
     /// Check the params to re-assess writes_globals and userdata_params.
     /// Sorry, can't think of a short name that isn't too cryptic.

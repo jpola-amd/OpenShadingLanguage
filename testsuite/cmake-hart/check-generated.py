@@ -1055,12 +1055,12 @@ def check_texture_suite():
         + texture_arguments("3"), "nonfinite coordinates/gradients",
         error_after_launch=True)
 
-    # The blur call is both untaken and in an unused layer. String parameters
-    # can be rejected by either the renderer or the compiler's type guard.
+    # The blur call is both untaken and in an unused layer. A varying filename
+    # must not be bound to its parameter's initial value.
     errors = (
         "HART: texture requires explicit closest or linear interpolation",
         "HART: texture requires explicit wrap modes",
-        "'string'",
+        "HART: texture requires a literal filename",
         "UDIM patterns are not supported",
         "HART: texture requires a literal filename",
         "HART: unsupported texture option 'blur'",

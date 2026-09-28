@@ -19,7 +19,8 @@ shader hart_texture_rejected(
 #elif TEXTURE_CASE == 1
     Cout = texture("hart_texture_rgb.pfm", u, v, "interp", "linear");
 #elif TEXTURE_CASE == 2
-    Cout = texture(filename, u, v, "interp", "linear", "wrap", "clamp");
+    string selected = u > v ? filename : "unused.pfm";
+    Cout = texture(selected, u, v, "interp", "linear", "wrap", "clamp");
 #elif TEXTURE_CASE == 3
     Cout = texture("hart_texture_<UDIM>.pfm", u, v,
                    "interp", "linear", "wrap", "clamp");

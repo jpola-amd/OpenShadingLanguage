@@ -843,7 +843,12 @@ color albedo = texture("albedo.tx", u, v,
 Cout = albedo;
 ```
 
-The filename must be a nonempty literal. An explicit literal `"interp"` of
+The filename must be a nonempty literal or an immutable scalar input string
+parameter, including an instance override of an empty default. Interpolated,
+interactive, connected, written and runtime-initialized filename parameters
+are rejected before optimization. Resolution also works at OSL O0 and retains
+the renderer's stable resource IDs; this is not dynamic filename lookup.
+An explicit literal `"interp"` of
 `"closest"` or `"linear"` is required, as are explicit wrap modes for both
 axes: `"wrap"` sets both, or use `"swrap"` and `"twrap"`. Each supports
 `"black"`, `"clamp"`, or `"periodic"`. The optional `"alpha", alpha` writes
@@ -854,6 +859,14 @@ are rejected before optimization, including in unused code.
 The default OIIO smart-bicubic/anisotropic filtering is **not** approximated
 silently: omitted filtering/wrap options and unsupported options are errors,
 including in branches or layers that optimization could remove.
+
+The native `testrender --hart` renderer opts into `HARTTextureDefaults`:
+omitted wrap modes use `"periodic"` and omitted interpolation uses `"linear"`,
+including linear mip interpolation. These match the reference OptiX renderer's
+sampler, **not** OIIO's smart-bicubic/anisotropic defaults. Explicit supported
+options override these defaults, including per-axis wraps and repeated options.
+Other renderers, including ordinary `testshade --hart`, retain the explicit
+option requirement unless they advertise this capability.
 
 The renderer loads raw numeric pixels from the first subimage of a non-deep
 2D image with one to four channels. It performs no colorspace conversion or
@@ -909,6 +922,12 @@ sampled alpha as a blend mask. The material tests compare CPU and independent
 sampling/product-rule references, exercise split and fused storage modes,
 and change alpha image contents across A-B-A cache reuse without changing
 shader code or filenames.
+
+The four `hart-texture-render-{split,fused,fused-local,unoptimized}` tests
+exercise immutable default/overridden filenames, renderer-gated defaults and
+explicit option precedence, two simultaneous textures with swapped bindings,
+repeated rendering, and missing/empty resource failures without image output.
+Their CPU oracles explicitly select matching magnifying samplers.
 
 `Dz`, unlisted noise forms, closures,
 tracing, shader printing, writes to read-only or unlisted shader globals,

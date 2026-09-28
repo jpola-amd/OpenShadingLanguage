@@ -15,14 +15,15 @@ import xml.etree.ElementTree as ET
 
 if len(sys.argv) not in (5, 6) or (len(sys.argv) == 6
                                  and sys.argv[5] not in ("--materials", "--lighting",
-                                                        "--volumes")):
+                                                        "--volumes", "--textures")):
     raise SystemExit("Usage: check-pathtracer.py renderer compiler stdosl "
                      "{split|fused|fused-local|unoptimized} "
-                     "[--materials|--lighting|--volumes]")
+                     "[--materials|--lighting|--volumes|--textures]")
 renderer, compiler, stdosl, mode = sys.argv[1:5]
 materials = len(sys.argv) == 6 and sys.argv[5] == "--materials"
 lighting = len(sys.argv) == 6 and sys.argv[5] == "--lighting"
 volumes = len(sys.argv) == 6 and sys.argv[5] == "--volumes"
+textures = len(sys.argv) == 6 and sys.argv[5] == "--textures"
 env = os.environ.copy()
 for key in ("TESTSHADE_OPTIX", "TESTSHADE_OPT", "TESTSHADE_LLVM_OPT", "TESTRENDER_AA"):
     env.pop(key, None)
@@ -102,6 +103,117 @@ def render(name, gpu, bounces=1, aa=1, repeat=False, material_count=None,
     if material_count is not None and not lighting:
         assert "triangles to be treated as lights" not in output, output
     return pixels(image)
+
+
+def check_textures():
+    for name, reverse in (("texture_a.pfm", False), ("texture_b.pfm", True)):
+        data = [v for y in range(4) for x in range(4)
+                for v in (0.125+0.25*(3-x if reverse else x),
+                          0.125+0.25*(3-y if reverse else y),
+                          0.25 if reverse else 0.75)]
+        (root / name).write_bytes(b"PF\n4 4\n-1.0\n" + struct.pack("<48f", *data))
+
+    # The CPU oracle explicitly selects the same magnifying sampler. OIIO's
+    # omitted smart-bicubic defaults are not the reference GPU's defaults.
+    options = {
+        "defaults": ("", '"wrap","periodic","interp","linear"'),
+        "wrap": ('"wrap","clamp"', '"wrap","clamp","interp","linear"'),
+        "interp": ('"interp","closest"', '"wrap","periodic","interp","closest"'),
+        "swrap": ('"swrap","black"', '"swrap","black","twrap","periodic","interp","linear"'),
+        "twrap": ('"twrap","clamp"', '"swrap","periodic","twrap","clamp","interp","linear"'),
+        "explicit": ('"wrap","clamp","interp","closest"',
+                     '"wrap","clamp","interp","closest"'),
+        "reset": ('"wrap","clamp","swrap","periodic","twrap","periodic",'
+                  '"interp","closest","interp","linear"',
+                  '"wrap","periodic","interp","linear"'),
+    }
+    shaders = {}
+    for name, pair in options.items():
+        for suffix, tokens in zip(("gpu", "ref"), pair):
+            shader = "path_texture_" + name + "_" + suffix
+            shaders[shader] = f"""shader {shader}(
+                string filename="texture_a.pfm") {{
+                color value=texture(filename, 5*u-2, 5*v-2
+                                    {"," + tokens if tokens else ""});
+                Ci=uniform_edf(value);
+            }}"""
+    shaders["path_texture_empty"] = """shader path_texture_empty(
+        string filename="") {
+        color value=texture(filename, 5*u-2, 5*v-2);
+        Ci=uniform_edf(value);
+    }"""
+    shaders["path_texture_pair"] = """shader path_texture_pair(
+        string first="texture_a.pfm", string second="texture_b.pfm") {
+        color a=texture(first, 5*u-2, 5*v-2);
+        color b=texture(second, 5*u-2, 5*v-2);
+        Ci=uniform_edf(0.25*a + 0.75*b);
+    }"""
+    shaders["path_texture_pair_ref"] = """shader path_texture_pair_ref(
+        string first="texture_a.pfm", string second="texture_b.pfm") {
+        color a=texture(first, 5*u-2, 5*v-2,
+                        "wrap","periodic","interp","linear");
+        color b=texture(second, 5*u-2, 5*v-2,
+                        "wrap","periodic","interp","linear");
+        Ci=uniform_edf(0.25*a + 0.75*b);
+    }"""
+    for name, source in shaders.items():
+        (root / (name + ".osl")).write_text(source, encoding="ascii")
+        run([compiler, "-I" + str(Path(stdosl).parent), name + ".osl"], root)
+
+    def scene(name, shader, params=""):
+        (root / (name + ".xml")).write_text(f"""<World>
+          <Camera eye="0,0,4" dir="0,0,-1" fov="90"/>
+          <ShaderGroup name="surface" is_light="0">
+            {params} shader {shader} m;</ShaderGroup>
+          <Quad corner="-10,-10,0" edge_x="20,0,0" edge_y="0,20,0"/>
+          </World>""", encoding="ascii")
+
+    results = {}
+    for name in options:
+        print("Checking HART texture options: " + name + " (" + mode + ")", flush=True)
+        scene(name + "_ref", "path_texture_" + name + "_ref")
+        scene(name, "path_texture_" + name + "_gpu")
+        cpu = render(name + "_ref", False, bounces=0, material_count=1)
+        results[name] = render(name, True, bounces=0, material_count=1)
+        compare(results[name], cpu, half_output=True)
+    compare(results["reset"], results["defaults"], 0)
+    for name in ("wrap", "interp", "swrap", "twrap", "explicit"):
+        assert max(abs(a-b) for a, b in zip(results[name], results["defaults"])) > 0.01
+
+    override = 'param string filename "texture_b.pfm";'
+    scene("override_ref", "path_texture_defaults_ref", override)
+    expected_b = render("override_ref", False, bounces=0, material_count=1)
+    for name, shader in (("override", "path_texture_defaults_gpu"),
+                         ("empty_override", "path_texture_empty")):
+        scene(name, shader, override)
+        compare(render(name, True, bounces=0, material_count=1), expected_b,
+                half_output=True)
+    assert max(abs(a-b) for a, b in zip(expected_b, results["defaults"])) > 0.1
+    # Both IDs coexist, including a swapped assignment of the same filenames.
+    for name, params in (
+            ("pair", ""),
+            ("pair_swapped", 'param string first "texture_b.pfm";'
+             'param string second "texture_a.pfm";')):
+        scene(name, "path_texture_pair", params)
+        scene(name + "_ref", "path_texture_pair_ref", params)
+        expected = render(name + "_ref", False, bounces=0, material_count=1)
+        compare(render(name, True, bounces=0, material_count=1), expected,
+                half_output=True)
+    compare(render("defaults", True, bounces=0, repeat=True, material_count=1),
+            results["defaults"], 0)
+
+    image = root / "texture-rejected.pfm"
+    for name, shader, params, error in (
+            ("empty", "path_texture_empty", "", "texture requires a literal filename"),
+            ("empty_override_bad", "path_texture_defaults_gpu",
+             'param string filename "";', "texture requires a literal filename"),
+            ("missing", "path_texture_empty", 'param string filename "missing.pfm";',
+             "HART: cannot prepare texture")):
+        scene(name, shader, params)
+        out = run([renderer, "--hart", "-v"] + flags + common
+                  + [name + ".xml", str(image)], root, 1)
+        assert error in out, out
+        assert "HART path tracer rendered" not in out and not image.exists(), out
 
 
 def check_materials():
@@ -546,6 +658,10 @@ with tempfile.TemporaryDirectory(prefix="osl-hart-path-") as temporary:
     if volumes:
         check_volumes()
         print("HART volume path tracer verified: " + mode)
+        sys.exit(0)
+    if textures:
+        check_textures()
+        print("HART texture path tracer verified: " + mode)
         sys.exit(0)
 
     shaders = {
