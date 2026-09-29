@@ -188,16 +188,41 @@ inspect_closures()
                                      current.weight * mul->weight };
             }
         } else {
-            // IDs and N's offset are those of testshade's existing registry.
-            valid = (closure->id == 1 || closure->id == 3)
+            size_t payload_size = 0;
+            switch (closure->id) {
+            case 1: break;
+            case 3: payload_size = sizeof(OSL::Vec3); break;
+            case testshade::HartDiffuseRampId:
+                payload_size = sizeof(testshade::HartDiffuseRampParams);
+                break;
+            case testshade::HartPhongRampId:
+                payload_size = sizeof(testshade::HartPhongRampParams);
+                break;
+            default: valid = false; break;
+            }
+            valid = valid
                     && closure_contains(pool, closure,
                                         sizeof(OSL::ClosureComponent)
-                                            + (closure->id == 3
-                                                   ? sizeof(OSL::Vec3)
-                                                   : 0));
+                                            + payload_size);
             if (valid) {
                 const OSL::ClosureComponent* comp = closure->as_comp();
                 const OSL::Color3 weight          = current.weight * comp->w;
+                if (comp->id == testshade::HartDiffuseRampId) {
+                    valid = ++result.diffuse_ramp_count == 1;
+                    result.diffuse_ramp
+                        = *comp->as<testshade::HartDiffuseRampParams>();
+                    for (int c = 0; c < 3; ++c)
+                        result.diffuse_ramp_weight[c] = weight[c];
+                    continue;
+                }
+                if (comp->id == testshade::HartPhongRampId) {
+                    valid = ++result.phong_ramp_count == 1;
+                    result.phong_ramp
+                        = *comp->as<testshade::HartPhongRampParams>();
+                    for (int c = 0; c < 3; ++c)
+                        result.phong_ramp_weight[c] = weight[c];
+                    continue;
+                }
                 for (int c = 0; c < 3; ++c) {
                     if (comp->id == 3) {
                         result.diffuse[c] += weight[c];

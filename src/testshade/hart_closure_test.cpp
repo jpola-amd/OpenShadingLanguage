@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // https://github.com/AcademySoftwareFoundation/OpenShadingLanguage
 
+#include <OSL/genclosure.h>
 #include <OSL/oslclosure.h>
 #include <OSL/oslcomp.h>
 #include <OSL/oslexec.h>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <vector>
 
@@ -23,6 +25,8 @@
 
 using namespace OSL;
 using testshade::HartClosureSummary;
+using testshade::HartDiffuseRampParams;
+using testshade::HartPhongRampParams;
 
 namespace {
 
@@ -65,6 +69,30 @@ struct TextureFixture {
 
 
 
+void
+register_ramp_closures(ShadingSystem& ss)
+{
+    const ClosureParam diffuse[]
+        = { CLOSURE_VECTOR_PARAM(HartDiffuseRampParams, N),
+            CLOSURE_COLOR_ARRAY_PARAM(HartDiffuseRampParams, colors, 8),
+            CLOSURE_FINISH_PARAM(HartDiffuseRampParams) };
+    const ClosureParam phong[]
+        = { CLOSURE_VECTOR_PARAM(HartPhongRampParams, N),
+            CLOSURE_FLOAT_PARAM(HartPhongRampParams, exponent),
+            CLOSURE_COLOR_ARRAY_PARAM(HartPhongRampParams, colors, 8),
+            { TypeDesc(TypeDesc::FLOAT, 4),
+              int(offsetof(HartPhongRampParams, knots)), "knots",
+              sizeof(HartPhongRampParams::knots) },
+            CLOSURE_FLOAT_KEYPARAM(HartPhongRampParams, marker, "marker"),
+            CLOSURE_FINISH_PARAM(HartPhongRampParams) };
+    ss.register_closure("diffuse_ramp", testshade::HartDiffuseRampId, diffuse,
+                        nullptr, nullptr);
+    ss.register_closure("phong_ramp", testshade::HartPhongRampId, phong,
+                        nullptr, nullptr);
+}
+
+
+
 ShaderGroupRef
 make_group(ShadingSystem& ss, string_view stdosl, string_view texture,
            Diagnostics& errors)
@@ -81,8 +109,11 @@ shader material(color weight=0, output closure color lobes=0) {
             + color(0.04, 0.05, 0.06) * emission();
 })OSL",
                                                R"OSL(
+closure color diffuse_ramp(normal N, color colors[8]) [[int builtin=1]];
+closure color phong_ramp(normal N, float exponent, color colors[8])
+    [[int builtin=1]];
 shader inspect(closure color lobes=0) {
-    int row = int(6*v + 0.5);
+    int row = int(8*v + 0.5);
     if (row == 0)
         Ci = color(0.8, 0.3, 0.1)*diffuse(N) + color(0.02)*emission();
     else if (row == 1)
@@ -97,8 +128,29 @@ shader inspect(closure color lobes=0) {
     } else if (row == 5) {
         if (u < 0.5) Ci = diffuse(N);
         else Ci = emission();
-    } else
+    } else if (row == 6)
         Ci = lobes;
+    else if (row == 7) {
+        color colors[8] = {color(1,2,3), color(4,5,6), color(7,8,9),
+                           color(10,11,12), color(13,14,15), color(16,17,18),
+                           color(19,20,21), color(22,23,24)};
+        float knots[4] = {0.125, 0.375, 0.625, 0.875};
+        Ci = diffuse_ramp(normal(3,2,1), colors)
+             + phong_ramp(normal(-1,4,2), 7.5, colors,
+                          "knots", knots, "marker", 19.25);
+    } else {
+        color colors[8];
+        for (int i = 0; i < 8; ++i)
+            colors[i] = color(i+1+u, 2*i+2+v, -i-3+u*v);
+        float knots[4];
+        for (int i = 0; i < 4; ++i)
+            knots[i] = u + 0.25*i;
+        Ci = color(u+0.25,0.5,1.5)
+                 * diffuse_ramp(normal(u,2+u,-3), colors)
+             + color(0.75,1+0.5*u,0.25+0.25*u)
+                 * phong_ramp(normal(1+u,-2,3*u), 2+4*u, colors,
+                              "knots", knots, "marker", 31+2*u);
+    }
 })OSL" };
     const char* names[] = { "weights", "material", "inspect" };
     for (size_t i = 0; i < sources.size(); ++i) {
@@ -135,9 +187,25 @@ summarize_cpu(const ClosureColor* closure, const Color3& weight,
         summarize_cpu(closure->as_mul()->closure,
                       weight * closure->as_mul()->weight, result);
     } else {
-        OIIO_CHECK_ASSERT(closure->id == 1 || closure->id == 3);
+        OIIO_CHECK_ASSERT(closure->id == 1 || closure->id == 3
+                          || closure->id == testshade::HartDiffuseRampId
+                          || closure->id == testshade::HartPhongRampId);
         const auto* component = closure->as_comp();
         const Color3 combined = weight * component->w;
+        if (component->id == testshade::HartDiffuseRampId) {
+            result.diffuse_ramp = *component->as<HartDiffuseRampParams>();
+            for (int c = 0; c < 3; ++c)
+                result.diffuse_ramp_weight[c] = combined[c];
+            OIIO_CHECK_EQUAL(++result.diffuse_ramp_count, 1u);
+            return;
+        }
+        if (component->id == testshade::HartPhongRampId) {
+            result.phong_ramp = *component->as<HartPhongRampParams>();
+            for (int c = 0; c < 3; ++c)
+                result.phong_ramp_weight[c] = combined[c];
+            OIIO_CHECK_EQUAL(++result.phong_ramp_count, 1u);
+            return;
+        }
         for (int c = 0; c < 3; ++c) {
             if (component->id == 3) {
                 result.diffuse[c] += combined[c];
@@ -155,15 +223,53 @@ summarize_cpu(const ClosureColor* closure, const Color3& weight,
 
 
 
+void
+compare_ramps(const HartClosureSummary& actual,
+              const HartClosureSummary& expected)
+{
+    OIIO_CHECK_EQUAL(actual.diffuse_ramp_count, expected.diffuse_ramp_count);
+    OIIO_CHECK_EQUAL(actual.phong_ramp_count, expected.phong_ramp_count);
+    for (int c = 0; c < 3; ++c) {
+        OIIO_CHECK_EQUAL_THRESH(actual.diffuse_ramp_weight[c],
+                                expected.diffuse_ramp_weight[c], 2.0e-6f);
+        OIIO_CHECK_EQUAL_THRESH(actual.phong_ramp_weight[c],
+                                expected.phong_ramp_weight[c], 2.0e-6f);
+        OIIO_CHECK_EQUAL_THRESH(actual.diffuse_ramp.N[c],
+                                expected.diffuse_ramp.N[c], 2.0e-6f);
+        OIIO_CHECK_EQUAL_THRESH(actual.phong_ramp.N[c],
+                                expected.phong_ramp.N[c], 2.0e-6f);
+        for (int i = 0; i < 8; ++i) {
+            OIIO_CHECK_EQUAL_THRESH(actual.diffuse_ramp.colors[i][c],
+                                    expected.diffuse_ramp.colors[i][c],
+                                    2.0e-6f);
+            OIIO_CHECK_EQUAL_THRESH(actual.phong_ramp.colors[i][c],
+                                    expected.phong_ramp.colors[i][c], 2.0e-6f);
+        }
+    }
+    OIIO_CHECK_EQUAL_THRESH(actual.phong_ramp.exponent,
+                            expected.phong_ramp.exponent, 2.0e-6f);
+    for (int i = 0; i < 4; ++i)
+        OIIO_CHECK_EQUAL_THRESH(actual.phong_ramp.knots[i],
+                                expected.phong_ramp.knots[i], 2.0e-6f);
+    OIIO_CHECK_EQUAL_THRESH(actual.phong_ramp.marker,
+                            expected.phong_ramp.marker, 2.0e-6f);
+}
+
+
+
 bool
 compare_cpu(string_view stdosl, string_view texture,
             cspan<HartClosureSummary> gpu, int width, int height,
-            Diagnostics& errors)
+            string_view mode, Diagnostics& errors)
 {
     SimpleRenderer renderer;
     ShadingSystem ss(&renderer, nullptr, &errors);
     renderer.init_shadingsys(&ss);
     register_closures(&ss);
+    register_ramp_closures(ss);
+    if (!ss.attribute("optimize", mode == "unoptimized" ? 0 : 2)
+        || !ss.attribute("llvm_optimize", mode == "unoptimized" ? 10 : 3))
+        return false;
     auto group = make_group(ss, stdosl, texture, errors);
     if (!group)
         return false;
@@ -194,6 +300,7 @@ compare_cpu(string_view stdosl, string_view texture,
             }
             OIIO_CHECK_EQUAL(actual.diffuse_count, cpu.diffuse_count);
             OIIO_CHECK_EQUAL(actual.emission_count, cpu.emission_count);
+            compare_ramps(actual, cpu);
         }
     }
     ss.release_context(context);
@@ -237,8 +344,39 @@ check_summary(const HartClosureSummary& result, int x, int row, int width)
     }
     OIIO_CHECK_EQUAL(result.diffuse_count, diffuse.x > 0 ? 1u : 0u);
     OIIO_CHECK_EQUAL(result.emission_count, emission.x > 0 ? 1u : 0u);
+    HartClosureSummary ramps { };
+    if (row == 7 || row == 8) {
+        ramps.diffuse_ramp_count = ramps.phong_ramp_count = 1;
+        const Vec3 diffuse_N = row == 7 ? Vec3(3, 2, 1) : Vec3(u, 2 + u, -3);
+        const Vec3 phong_N = row == 7 ? Vec3(-1, 4, 2) : Vec3(1 + u, -2, 3 * u);
+        const Color3 diffuse_weight = row == 7 ? Color3(1)
+                                               : Color3(u + 0.25f, 0.5f, 1.5f);
+        const Color3 phong_weight   = row == 7 ? Color3(1)
+                                               : Color3(0.75f, 1 + 0.5f * u,
+                                                        0.25f + 0.25f * u);
+        for (int c = 0; c < 3; ++c) {
+            ramps.diffuse_ramp.N[c]      = diffuse_N[c];
+            ramps.phong_ramp.N[c]        = phong_N[c];
+            ramps.diffuse_ramp_weight[c] = diffuse_weight[c];
+            ramps.phong_ramp_weight[c]   = phong_weight[c];
+        }
+        for (int i = 0; i < 8; ++i) {
+            const Color3 value = row == 7
+                                     ? Color3(3 * i + 1, 3 * i + 2, 3 * i + 3)
+                                     : Color3(i + 1 + u, 2 * i + 3, -i - 3 + u);
+            for (int c = 0; c < 3; ++c) {
+                ramps.diffuse_ramp.colors[i][c] = value[c];
+                ramps.phong_ramp.colors[i][c]   = value[c];
+            }
+        }
+        ramps.phong_ramp.exponent = row == 7 ? 7.5f : 2 + 4 * u;
+        for (int i = 0; i < 4; ++i)
+            ramps.phong_ramp.knots[i] = (row == 7 ? 0.125f : u) + 0.25f * i;
+        ramps.phong_ramp.marker = row == 7 ? 19.25f : 31 + 2 * u;
+    }
+    compare_ramps(result, ramps);
     OIIO_CHECK_ASSERT(result.used <= testshade::HartClosureCapacity);
-    if (diffuse.x > 0 || emission.x > 0)
+    if (diffuse.x > 0 || emission.x > 0 || ramps.diffuse_ramp_count)
         OIIO_CHECK_ASSERT(result.used > 0);
 }
 
@@ -258,6 +396,7 @@ run(string_view stdosl, string_view mode, bool exhaust, Diagnostics& errors)
     ShadingSystem ss(renderer.get(), nullptr, &errors);
     renderer->init_shadingsys(&ss);
     register_closures(&ss);
+    register_ramp_closures(ss);
     if (!ss.attribute("hart_arch", arch)
         || !ss.attribute("llvm_debugging_symbols", 0)
         || !ss.attribute("llvm_profiling_events", 0)
@@ -272,7 +411,7 @@ run(string_view stdosl, string_view mode, bool exhaust, Diagnostics& errors)
         return false;
     HartOptions options;
     options.fused       = mode == "fused" || mode == "fused-local";
-    constexpr int width = 5, height = 7;
+    constexpr int width = 5, height = 9;
     std::vector<HartClosureSummary> summaries(width * height);
     if (exhaust) {
         // Failure must occur after launch, not from the shader validator.
@@ -291,6 +430,7 @@ run(string_view stdosl, string_view mode, bool exhaust, Diagnostics& errors)
         OIIO_CHECK_EQUAL(result.diffuse_count, 1);
         OIIO_CHECK_EQUAL(result.emission_count, 1);
         OIIO_CHECK_EQUAL(result.used, 16);
+        compare_ramps(result, HartClosureSummary { });
     }
     if (!testshade_hart_closure_test(*renderer, ss, group.get(), options, arch,
                                      width, height, summaries))
@@ -315,10 +455,11 @@ run(string_view stdosl, string_view mode, bool exhaust, Diagnostics& errors)
         OIIO_CHECK_EQUAL(summaries[i].used, original[i].used);
         check_summary(summaries[i], int(i % width), int(i / width), width);
     }
-    if (!compare_cpu(stdosl, texture.filename, summaries, width, height, errors))
+    if (!compare_cpu(stdosl, texture.filename, summaries, width, height, mode,
+                     errors))
         return false;
     print(
-        "HART closure inspection verified: {} points, mode {}, exact pool {} bytes\n",
+        "HART closure inspection verified: {} points, mode {}, exact pool {} bytes, all 24 ramp components\n",
         summaries.size(), mode, used);
     return errors.errors == 0;
 }

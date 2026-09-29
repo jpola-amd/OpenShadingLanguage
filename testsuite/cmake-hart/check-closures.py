@@ -16,7 +16,8 @@ def run(args):
 binary, stdosl, mode = sys.argv[1:]
 positive = run([binary, stdosl, mode])
 if (positive.returncode
-        or "HART closure inspection verified: 35 points" not in positive.stdout):
+        or "HART closure inspection verified: 45 points" not in positive.stdout
+        or "all 24 ramp components" not in positive.stdout):
     raise SystemExit("HART closure inspection did not complete")
 
 negative = run([binary, stdosl, mode, "exhaust"])

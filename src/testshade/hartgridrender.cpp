@@ -215,8 +215,12 @@ public:
                || feature == "HARTGeometry" || feature == "HARTAttributes"
                || feature == "HARTNamedTransforms"
                || feature == "build_interpolated_getter"
-               || (m_closures && feature == "HARTClosures");
+               || (m_closures && feature == "HARTClosures")
+               || (m_closure_parameter_test
+                   && feature == "HARTClosureParameters");
     }
+
+    void enable_closure_parameter_test() { m_closure_parameter_test = true; }
 
     TextureHandle* get_texture_handle(ustring filename, ShadingContext*,
                                       const TextureOpt*) override
@@ -301,6 +305,7 @@ private:
     HartTextureStore m_textures;
     int m_device;
     bool m_closures;
+    bool m_closure_parameter_test = false;
 };
 
 
@@ -971,6 +976,8 @@ testshade_hart_closure_test(SimpleRenderer& renderer, ShadingSystem& shadingsys,
         err.errorfmt("Invalid HART closure inspection renderer, grid, or pool");
         return false;
     }
+    // Only the numerical inspection raygen understands the test ramp payloads.
+    generated->enable_closure_parameter_test();
     std::vector<HartModuleInput> modules(group ? 2 : 1);
     std::vector<std::string> callables;
     int group_size = 0, group_alignment = 1, local_groupdata = 0;

@@ -480,6 +480,16 @@ ShaderInstance::validate_hart() const
     const bool closures = shadingsys().renderer()->supports("HARTClosures");
     const bool bounds   = shadingsys().renderer()->supports("HARTArrayBounds");
     const bool geometry = shadingsys().renderer()->supports("HARTGeometry");
+    auto resolved_array_length = [&](int index) {
+        const Symbol& sym = m_master->m_symbols[index];
+        const auto& type  = sym.typespec();
+        int length        = type.is_unsized_array() ? sym.initializers()
+                                                    : type.arraylength();
+        if (index >= firstparam() && index < lastparam()
+            && m_instoverrides[index].arraylen())
+            length = m_instoverrides[index].arraylen();
+        return length;
+    };
     auto validate_type  = [&](const Symbol& sym) {
         const TypeSpec& type = sym.typespec();
         if (type.is_structure_array() && type.structspec()->numfields() == 0) {
@@ -800,13 +810,14 @@ ShaderInstance::validate_hart() const
             const int count = entry->nformal + entry->nkeyword;
             for (int i = 0; i < count; ++i) {
                 const auto& p = entry->params[i];
+                const TypeDesc element = p.type.elementtype();
                 const bool numeric
-                    = p.type == TypeInt || p.type == TypeFloat
-                      || p.type == TypeColor || p.type == TypePoint
-                      || p.type == TypeVector || p.type == TypeNormal
-                      || p.type == TypeMatrix
-                      || p.type == TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3);
-                if (p.type.is_array()
+                    = element == TypeInt || element == TypeFloat
+                      || element == TypeColor || element == TypePoint
+                      || element == TypeVector || element == TypeNormal
+                      || element == TypeMatrix
+                      || element == TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3);
+                if (p.type.is_unsized_array()
                     || (!numeric && p.type != TypeString
                         && p.type != TypeDesc::PTR))
                     return fail(
@@ -835,17 +846,25 @@ ShaderInstance::validate_hart() const
             if (entry->nformal > op.nargs() - first
                 || (op.nargs() - first - entry->nformal) % 2)
                 return fail("invalid closure argument list");
-            auto compatible = [&](const Symbol& value, TypeDesc type) {
+            auto compatible = [&](int arg, TypeDesc type) {
+                const Symbol& value    = symbol(arg);
                 const TypeSpec& actual = value.typespec();
-                if (actual.is_array() || actual.is_structure_based())
+                if (actual.is_structure_based())
                     return false;
                 if (type == TypeDesc::PTR)
-                    return actual.is_closure();
+                    return actual.is_closure() && !actual.is_array();
+                TypeDesc actual_type = actual.simpletype();
+                if (actual.is_array()) {
+                    actual_type.arraylen = resolved_array_length(
+                        m_master->m_args[op.firstarg() + arg]);
+                    if (actual_type.arraylen <= 0)
+                        return false;
+                }
                 return !actual.is_closure_based()
-                       && equivalent(actual.simpletype(), type);
+                       && equivalent(actual_type, type);
             };
             for (int i = 0; i < entry->nformal; ++i)
-                if (!compatible(symbol(first + i), entry->params[i].type))
+                if (!compatible(first + i, entry->params[i].type))
                     return fail(fmtformat(
                         "incompatible formal argument to closure '{}'", name));
             for (int i = first + entry->nformal; i < op.nargs(); i += 2) {
@@ -857,7 +876,7 @@ ShaderInstance::validate_hart() const
                 for (int j = entry->nformal; j < count; ++j) {
                     const auto& p = entry->params[j];
                     if (key.get_string() == p.key
-                        && compatible(symbol(i + 1), p.type)) {
+                        && compatible(i + 1, p.type)) {
                         found = true;
                         break;
                     }
@@ -1100,12 +1119,8 @@ ShaderInstance::validate_hart() const
             || !symbol(2).typespec().is_float()
             || (op.nargs() == 5 && !symbol(3).typespec().is_int()))
             return fail("invalid spline knot/value types");
-        int length      = type.is_unsized_array() ? knots.initializers()
-                                                  : type.arraylength();
-        const int index = m_master->m_args[op.firstarg() + op.nargs() - 1];
-        if (index >= firstparam() && index < lastparam()
-            && m_instoverrides[index].arraylen())
-            length = m_instoverrides[index].arraylen();
+        const int length = resolved_array_length(
+            m_master->m_args[op.firstarg() + op.nargs() - 1]);
         if (length < 4)
             return fail("at least four resolved spline knots are required");
         if (op.nargs() == 4 || symbol(3).is_constant()) {

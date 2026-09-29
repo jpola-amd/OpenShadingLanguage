@@ -209,6 +209,34 @@ struct MaterialProbeParams {
 
 
 
+struct MaterialDiffuseRampParams {
+    ustringhash label;
+    Vec3 N;
+    Color3 colors[8];
+};
+
+
+
+struct MaterialPhongRampParams {
+    ustringhash label;
+    Vec3 N;
+    float exponent;
+    Color3 colors[8];
+};
+
+
+
+struct MaterialArrayParams {
+    int integers[2];
+    float floats[2];
+    Vec3 points[2], vectors[2], normals[2];
+    Matrix44 matrices[2];
+    Color3 palette[8];
+    float gain;
+};
+
+
+
 struct MaterialBsdfRoot { };
 using MaterialOren       = bsdl::mtx::OrenNayarDiffuseLobe<MaterialBsdfRoot>;
 using MaterialSheen      = bsdl::mtx::SheenLobe<MaterialBsdfRoot>;
@@ -291,6 +319,36 @@ material_closures()
             CLOSURE_INT_KEYPARAM(MaterialProbeParams, mode, "mode"),
             CLOSURE_STRING_KEYPARAM(MaterialProbeParams, label, "label"),
             CLOSURE_FINISH_PARAM(MaterialProbeParams) } },
+        { "diffuse_ramp",
+          102,
+          { CLOSURE_VECTOR_PARAM(MaterialDiffuseRampParams, N),
+            CLOSURE_COLOR_ARRAY_PARAM(MaterialDiffuseRampParams, colors, 8),
+            CLOSURE_STRING_KEYPARAM(MaterialDiffuseRampParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MaterialDiffuseRampParams) } },
+        { "phong_ramp",
+          103,
+          { CLOSURE_VECTOR_PARAM(MaterialPhongRampParams, N),
+            CLOSURE_FLOAT_PARAM(MaterialPhongRampParams, exponent),
+            CLOSURE_COLOR_ARRAY_PARAM(MaterialPhongRampParams, colors, 8),
+            CLOSURE_STRING_KEYPARAM(MaterialPhongRampParams, label, "label"),
+            CLOSURE_FINISH_PARAM(MaterialPhongRampParams) } },
+        { "hart_array_probe",
+          104,
+          { CLOSURE_INT_ARRAY_PARAM(MaterialArrayParams, integers, 2),
+            CLOSURE_FLOAT_ARRAY_PARAM(MaterialArrayParams, floats, 2),
+            { TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::POINT, 2),
+              offsetof(MaterialArrayParams, points), nullptr, sizeof(Vec3[2]) },
+            CLOSURE_VECTOR_ARRAY_PARAM(MaterialArrayParams, vectors, 2),
+            { TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::NORMAL, 2),
+              offsetof(MaterialArrayParams, normals), nullptr, sizeof(Vec3[2]) },
+            { TypeDesc(TypeDesc::FLOAT, TypeDesc::MATRIX44, 2),
+              offsetof(MaterialArrayParams, matrices), nullptr,
+              sizeof(Matrix44[2]) },
+            { TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::COLOR, 8),
+              offsetof(MaterialArrayParams, palette), "palette",
+              sizeof(Color3[8]) },
+            CLOSURE_FLOAT_KEYPARAM(MaterialArrayParams, gain, "gain"),
+            CLOSURE_FINISH_PARAM(MaterialArrayParams) } },
     };
     return entries;
 }
@@ -301,11 +359,11 @@ class HartMaterialServices final : public RendererServices {
 public:
     int supports(string_view feature) const override
     {
-        return feature == "HART" || feature == "HARTArrayBounds"
+        return feature == "HART" || (arrays && feature == "HARTArrayBounds")
                || (closures && feature == "HARTClosures")
                || (parameters && feature == "HARTClosureParameters");
     }
-    bool closures = true, parameters = true;
+    bool closures = true, parameters = true, arrays = true;
 };
 
 
@@ -11542,8 +11600,9 @@ check_material_closure_ir(ShadingSystem& ss, ShaderGroup& group,
                                           && type->getPointerAddressSpace() == 0
                                 : param.type == TypeString
                                     ? type->isIntegerTy(64)
-                                : param.type == TypeInt ? type->isIntegerTy(32)
-                                                        : type->isFloatTy());
+                                : param.type.elementtype() == TypeInt
+                                    ? type->isIntegerTy(32)
+                                    : type->isFloatTy());
                         if (param.type == TypeDesc::PTR) {
                             ++closure_copies;
                             const llvm::StoreInst* latest = nullptr;
@@ -11676,6 +11735,28 @@ check_material_closure_modules(string_view arch, string_view stdosl)
         "value=emission(); value=hart_material_probe(matrix(1),empty,"
         "\"fallback\",value,\"gain\",0.5,\"mode\",7,\"label\",\"\"); "
         "Ci=value; Cout=color(u,v,1); }",
+        "closure color diffuse_ramp(normal n, color colors[8]) [[int builtin=1]]; "
+        "shader material_diffuse_ramp(output closure color value=0, output color Cout=0) { "
+        "color colors[8]; for(int i=0;i<8;i++) colors[i]=color(u+i,v-i,i+1); "
+        "closure color empty=0; value=color(0.5,0.25,0.75)*"
+        "diffuse_ramp(normal(0,0,1),colors,\"label\",\"diffuse ramp\"); "
+        "value=layer(value,empty); Ci=value; Cout=Dx(colors[1]); }",
+        "closure color phong_ramp(normal n, float exponent, color colors[8]) [[int builtin=1]]; "
+        "shader material_phong_ramp("
+        "color colors[8]={color(1),color(2),color(3),color(4),color(5),color(6),color(7),color(8)}, "
+        "output closure color value=0, output color Cout=0) { "
+        "closure color empty=0; value=phong_ramp(normal(0,0,1),u+4,colors,"
+        "\"label\",\"phong ramp\"); value=layer(value,empty); Ci=value; Cout=color(u,v,1); }",
+        "closure color hart_array_probe(int integers[2], float floats[2], point points[2], "
+        "vector vectors[2], normal normals[2], matrix matrices[2]) [[int builtin=1]]; "
+        "shader material_arrays(output closure color value=0, output color Cout=0) { "
+        "int integers[2]={int(u),7}; float floats[2]={u,v}; "
+        "point points[2]={point(u),point(v)}; vector vectors[2]={vector(u),vector(v)}; "
+        "normal normals[2]={normal(u),normal(v)}; matrix matrices[2]={matrix(u),matrix(v)}; "
+        "color palette[8]={color(1),color(2),color(3),color(4),color(5),color(6),color(7),color(8)}; "
+        "closure color empty=0; value=hart_array_probe(integers,floats,points,vectors,"
+        "normals,matrices,\"palette\",palette,\"gain\",0.5); "
+        "value=layer(value,empty); Ci=value; Cout=color(u,v,1); }",
     };
     std::string oso[std::size(sources)];
     for (size_t i = 0; i < std::size(sources); ++i) {
@@ -11688,6 +11769,9 @@ check_material_closure_modules(string_view arch, string_view stdosl)
         { { 17, 1 }, { 23, 1 }, { 27, 1 } },
         { { 23, 1 }, { 27, 1 } },
         { { 1, 1 }, { 101, 1 } },
+        { { 102, 1 }, { 27, 1 } },
+        { { 103, 1 }, { 27, 1 } },
+        { { 104, 1 }, { 27, 1 } },
     };
     const std::vector<MaterialFieldExpectation> fields[] = {
         { { 8, nullptr, 1, "ggx" }, { 24, "label", 1, "lamp" } },
@@ -11702,6 +11786,9 @@ check_material_closure_modules(string_view arch, string_view stdosl)
           { 101, "gain", 1, nullptr, 0.5, true },
           { 101, "mode", 1, nullptr, 7, true },
           { 101, "label", 1, "" } },
+        { { 102, "label", 1, "diffuse ramp" } },
+        { { 103, "label", 1, "phong ramp" } },
+        { { 104, "palette" }, { 104, "gain", 1, nullptr, 0.5, true } },
     };
     std::vector<std::pair<int, int>> layouts;
     for (const auto& entry : material_closures())
@@ -11735,7 +11822,8 @@ check_material_closure_modules(string_view arch, string_view stdosl)
             if (variant.llvm == 10
                 && !check_material_closure_ir(ss, *group, counts[source],
                                               fields[source],
-                                              source < 2 && variant.osl == 2,
+                                              (source < 2 || source == 4)
+                                                  && variant.osl == 2,
                                               source >= 2))
                 return false;
             int allocated = -1, size = 0;
@@ -12000,6 +12088,193 @@ check_material_closure_modules(string_view arch, string_view stdosl)
         check_rejected_group(ss, *group, errors,
                              "incompatible formal argument");
         OIIO_CHECK_EQUAL(closure_callback_calls, 0);
+    }
+    return true;
+}
+
+
+
+bool
+check_closure_array_modules(string_view arch, string_view stdosl)
+{
+    const auto entry = std::find_if(material_closures().begin(),
+                                    material_closures().end(),
+                                    [](const auto& e) { return e.id == 102; });
+    OIIO_CHECK_ASSERT(entry != material_closures().end());
+    if (entry == material_closures().end())
+        return false;
+    const char* declaration
+        = "closure color diffuse_ramp(normal n, color colors[]) [[int builtin=1]]; ";
+    const char* body
+        = "output color Cout=0) { Ci=diffuse_ramp(normal(0,0,1),colors); "
+          "Cout=color(u,v,1); }";
+    const char* values
+        = "{color(1),color(2),color(3),color(4),color(5),color(6),color(7),color(8)}";
+    OSLCompiler compiler;
+    std::string good;
+    if (!compiler.compile_buffer(
+            fmtformat(
+                "closure color diffuse_ramp(normal n) [[int builtin=1]]; "
+                "shader ramp(color colors[8]={}, output color Cout=0) {{ "
+                "Ci=diffuse_ramp(normal(0,0,1),\"colors\",colors); Cout=color(u,v,1); }}",
+                values),
+            good, { }, stdosl))
+        return false;
+    const TypeDesc color8(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::COLOR, 8);
+    const struct {
+        TypeDesc type;
+        int size, offset;
+        const char* error;
+    } invalid_layouts[] = {
+        { TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::COLOR, -1), 96,
+          20, "parameter type" },
+        { TypeDesc(TypeDesc::STRING, 8), 64, 20, "parameter type" },
+        { TypeDesc(TypeDesc::PTR, 8), 64, 20, "parameter type" },
+        { TypeDesc(TypeDesc::DOUBLE, 8), 64, 20, "parameter type" },
+        { color8, 12, 20, "parameter layout" },
+        { color8, 96, 28, "parameter layout" },
+        { color8, 96, 22, "parameter layout" },
+        { color8, 96, 16, "parameter layout" },
+        { color8, 96, -4, "parameter layout" },
+        { TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::COLOR,
+                   std::numeric_limits<int>::max()),
+          96, 20, "parameter layout" },
+        { TypeDesc(TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::COLOR, 7), 84, 20,
+          "unsupported or incompatible keyword" },
+    };
+    for (const auto& test : invalid_layouts) {
+        auto params          = entry->params;
+        params[1].type       = test.type;
+        params[1].field_size = test.size;
+        params[1].offset     = test.offset;
+        // Keyword fields reach HART's checks rather than the host registry's
+        // earlier formal-parameter size check.
+        params[1].key = "colors";
+        HartMaterialServices renderer;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.register_closure(entry->name, entry->id, params.data(), nullptr,
+                            nullptr);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        auto group = make_group(ss, good);
+        check_rejected_group(ss, *group, errors, test.error);
+    }
+    for (bool missing_bounds : { false, true }) {
+        HartMaterialServices renderer;
+        renderer.arrays     = !missing_bounds;
+        renderer.parameters = missing_bounds;
+        Diagnostics errors;
+        ShadingSystem ss(&renderer, nullptr, &errors);
+        ss.register_closure(entry->name, entry->id, entry->params.data(),
+                            nullptr, nullptr);
+        OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+        auto group = make_group(ss, good);
+        check_rejected_group(ss, *group, errors,
+                             missing_bounds ? "HARTArrayBounds"
+                                            : "unsupported closure");
+    }
+    for (bool keyword : { false, true }) {
+        for (const char* type : { "color", "float", "closure color" }) {
+            for (int length : { 0, 7, 8, 9, -1 }) {
+                const std::string suffix = length == 0 ? ""
+                                           : length < 0
+                                               ? "[]"
+                                               : fmtformat("[{}]", length);
+                const std::string formal = fmtformat("{} colors{}", type,
+                                                     suffix);
+                const bool valid_type    = string_view(type) == "color";
+                std::string initializer;
+                for (int i = 0, n = length < 0 ? 8 : std::max(length, 1); i < n;
+                     ++i) {
+                    if (i)
+                        initializer += ',';
+                    initializer += valid_type ? "color(1)" : "0";
+                }
+                if (length)
+                    initializer = "{" + initializer + "}";
+                const std::string prototype = keyword ? "normal n"
+                                                      : "normal n, " + formal;
+                const char* argument = keyword ? "\"colors\",colors" : "colors";
+                OSLCompiler compiler;
+                std::string bytecode;
+                if (!compiler.compile_buffer(
+                        fmtformat(
+                            "closure color diffuse_ramp({}) [[int builtin=1]]; "
+                            "shader ramp({}={}, output color Cout=0) {{ "
+                            "Ci=diffuse_ramp(normal(0,0,1),{}); Cout=color(u,v,1); }}",
+                            prototype, formal, initializer, argument),
+                        bytecode, { }, stdosl))
+                    return false;
+                for (int optimize : { 0, 2 }) {
+                    HartMaterialServices renderer;
+                    Diagnostics errors;
+                    ShadingSystem ss(&renderer, nullptr, &errors);
+                    auto params = entry->params;
+                    if (keyword)
+                        params[1].key = "colors";
+                    ss.register_closure(entry->name, entry->id, params.data(),
+                                        nullptr, nullptr);
+                    OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+                    OIIO_CHECK_ASSERT(ss.attribute("optimize", optimize));
+                    auto group = make_group(ss, bytecode);
+                    if (valid_type && (length == 8 || length < 0)) {
+                        ss.optimize_group(group.get(), nullptr);
+                        uint64_t size = 0;
+                        OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                          "hart_bitcode_size",
+                                                          TypeUInt64, &size));
+                        OIIO_CHECK_ASSERT(size > 0);
+                        OIIO_CHECK_EQUAL(errors.errors, 0);
+                    } else {
+                        check_rejected_group(
+                            ss, *group, errors,
+                            keyword ? "unsupported or incompatible keyword"
+                                    : "incompatible formal argument");
+                    }
+                }
+            }
+        }
+    }
+    OSLCompiler unsized_compiler;
+    std::string unsized;
+    if (!unsized_compiler.compile_buffer(
+            fmtformat("{} shader ramp(color colors[]={}, {}", declaration,
+                      values, body),
+            unsized, { }, stdosl))
+        return false;
+    for (int length : { 7, 8, 9 }) {
+        Color3 colors[9];
+        for (int i = 0; i < 9; ++i)
+            colors[i] = Color3(float(i), float(i + 1), float(i + 2));
+        for (int optimize : { 0, 2 }) {
+            HartMaterialServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.register_closure(entry->name, entry->id, entry->params.data(),
+                                nullptr, nullptr);
+            OIIO_CHECK_ASSERT(ss.attribute("hart_arch", arch));
+            OIIO_CHECK_ASSERT(ss.attribute("optimize", optimize));
+            OIIO_CHECK_ASSERT(
+                ss.LoadMemoryCompiledShader("hart_test", unsized));
+            auto group    = ss.ShaderGroupBegin("ramp_override");
+            TypeDesc type = color8;
+            type.arraylen = length;
+            OIIO_CHECK_ASSERT(ss.Parameter("colors", type, colors));
+            OIIO_CHECK_ASSERT(ss.Shader("surface", "hart_test", "layer0"));
+            OIIO_CHECK_ASSERT(ss.ShaderGroupEnd());
+            if (length == 8) {
+                ss.optimize_group(group.get(), nullptr);
+                uint64_t size = 0;
+                OIIO_CHECK_ASSERT(ss.getattribute(group.get(),
+                                                  "hart_bitcode_size",
+                                                  TypeUInt64, &size));
+                OIIO_CHECK_ASSERT(size > 0);
+                OIIO_CHECK_EQUAL(errors.errors, 0);
+            } else {
+                check_rejected_group(ss, *group, errors,
+                                     "incompatible formal argument");
+            }
+        }
     }
     return true;
 }
@@ -13916,7 +14191,8 @@ main(int argc, char* argv[])
     if (!check_named_transform_modules(arch, argv[2]) || unit_test_failures)
         return 1;
     if (!check_closure_modules(arch, argv[2])
-        || !check_material_closure_modules(arch, argv[2]) || unit_test_failures)
+        || !check_material_closure_modules(arch, argv[2])
+        || !check_closure_array_modules(arch, argv[2]) || unit_test_failures)
         return 1;
     const char* sources[] = {
         "shader hart_test(output color Cout=0) { Cout=color(u,v,u+v); }",
