@@ -1360,7 +1360,8 @@ BackendLLVM::build_llvm_init()
         ll.make_function(unique_name, false,
                          ll.type_void(),  // return type
                          {
-                             llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+                             llvm_type_sg_ptr(),
+                             llvm_type_groupdata_ptr(),
                              ll.type_void_ptr(),  // userdata_base_ptr
                              ll.type_void_ptr(),  // output_base_ptr
                              ll.type_int(),
@@ -1481,7 +1482,8 @@ BackendLLVM::build_llvm_gpu_callables()
             ll.make_function(dc_entry_name, false,
                              ll.type_void(),  // return type
                              {
-                                 llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+                                 llvm_type_sg_ptr(),
+                                 llvm_type_groupdata_ptr(),
                                  ll.type_void_ptr(),  // userdata_base_ptr
                                  ll.type_void_ptr(),  // output_base_ptr
                                  ll.type_int(),
@@ -1514,7 +1516,8 @@ BackendLLVM::build_llvm_gpu_callables()
             ll.make_function(dc_init_name, false,
                              ll.type_void(),  // return type
                              {
-                                 llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+                                 llvm_type_sg_ptr(),
+                                 llvm_type_groupdata_ptr(),
                                  ll.type_void_ptr(),  // userdata_base_ptr
                                  ll.type_void_ptr(),  // output_base_ptr
                                  ll.type_int(),
@@ -1566,7 +1569,8 @@ BackendLLVM::build_llvm_fused_callable(void)
         ll.make_function(fused_name, false,
                          ll.type_void(),  // return type
                          {
-                             llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+                             llvm_type_sg_ptr(),
+                             llvm_type_groupdata_ptr(),
                              ll.type_void_ptr(),  // userdata_base_ptr
                              ll.type_void_ptr(),  // output_base_ptr
                              ll.type_int(),
@@ -1649,7 +1653,8 @@ BackendLLVM::build_llvm_instance(bool groupentry)
         !is_entry_layer,  // fastcall for non-entry layer functions
         ll.type_void(),   // return type
         {
-            llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+            llvm_type_sg_ptr(),
+            llvm_type_groupdata_ptr(),
             ll.type_void_ptr(),  // userdata_base_ptr
             ll.type_void_ptr(),  // output_base_ptr
             ll.type_int(),

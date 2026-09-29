@@ -86,7 +86,9 @@ OSOProcessorBase::OSOProcessorBase(ShadingSystemImpl& shadingsys,
 
 
 
-OSOProcessorBase::~OSOProcessorBase() {}
+OSOProcessorBase::~OSOProcessorBase()
+{
+}
 
 
 
@@ -133,7 +135,9 @@ RuntimeOptimizer::RuntimeOptimizer(ShadingSystemImpl& shadingsys,
 
 
 
-RuntimeOptimizer::~RuntimeOptimizer() {}
+RuntimeOptimizer::~RuntimeOptimizer()
+{
+}
 
 
 

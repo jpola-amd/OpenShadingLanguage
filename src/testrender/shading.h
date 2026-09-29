@@ -149,8 +149,8 @@ struct MxGeneralizedSchlickParams : public MxMicrofacetBaseParams {
                    + Vec2(-36.11f, 54.9f) * x2 * y
                    + Vec2(15.86f, 300.2f) * x * y2
                    + Vec2(33.37f, -285.1f) * x2 * y2;
-        float a = OIIO::clamp(num.x / den.x, 0.0f, 1.0f);
-        float b = OIIO::clamp(num.y / den.y, 0.0f, 1.0f);
+        float a  = OIIO::clamp(num.x / den.x, 0.0f, 1.0f);
+        float b  = OIIO::clamp(num.y / den.y, 0.0f, 1.0f);
         return reflection_tint * (f0 * a + f90 * b);
     }
 };
@@ -495,8 +495,7 @@ struct MediumParams {
 struct MediumStack {
     enum class Event { Surface, Scatter, Absorbed, Error };
 
-    OSL_HOSTDEVICE MediumStack()
-        : depth(0), pool_size(0), num_overlapping(0) { }
+    OSL_HOSTDEVICE MediumStack() : depth(0), pool_size(0), num_overlapping(0) {}
 
     OSL_HOSTDEVICE const MediumParams* get_current_params() const
     {
@@ -516,8 +515,8 @@ struct MediumStack {
         // called if a new medium was added to the stack
         MediumParams new_params;
         int overlapping                 = 0;
-        float probabilities[MaxEntries] = { };
-        int indices[MaxEntries]         = { };
+        float probabilities[MaxEntries] = {};
+        int indices[MaxEntries]         = {};
 
         for (int i = 0; i < depth; i++) {
             const MediumParams& params_i = *mediums[i];
@@ -542,10 +541,10 @@ struct MediumStack {
 
         // Rescale before averaging so tiny coefficients do not vanish and
         // finite RGB sums do not overflow.
-        const float scale
-            = std::max(new_params.sigma_s.x,
-                       std::max(new_params.sigma_s.y, new_params.sigma_s.z));
-        float total_cdf = 0;
+        const float scale = std::max(new_params.sigma_s.x,
+                                     std::max(new_params.sigma_s.y,
+                                              new_params.sigma_s.z));
+        float total_cdf   = 0;
         for (int i = 0; i < overlapping; ++i) {
             const auto& sigma_s = mediums[indices[i]]->sigma_s;
             if (scale > 0)
@@ -647,8 +646,8 @@ struct MediumStack {
 
         Color3 density = scatter ? (current_params.sigma_t * tr) : tr;
         float pdf      = density.x * channel_weights[0]
-                    + density.y * channel_weights[1]
-                    + density.z * channel_weights[2];
+                         + density.y * channel_weights[1]
+                         + density.z * channel_weights[2];
 
         if (!std::isfinite(pdf) || pdf <= 0)
             return Event::Error;

@@ -2312,10 +2312,10 @@ DECLFOLDER(constfold_getattribute)
     bool array_lookup  = rop.opargsym(op, nargs - 2)->typespec().is_int();
     bool object_lookup = rop.opargsym(op, 2)->typespec().is_string()
                          && nargs >= 4;
-    int object_slot = (int)object_lookup;
-    int attrib_slot = object_slot + 1;
-    int index_slot  = nargs - 2;
-    int dest_slot   = nargs - 1;
+    int object_slot    = (int)object_lookup;
+    int attrib_slot    = object_slot + 1;
+    int index_slot     = nargs - 2;
+    int dest_slot      = nargs - 1;
 
     //    Symbol& Result      = *rop.opargsym (op, 0);
     Symbol& ObjectName
@@ -2581,16 +2581,19 @@ DECLFOLDER(constfold_texture)
 #    pragma clang diagnostic push
 #    pragma clang diagnostic ignored "-Wtautological-compare"
 #endif
-            CHECK_str(width, float, TypeDesc::FLOAT) else CHECK_str(
-                blur, float,
-                TypeDesc::FLOAT) else CHECK(firstchannel, int,
-                                            TypeDesc::
-                                                INT) else CHECK(fill, float,
-                                                                TypeDesc::FLOAT)
-
-                else if ((name == Strings::wrap || name == Strings::swrap
-                          || name == Strings::twrap || name == Strings::rwrap)
-                         && value && valuetype == TypeDesc::STRING)
+            CHECK_str(width, float, TypeDesc::FLOAT) else CHECK_str(blur, float, TypeDesc::FLOAT) else CHECK(
+                firstchannel, int,
+                TypeDesc::
+                    INT) else CHECK(fill, float,
+                                    TypeDesc::
+                                        FLOAT) else if ((name == Strings::wrap
+                                                         || name == Strings::swrap
+                                                         || name == Strings::twrap
+                                                         || name
+                                                                == Strings::rwrap)
+                                                        && value
+                                                        && valuetype
+                                                               == TypeDesc::STRING)
             {
                 // Special trick is needed for wrap modes because the input
                 // is a string but the field we're setting is an int enum.
