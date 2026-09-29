@@ -1520,10 +1520,17 @@ rejected before optimization.
 A renderer also advertising `HARTClosureParameters` may use its registered
 closures with numeric, scalar string-hash and nested closure parameters.
 Literal registered keyword names may have varying values. HART validates
-registration sizes, alignment, field bounds and types before optimization;
-array fields and host prepare/setup callbacks remain unsupported. The renderer
-must actually consume these device records: this capability does not provide
-an implementation of an arbitrary registered closure.
+registration sizes, alignment, field bounds, overlaps and types before
+optimization. With `HARTArrayBounds`, fixed-length numeric arrays are supported
+as formal and keyword parameters, including the `color[8]` fields used by
+Blender's `diffuse_ramp` and `phong_ramp`. Supported element types are int,
+float, color, point, vector, normal and matrix. Arrays are copied inline into
+the registered record, not stored as pointers. The argument's resolved length
+must match the registered length; unsized shader inputs use their initializer
+or instance binding to resolve it. Unsized registered arrays, string arrays,
+closure-pointer arrays and host prepare/setup callbacks remain unsupported.
+The renderer must actually consume these device records: this capability does
+not provide an implementation of an arbitrary registered closure.
 
 The test renderer binds a combined `HartRenderState` through `ShaderGlobals`
 `renderstate`. It contains the existing texture descriptor/error state and a
@@ -1535,12 +1542,18 @@ fails the launch without returning a partial result.
 
 With `OSL_BUILD_TESTS`, `USE_LLVM_BITCODE` and `OSL_USE_HART` enabled,
 `hart_closure_test` inspects trees on the GPU **after shader return** and
-transfers only numerical component counts, weights, normals and allocation
-sizes to the host. Its test pool is 1024 bytes per shading point; this is not
-a promise about physical GPU stack use or a general renderer allocation limit.
+transfers only numerical component counts, weights, parameter payloads and
+allocation sizes to the host. Its test pool is 1024 bytes per shading point;
+this is not a promise about physical GPU stack use or a general renderer
+allocation limit.
 The unit covers a diffuse/emission material, null and conditional trees,
 weighted operations, connected texture/procedural weights, allocator
 boundaries, exact-fit storage, repeated resets and post-launch exhaustion.
+Ramp cases compare all 24 components of constant and varying `color[8]`
+parameters against CPU and independent expectations, including weighted
+closures, an array keyword and a following scalar field. Compiler checks cover
+full-field copies of each numeric array type, formal/keyword argument type and
+length mismatches, resolved unsized inputs and invalid registrations.
 It does not implement path tracing or change the ordinary RGB output interface.
 
 Set `TESTSUITE_HART=1` during configuration, then run:
