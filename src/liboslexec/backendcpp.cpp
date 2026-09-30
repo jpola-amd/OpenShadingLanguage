@@ -3359,6 +3359,7 @@ struct CppTexOptResult {
     std::string dalphadx_ptr;
     std::string dalphady_ptr;
     std::string errormsg_ptr;
+    std::string color_space = "0";
 };
 
 static CppTexOptResult
@@ -3570,7 +3571,13 @@ cpp_gen_texture_options(BackendCpp& rop, int opnum, int first_optional_arg,
                 optvar, nchans, val_f());
             continue;
         }
-        // colorspace and time: accept and ignore (like JIT)
+#if OSL_ARNOLD_COMPAT
+        if (name == Strings::colorspace && valtype == TypeDesc::STRING) {
+            r.color_space = rop.cpp_spacename_pod(Val);
+            continue;
+        }
+#endif
+        // Outside the Arnold profile, colorspace remains a placeholder.
         if (name == Strings::colorspace || name == Strings::time)
             continue;
         // Unknown option — emit a comment and skip
@@ -3659,8 +3666,12 @@ cpp_gen_texture(BackendCpp& rop, int opnum)
         resdx_ptr = resdy_ptr = "nullptr";
     }
 
-    rop.outputfmtln("osl_texture((void*)sg, {}, nullptr, (void*)&_tex_opt,",
+    rop.outputfmtln("osl_texture((void*)sg, {},",
                     rop.cpp_spacename_pod(Filename));
+#if OSL_ARNOLD_COMPAT
+    rop.outputfmtln("    {},", toi.color_space);
+#endif
+    rop.outputfmtln("    nullptr, (void*)&_tex_opt,");
     rop.outputfmtln("    {}, {}, {}, {}, {}, {},", s_val, t_val, dsdx, dtdx,
                     dsdy, dtdy);
     rop.outputfmtln("    {}, {}, {}, {},", nchans, res_ptr, resdx_ptr,
@@ -3740,8 +3751,12 @@ cpp_gen_texture3d(BackendCpp& rop, int opnum)
         resdx_ptr = resdy_ptr = "nullptr";
     }
 
-    rop.outputfmtln("osl_texture3d((void*)sg, {}, nullptr, (void*)&_tex_opt,",
+    rop.outputfmtln("osl_texture3d((void*)sg, {},",
                     rop.cpp_spacename_pod(Filename));
+#if OSL_ARNOLD_COMPAT
+    rop.outputfmtln("    {},", toi.color_space);
+#endif
+    rop.outputfmtln("    nullptr, (void*)&_tex_opt,");
     rop.outputfmtln("    {}, {}, {}, {},", p_ptr, dpdx_ptr, dpdy_ptr, dpdz_ptr);
     rop.outputfmtln("    {}, {}, {}, {},", nchans, res_ptr, resdx_ptr,
                     resdy_ptr);
@@ -3815,8 +3830,12 @@ cpp_gen_environment(BackendCpp& rop, int opnum)
         resdx_ptr = resdy_ptr = "nullptr";
     }
 
-    rop.outputfmtln("osl_environment((void*)sg, {}, nullptr, (void*)&_tex_opt,",
+    rop.outputfmtln("osl_environment((void*)sg, {},",
                     rop.cpp_spacename_pod(Filename));
+#if OSL_ARNOLD_COMPAT
+    rop.outputfmtln("    {},", toi.color_space);
+#endif
+    rop.outputfmtln("    nullptr, (void*)&_tex_opt,");
     rop.outputfmtln("    {}, {}, {},", r_ptr, drdx_ptr, drdy_ptr);
     rop.outputfmtln("    {}, {}, {}, {},", nchans, res_ptr, resdx_ptr,
                     resdy_ptr);

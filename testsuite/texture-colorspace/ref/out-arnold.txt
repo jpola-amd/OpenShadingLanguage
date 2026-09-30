@@ -1,0 +1,6 @@
+Compiled test.osl -> test.oso
+
+Output Cout to out.exr
+color space - none specified: 0.5 0.5 0.5
+ERROR: [RendererServices::texture] Unsupported texture colorspace 'sRGB' for 'grey.exr': renderer must override the colorspace-aware callback
+color space - sRGB: 0 0 0

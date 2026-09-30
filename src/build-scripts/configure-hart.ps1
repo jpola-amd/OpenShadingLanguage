@@ -158,7 +158,7 @@ try {
     }
     if ($SmokeTest -or $Test) {
         $runtimeTests = "hart-oiio-compat-smoke|arnold-compat-cpu"
-        if ($Test) { $runtimeTests += "|hart-generated-runtime|hart-custom-closures-O[02]" }
+        if ($Test) { $runtimeTests += "|hart-generated-runtime|hart-custom-closures-O[02]|hart-texture-colorspaces-O[02]" }
         & ctest --test-dir $buildDir -C Release --output-on-failure `
             -R "^(oiio-compat-.*|cmake-hart-discovery|cmake-package-export|hart-codegen-.*|hart-.*bitcode.*|$runtimeTests)$" `
             --timeout 600 --no-tests=error

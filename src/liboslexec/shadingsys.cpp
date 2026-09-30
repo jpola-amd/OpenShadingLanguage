@@ -4259,8 +4259,8 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         if (use_optix_cache()) {
             std::string cache_source = rop.serialize();
 #if OSL_ARNOLD_COMPAT
-            // Never reuse six-argument PTX for the five-argument profile.
-            cache_source += "\nOSL_ARNOLD_COMPAT optix5 v1";
+            // Profile callable and texture shadeop signatures are part of the ABI.
+            cache_source += "\nOSL_ARNOLD_COMPAT optix5 texture-colorspace v2";
 #endif
             group.generate_optix_cache_key(cache_source);
         }

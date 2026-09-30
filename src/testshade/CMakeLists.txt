@@ -561,6 +561,50 @@ if (BUILD_TESTING AND OSL_USE_HART)
                         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
                 endforeach ()
             endif ()
+            if (OSL_ARNOLD_COMPAT)
+                set (hart_texture_colorspace_declarations "")
+                set (hart_texture_colorspace_entries "")
+                set (hart_texture_colorspace_cpp)
+                set (exec_headers "${CMAKE_CURRENT_SOURCE_DIR}/hart_texture_colorspace_params.h")
+                foreach (arch IN LISTS hart_grid_architectures)
+                    MAKE_HART_BITCODE ("hart_texture_colorspace_test.hip"
+                        "_hart_${arch}" "${arch}" texture_colorspace_bc ""
+                        "${hart_include_dirs}")
+                    set (symbol "hart_texture_colorspace_${arch}")
+                    set (embedded "${CMAKE_CURRENT_BINARY_DIR}/hart/${arch}/texture_colorspace.bc.cpp")
+                    MAKE_EMBEDDED_CPP ("${symbol}" "${embedded}" "${texture_colorspace_bc}")
+                    list (APPEND hart_texture_colorspace_cpp "${embedded}")
+                    string (APPEND hart_texture_colorspace_declarations
+                        "extern unsigned char ${symbol}_block[];\nextern int ${symbol}_size;\n")
+                    string (APPEND hart_texture_colorspace_entries
+                        "    { \"${arch}\", ${symbol}_block, &${symbol}_size },\n")
+                endforeach ()
+                file (WRITE "${CMAKE_CURRENT_BINARY_DIR}/hart_texture_colorspace_bitcode.h"
+                    "${hart_texture_colorspace_declarations}"
+                    "struct HartTextureColorspaceModule { const char* arch; const unsigned char* data; const int* size; };\n"
+                    "static const HartTextureColorspaceModule hart_texture_colorspace_modules[] = {\n"
+                    "${hart_texture_colorspace_entries}    { nullptr, nullptr, nullptr }\n};\n")
+                add_executable (hart_texture_colorspace_test
+                    hart_texture_colorspace_test.cpp ../testrender/hartcontext.cpp
+                    ${hart_texture_colorspace_cpp})
+                target_include_directories (hart_texture_colorspace_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+                target_include_directories (hart_texture_colorspace_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+                target_link_libraries (hart_texture_colorspace_test PRIVATE oslexec oslcomp)
+                osl_hart_target (hart_texture_colorspace_test)
+                osl_hart_runtime_target (hart_texture_colorspace_test)
+                add_dependencies (hart_texture_colorspace_test osl_hart_bitcode)
+                set_target_properties (hart_texture_colorspace_test PROPERTIES FOLDER "Unit Tests")
+                if ("$ENV{TESTSUITE_HART}" STREQUAL "1")
+                    foreach (level IN ITEMS 0 2)
+                        add_test (NAME hart-texture-colorspaces-O${level}
+                            COMMAND hart_texture_colorspace_test
+                                "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h" ${level})
+                        set_tests_properties (hart-texture-colorspaces-O${level} PROPERTIES
+                            LABELS "hart;gpu" RUN_SERIAL TRUE TIMEOUT 300
+                            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+                    endforeach ()
+                endif ()
+            endif ()
             add_executable (hart_closure_test hart_closure_test.cpp
                 hartgridrender.cpp harttexture.cpp simplerend.cpp ${hart_generated_grid_cpp})
             target_include_directories (hart_closure_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})

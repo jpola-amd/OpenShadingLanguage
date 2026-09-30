@@ -2047,21 +2047,25 @@ use a patched overlay port if the change must be part of the package build.
 #### Switching between OIIO 3 and Arnold's customized OIIO 2.6 on Windows
 
 The [HART configuration helper](src/build-scripts/configure-hart.ps1) selects
-one of two isolated Release profiles. Run it from any working directory:
+one of two isolated Release profiles. `Current` explicitly builds shared OSL;
+`Arnold` explicitly builds static OSL (`BUILD_SHARED_LIBS=OFF`).
 
-**Experimental status:** The Arnold profile compiles and links, including
-HART bitcode for `gfx1201`, but the current shared-OSL layout does **not** pass
-runtime validation. Arnold's static OIIO is linked independently into the
-OSL DLLs and test programs, producing separate interned-string tables.
-Strings with identical text and hashes then compare unequal across modules.
-This breaks CPU output lookup and renderer-output retention; the latter
-removes required transform code. `hart-codegen-gfx1201` and
-`hart-generated-runtime` currently fail. Linking the real Arnold allocator
-does not unify these tables.
+**Why static OSL:** Linking Arnold's static OIIO independently into OSL DLLs
+and their callers creates separate interned-string tables. Identical text
+then compares unequal across modules, breaking output lookup and allowing
+required transform code to be optimized away. Static OSL and OIIO in one
+final consuming module avoid that duplication. Linking the real Arnold
+allocator alone does not unify string tables.
 
-Before renderer use, the integration must provide one OIIO string-state
-owner across participating modules. A standalone static-OSL test build
-would not establish compatibility with an already-built Arnold DLL.
+The static profile has passed the `gfx1201` code-generation/bitcode checks,
+cross-library string-identity and CPU execution checks, and a small uncached
+CPU/HART test of varying named transforms and string comparisons at OSL O0/O2.
+All six pixels matched their independent numeric references. An external
+consumer also compiled, linked and executed using the installed CMake targets.
+These checks are not a complete GPU regression suite or a drop-in Arnold ABI
+qualification.
+
+Run these commands from the checkout root:
 
 ```powershell
 # Existing HIP-patched OIIO 3 installation
@@ -2070,7 +2074,10 @@ would not establish compatibility with an already-built Arnold DLL.
 # Arnold OIIO, without modifying Arnold's installed packages
 .\src\build-scripts\configure-hart.ps1 -DependencyProfile Arnold -Build
 
-# Build and run the focused compiler, bitcode and GPU smoke tests
+# Build, run focused checks and the small CPU/GPU smoke test, then install
+.\src\build-scripts\configure-hart.ps1 -DependencyProfile Arnold -SmokeTest -Install
+
+# Also run the substantially longer generated-runtime suite
 .\src\build-scripts\configure-hart.ps1 -DependencyProfile Arnold -Test
 ```
 
@@ -2087,6 +2094,10 @@ The profiles use separate `build\hart-current` / `build\hart-arnold` and
 install destinations; `-Build` does not run installation. Switching is just
 rerunning the helper with the other profile; it never reuses the existing
 `build` or `build\hart-validation` cache. Do not mix their libraries or headers.
+`-Install` builds and installs; when combined with either test switch,
+installation runs only after the selected tests pass. `-Test` includes
+`-SmokeTest` coverage and retains the 600-second per-test timeout; the broader
+generated-runtime test can exceed that limit on this machine.
 
 Override local paths with `-Dependencies`, `-ArnoldDependencies`, `-ArnoldRoot`,
 `-LLVMRoot`, `-HartRoot` and `-RocmRoot`. `-Architectures` accepts a quoted
@@ -2112,6 +2123,26 @@ replace its customized color manager, or change Arnold's original packages.
 Restaging after moving the Arnold runtime refreshes the generated CMake
 paths. Consumers must use this same staged dependency set and its associated
 transitive packages.
+
+Installed consumers can use `find_package(OSL CONFIG REQUIRED)` and link
+`OSL::oslexec` and `OSL::oslcomp`; the static targets propagate
+`OSL_STATIC_DEFINE` and their link dependencies. Set `OSL_DIR` to
+`install\hart-arnold\lib\cmake\OSL`, and use the same `OpenImageIO_DIR`,
+`Imath_DIR` and dependency prefixes as the profile. The
+[standalone consumer fixture](testsuite/oiio-compat/CMakeLists.txt) verifies
+this without adding source-tree headers or manually listing OSL's libraries.
+The install is not a self-contained SDK: it still references the selected
+LLVM/Clang archives and external dependency installation.
+
+**Remaining integration caveats:** Arnold must rebuild its final module
+with this OSL and one consistent OIIO implementation. The standalone tests do
+not establish string-state sharing with an already-built Arnold DLL; the
+staged `Arnold::ai` import supplies the allocator only for standalone
+validation. Also, the supplied Arnold `jpeg-static.lib` requests the static
+MSVC CRT (`LIBCMT`), whereas OSL and the other checked archives use the DLL CRT
+(`MSVCRT`). This produces linker warning LNK4098. It has not been suppressed
+or fixed by changing Arnold's packages; reconcile that dependency's CRT
+configuration before production integration.
 
 Ordinary CMake builds still require OIIO >= 3.0. The explicit
 `OSL_ALLOW_OIIO_26=ON` option enables experimental 2.6.3+ compatibility; lowering

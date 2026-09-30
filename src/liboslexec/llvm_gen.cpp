@@ -2616,8 +2616,9 @@ static llvm::Value*
 llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
                          bool tex3d, int nchans, llvm::Value*& alpha,
                          llvm::Value*& dalphadx, llvm::Value*& dalphady,
-                         llvm::Value*& errormessage)
+                         llvm::Value*& errormessage, llvm::Value*& color_space)
 {
+    color_space      = rop.ll.constant(uint64_t(0));
     llvm::Value* opt = rop.temp_texture_options_void_ptr();
     rop.ll.call_function("osl_init_texture_options", rop.sg_void_ptr(), opt);
     llvm::Value* missingcolor = NULL;
@@ -2814,6 +2815,17 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
             continue;
         }
         if (name == Strings::colorspace && valtype == TypeDesc::STRING) {
+#if OSL_ARNOLD_COMPAT
+            if (rop.use_optix()
+                && !rop.renderer()->supports("TextureColorSpaces")) {
+                rop.shadingcontext()->errorfmt(
+                    "OptiX: renderer lacks TextureColorSpaces ({}:{})",
+                    op.sourcefile(), op.sourceline());
+                return nullptr;
+            }
+            color_space = rop.llvm_load_value(Val);
+            continue;
+#else
             if (Val.is_constant()) {
                 // Just ignore this option for now.
                 // FIXME: need full implementation
@@ -2824,6 +2836,7 @@ llvm_gen_texture_options(BackendLLVM& rop, int opnum, int first_optional_arg,
                     tex3d ? "3d" : "", name, op.sourcefile(), op.sourceline());
                 continue;
             }
+#endif
         }
 
 
@@ -2882,9 +2895,12 @@ LLVMGEN(llvm_gen_texture)
     llvm::Value* opt;  // TextureOpt
     llvm::Value *alpha = NULL, *dalphadx = NULL, *dalphady = NULL;
     llvm::Value* errormessage = NULL;
+    llvm::Value* color_space  = nullptr;
     opt = llvm_gen_texture_options(rop, opnum, first_optional_arg, false /*3d*/,
                                    nchans, alpha, dalphadx, dalphady,
-                                   errormessage);
+                                   errormessage, color_space);
+    if (!opt)
+        return false;
 
     RendererServices::TextureHandle* texture_handle = NULL;
     ustring filename;
@@ -2919,6 +2935,9 @@ LLVMGEN(llvm_gen_texture)
     llvm::Value* args[] = {
         rop.sg_void_ptr(),
         rop.llvm_load_value(Filename),
+#if OSL_ARNOLD_COMPAT
+        color_space,
+#endif
         rop.ll.constant_ptr(texture_handle),
         opt,
         rop.llvm_load_value(S),
@@ -2968,9 +2987,12 @@ LLVMGEN(llvm_gen_texture3d)
     llvm::Value* opt;  // TextureOpt
     llvm::Value *alpha = NULL, *dalphadx = NULL, *dalphady = NULL;
     llvm::Value* errormessage = NULL;
+    llvm::Value* color_space  = nullptr;
     opt = llvm_gen_texture_options(rop, opnum, first_optional_arg, true /*3d*/,
                                    nchans, alpha, dalphadx, dalphady,
-                                   errormessage);
+                                   errormessage, color_space);
+    if (!opt)
+        return false;
 
     RendererServices::TextureHandle* texture_handle = NULL;
     if (Filename.is_constant() && rop.shadingsys().opt_texture_handle()) {
@@ -2986,6 +3008,9 @@ LLVMGEN(llvm_gen_texture3d)
     llvm::Value* args[] = {
         rop.sg_void_ptr(),
         rop.llvm_load_value(Filename),
+#if OSL_ARNOLD_COMPAT
+        color_space,
+#endif
         rop.ll.constant_ptr(texture_handle),
         opt,
         rop.llvm_void_ptr(P),
@@ -3033,9 +3058,12 @@ LLVMGEN(llvm_gen_environment)
     llvm::Value* opt;  // TextureOpt
     llvm::Value *alpha = NULL, *dalphadx = NULL, *dalphady = NULL;
     llvm::Value* errormessage = NULL;
+    llvm::Value* color_space  = nullptr;
     opt = llvm_gen_texture_options(rop, opnum, first_optional_arg, false /*3d*/,
                                    nchans, alpha, dalphadx, dalphady,
-                                   errormessage);
+                                   errormessage, color_space);
+    if (!opt)
+        return false;
 
     RendererServices::TextureHandle* texture_handle = NULL;
     if (Filename.is_constant() && rop.shadingsys().opt_texture_handle()) {
@@ -3051,6 +3079,9 @@ LLVMGEN(llvm_gen_environment)
     llvm::Value* args[] = {
         rop.sg_void_ptr(),
         rop.llvm_load_value(Filename),
+#if OSL_ARNOLD_COMPAT
+        color_space,
+#endif
         rop.ll.constant_ptr(texture_handle),
         opt,
         rop.llvm_void_ptr(R),

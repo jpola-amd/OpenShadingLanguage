@@ -162,6 +162,9 @@ rs_transform_points(OSL::OpaqueExecContextPtr oec, OSL::ustringhash from,
 /// error.
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_texture(OSL::OpaqueExecContextPtr oec, OSL::ustringhash filename,
+#if OSL_ARNOLD_COMPAT
+           OSL::ustringhash color_space,
+#endif
            OSL::TextureSystem::TextureHandle* texture_handle,
            OSL::TextureSystem::Perthread* texture_thread_info,
            OSL::TextureOpt& options, float s, float t, float dsdx, float dtdx,
@@ -195,6 +198,9 @@ rs_texture(OSL::OpaqueExecContextPtr oec, OSL::ustringhash filename,
 /// error.
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_texture3d(OSL::OpaqueExecContextPtr oec, OSL::ustringhash filename,
+#if OSL_ARNOLD_COMPAT
+             OSL::ustringhash color_space,
+#endif
              OSL::TextureSystem::TextureHandle* texture_handle,
              OSL::TextureSystem::Perthread* texture_thread_info,
              OSL::TextureOpt& options, const OSL::Vec3& P,
@@ -227,6 +233,9 @@ rs_texture3d(OSL::OpaqueExecContextPtr oec, OSL::ustringhash filename,
 /// error.
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_environment(OSL::OpaqueExecContextPtr oec, OSL::ustringhash filename,
+#if OSL_ARNOLD_COMPAT
+               OSL::ustringhash color_space,
+#endif
                OSL::TextureSystem::TextureHandle* texture_handle,
                OSL::TextureSystem::Perthread* texture_thread_info,
                OSL::TextureOpt& options, const OSL::Vec3& R,

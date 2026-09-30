@@ -77,6 +77,8 @@ using namespace OSL;
 
 namespace {
 
+constexpr unsigned texture_color_args = OSL_ARNOLD_COMPAT ? 1 : 0;
+
 class HartServices : public RendererServices {
 public:
     explicit HartServices(bool textures = false, bool transforms = false,
@@ -10566,12 +10568,14 @@ check_texture_alpha_modules(string_view arch, string_view stdosl)
                             if (!call || call->getCalledFunction() != texture)
                                 continue;
                             ++calls;
-                            OIIO_CHECK_EQUAL(call->arg_size(), 18);
-                            if (call->arg_size() != 18)
+                            OIIO_CHECK_EQUAL(call->arg_size(),
+                                             18 + texture_color_args);
+                            if (call->arg_size() != 18 + texture_color_args)
                                 continue;
                             const auto* channels
                                 = llvm::dyn_cast<llvm::ConstantInt>(
-                                    call->getArgOperand(10));
+                                    call->getArgOperand(10
+                                                        + texture_color_args));
                             OIIO_CHECK_ASSERT(channels);
                             if (channels)
                                 OIIO_CHECK_EQUAL(channels->getZExtValue(),
@@ -10579,7 +10583,8 @@ check_texture_alpha_modules(string_view arch, string_view stdosl)
                             // Result (11..13) and alpha (14..16) have
                             // independent derivative demand.
                             for (int arg = 11; arg <= 16; ++arg) {
-                                const auto* pointer = call->getArgOperand(arg);
+                                const auto* pointer = call->getArgOperand(
+                                    arg + texture_color_args);
                                 OIIO_CHECK_ASSERT(
                                     pointer->getType()->isPointerTy());
                                 const bool nonnull
@@ -10749,8 +10754,9 @@ check_texture_firstchannel_modules(string_view arch, string_view stdosl)
                         if (callee->getName() != "osl_texture")
                             continue;
                         ++calls;
-                        OIIO_CHECK_EQUAL(call->arg_size(), 18);
-                        if (call->arg_size() != 18)
+                        OIIO_CHECK_EQUAL(call->arg_size(),
+                                         18 + texture_color_args);
+                        if (call->arg_size() != 18 + texture_color_args)
                             continue;
                         OIIO_CHECK_EQUAL(settings.size(),
                                          size_t(settings_per_call));
@@ -10759,12 +10765,13 @@ check_texture_firstchannel_modules(string_view arch, string_view stdosl)
                         if (test.reset && settings.size() == 2)
                             OIIO_CHECK_EQUAL(settings[1], 0);
                         if (options_ptr)
-                            OIIO_CHECK_EQUAL(call->getArgOperand(3),
+                            OIIO_CHECK_EQUAL(call->getArgOperand(
+                                                 3 + texture_color_args),
                                              options_ptr);
                         settings.clear();
                         options_ptr = nullptr;
                         const auto* channels = llvm::dyn_cast<llvm::ConstantInt>(
-                            call->getArgOperand(10));
+                            call->getArgOperand(10 + texture_color_args));
                         OIIO_CHECK_ASSERT(channels);
                         if (channels) {
                             OIIO_CHECK_ASSERT(channels->getZExtValue() == 1
@@ -10772,12 +10779,13 @@ check_texture_firstchannel_modules(string_view arch, string_view stdosl)
                             scalar_calls += channels->getZExtValue() == 1;
                         }
                         const bool alpha = !llvm::isa<llvm::ConstantPointerNull>(
-                            call->getArgOperand(14)->stripPointerCasts());
+                            call->getArgOperand(14 + texture_color_args)
+                                ->stripPointerCasts());
                         alpha_calls += alpha;
                         for (int arg = 11; arg <= 16; ++arg)
                             OIIO_CHECK_EQUAL(
                                 llvm::isa<llvm::ConstantPointerNull>(
-                                    call->getArgOperand(arg)
+                                    call->getArgOperand(arg + texture_color_args)
                                         ->stripPointerCasts()),
                                 arg >= 14 && !alpha);
                     }
@@ -10939,24 +10947,33 @@ check_texture_options_ir(ShadingSystem& ss, ShaderGroup& group,
             }
             if (name != "osl_texture")
                 continue;
-            OIIO_CHECK_EQUAL(call->arg_size(), 18);
+            OIIO_CHECK_EQUAL(call->arg_size(), 18 + texture_color_args);
             OIIO_CHECK_ASSERT(options && calls < expected.size());
-            if (call->arg_size() != 18 || !options || calls >= expected.size())
+            if (call->arg_size() != 18 + texture_color_args || !options
+                || calls >= expected.size())
                 return false;
+#if OSL_ARNOLD_COMPAT
+            const auto* color_space = llvm::dyn_cast<llvm::ConstantInt>(
+                call->getArgOperand(2));
+            OIIO_CHECK_ASSERT(color_space);
+            if (color_space)
+                OIIO_CHECK_EQUAL(color_space->getZExtValue(), uint64_t(0));
+#endif
             const auto& test = expected[calls++];
-            OIIO_CHECK_EQUAL(call->getArgOperand(3)->stripPointerCasts(),
+            OIIO_CHECK_EQUAL(call->getArgOperand(3 + texture_color_args)
+                                 ->stripPointerCasts(),
                              options);
             OIIO_CHECK_EQUAL(swrap, int(test.swrap));
             OIIO_CHECK_EQUAL(twrap, int(test.twrap));
             OIIO_CHECK_EQUAL(interp, int(test.interp));
             const auto* channels = llvm::dyn_cast<llvm::ConstantInt>(
-                call->getArgOperand(10));
+                call->getArgOperand(10 + texture_color_args));
             OIIO_CHECK_ASSERT(channels);
             if (channels)
                 OIIO_CHECK_EQUAL(channels->getLimitedValue(),
                                  uint64_t(test.channels));
             const auto* handle = llvm::dyn_cast<llvm::ConstantExpr>(
-                call->getArgOperand(2));
+                call->getArgOperand(2 + texture_color_args));
             OIIO_CHECK_ASSERT(
                 handle && handle->getOpcode() == llvm::Instruction::IntToPtr);
             if (handle && handle->getOpcode() == llvm::Instruction::IntToPtr) {

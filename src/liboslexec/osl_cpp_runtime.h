@@ -606,16 +606,28 @@ void osl_texture_set_missingcolor_arena(void* opt, const void* missing);
 void osl_texture_set_missingcolor_alpha(void* opt, int alphaindex, float missingalpha);
 
 // Texture lookup functions
-int osl_texture(void* sg, OSL::ustringhash_pod name, void* handle,
+int osl_texture(void* sg, OSL::ustringhash_pod name,
+#if OSL_ARNOLD_COMPAT
+                OSL::ustringhash_pod color_space,
+#endif
+                void* handle,
                 void* opt, float s, float t,
                 float dsdx, float dtdx, float dsdy, float dtdy,
                 int chans, void* result, void* dresultdx, void* dresultdy,
                 void* alpha, void* dalphadx, void* dalphady, void* errormsg);
-int osl_texture3d(void* sg, OSL::ustringhash_pod name, void* handle,
+int osl_texture3d(void* sg, OSL::ustringhash_pod name,
+#if OSL_ARNOLD_COMPAT
+                  OSL::ustringhash_pod color_space,
+#endif
+                  void* handle,
                   void* opt, void* P, void* dPdx, void* dPdy, void* dPdz,
                   int chans, void* result, void* dresultdx, void* dresultdy,
                   void* alpha, void* dalphadx, void* dalphady, void* errormsg);
-int osl_environment(void* sg, OSL::ustringhash_pod name, void* handle,
+int osl_environment(void* sg, OSL::ustringhash_pod name,
+#if OSL_ARNOLD_COMPAT
+                    OSL::ustringhash_pod color_space,
+#endif
+                    void* handle,
                     void* opt, void* R, void* dRdx, void* dRdy,
                     int chans, void* result, void* dresultdx, void* dresultdy,
                     void* alpha, void* dalphadx, void* dalphady, void* errormsg);

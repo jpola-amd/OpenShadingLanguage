@@ -976,6 +976,16 @@ ShaderInstance::validate_hart() const
                         "texture firstchannel requires a literal nonnegative integer");
                 continue;
             }
+#if OSL_ARNOLD_COMPAT
+            if (name == Strings::colorspace) {
+                if (!shadingsys().renderer()->supports("HARTTextureColorSpaces"))
+                    return fail("renderer lacks HARTTextureColorSpaces");
+                if (!value.typespec().is_string()
+                    || value.typespec().is_array())
+                    return fail("texture colorspace requires a scalar string");
+                continue;
+            }
+#endif
             if (name != ustring("interp") && name != ustring("wrap")
                 && name != ustring("swrap") && name != ustring("twrap"))
                 return fail(fmtformat("unsupported texture option '{}'", name));

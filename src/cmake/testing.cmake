@@ -104,6 +104,7 @@ macro (add_one_testsuite testname testsrcdir)
               IMATH_INCLUDE_DIR=${IMATH_INCLUDES}
               OSL_SOURCE_DIR=${CMAKE_SOURCE_DIR}
               OSL_BUILD_DIR=${CMAKE_BINARY_DIR}
+              OSL_ARNOLD_COMPAT=${OSL_ARNOLD_COMPAT}
               OSL_TESTSUITE_ROOT=${testsuite}
               OSL_TESTSUITE_SRC=${testsrcdir}
               OSL_TESTSUITE_CUR=${testdir}

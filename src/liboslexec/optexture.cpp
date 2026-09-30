@@ -286,9 +286,12 @@ osl_texture_set_missingcolor_alpha(void* opt, int alphaindex,
 
 
 OSL_SHADEOP OSL_HOSTDEVICE int
-osl_texture(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
-            void* opt_, float s, float t, float dsdx, float dtdx, float dsdy,
-            float dtdy, int chans, void* result_, void* dresultdx_,
+osl_texture(OpaqueExecContextPtr oec, ustringhash_pod name_,
+#if OSL_ARNOLD_COMPAT
+            ustringhash_pod color_space_,
+#endif
+            void* handle, void* opt_, float s, float t, float dsdx, float dtdx,
+            float dsdy, float dtdy, int chans, void* result_, void* dresultdx_,
             void* dresultdy_, void* alpha_, void* dalphadx_, void* dalphady_,
             void* errormessage_)
 {
@@ -315,7 +318,11 @@ osl_texture(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
     float4 result_simd(0.0f), dresultds_simd(0.0f), dresultdt_simd(0.0f);
     ustringhash em;
     ustringhash name = ustringhash_from(name_);
-    bool ok = rs_texture(oec, name, (TextureSystem::TextureHandle*)handle,
+    bool ok          = rs_texture(oec, name,
+#if OSL_ARNOLD_COMPAT
+                         ustringhash_from(color_space_),
+#endif
+                         (TextureSystem::TextureHandle*)handle,
 #if !OSL_GPU_DEVICE
                          sg->context->texture_thread_info(), *opt, s, t, dsdx,
                          dtdx, dsdy, dtdy, 4,
@@ -359,10 +366,13 @@ osl_texture(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
 
 
 OSL_SHADEOP OSL_HOSTDEVICE int
-osl_texture3d(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
-              void* opt_, void* P_, void* dPdx_, void* dPdy_, void* dPdz_,
-              int chans, void* result_, void* dresultdx_, void* dresultdy_,
-              void* alpha_, void* dalphadx_, void* dalphady_,
+osl_texture3d(OpaqueExecContextPtr oec, ustringhash_pod name_,
+#if OSL_ARNOLD_COMPAT
+              ustringhash_pod color_space_,
+#endif
+              void* handle, void* opt_, void* P_, void* dPdx_, void* dPdy_,
+              void* dPdz_, int chans, void* result_, void* dresultdx_,
+              void* dresultdy_, void* alpha_, void* dalphadx_, void* dalphady_,
               void* errormessage_)
 {
 #if !OSL_GPU_DEVICE
@@ -394,7 +404,11 @@ osl_texture3d(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
     float4 result_simd, dresultds_simd, dresultdt_simd, dresultdr_simd;
     ustringhash em;
     ustringhash name = ustringhash_from(name_);
-    bool ok = rs_texture3d(oec, name, (TextureSystem::TextureHandle*)handle,
+    bool ok          = rs_texture3d(oec, name,
+#if OSL_ARNOLD_COMPAT
+                           ustringhash_from(color_space_),
+#endif
+                           (TextureSystem::TextureHandle*)handle,
 #if !OSL_GPU_DEVICE
                            sg->context->texture_thread_info(), *opt, P, dPdx,
                            dPdy, dPdz, 4,
@@ -441,10 +455,14 @@ osl_texture3d(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
 
 
 OSL_SHADEOP OSL_HOSTDEVICE int
-osl_environment(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
-                void* opt_, void* R_, void* dRdx_, void* dRdy_, int chans,
-                void* result_, void* dresultdx_, void* dresultdy_, void* alpha_,
-                void* dalphadx_, void* dalphady_, void* errormessage_)
+osl_environment(OpaqueExecContextPtr oec, ustringhash_pod name_,
+#if OSL_ARNOLD_COMPAT
+                ustringhash_pod color_space_,
+#endif
+                void* handle, void* opt_, void* R_, void* dRdx_, void* dRdy_,
+                int chans, void* result_, void* dresultdx_, void* dresultdy_,
+                void* alpha_, void* dalphadx_, void* dalphady_,
+                void* errormessage_)
 {
 #if !OSL_GPU_DEVICE
     using float4 = OIIO::simd::vfloat4;
@@ -470,7 +488,11 @@ osl_environment(OpaqueExecContextPtr oec, ustringhash_pod name_, void* handle,
     float4 local_result;
     ustringhash em;
     ustringhash name = ustringhash_from(name_);
-    bool ok = rs_environment(oec, name, (TextureSystem::TextureHandle*)handle,
+    bool ok          = rs_environment(oec, name,
+#if OSL_ARNOLD_COMPAT
+                             ustringhash_from(color_space_),
+#endif
+                             (TextureSystem::TextureHandle*)handle,
 #if !OSL_GPU_DEVICE
                              sg->context->texture_thread_info(), *opt, R, dRdx,
                              dRdy, 4,

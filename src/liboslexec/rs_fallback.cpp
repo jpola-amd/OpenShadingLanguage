@@ -147,6 +147,9 @@ rs_transform_points(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash from,
 
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_texture(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
+#if OSL_ARNOLD_COMPAT
+           OSL::ustringhash color_space,
+#endif
            OSL::TextureSystem::TextureHandle* texture_handle,
            OSL::TextureSystem::Perthread* texture_thread_info,
            OSL::TextureOpt& options, float s, float t, float dsdx, float dtdx,
@@ -155,10 +158,13 @@ rs_texture(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
 {
 #ifndef __CUDA_ARCH__
     auto sg = get_sg(exec_ctx);
-    return sg->renderer->texture(filename, texture_handle, texture_thread_info,
-                                 options, sg, s, t, dsdx, dtdx, dsdy, dtdy,
-                                 nchannels, result, dresultds, dresultdt,
-                                 errormessage);
+    return sg->renderer->texture(filename,
+#    if OSL_ARNOLD_COMPAT
+                                 color_space,
+#    endif
+                                 texture_handle, texture_thread_info, options,
+                                 sg, s, t, dsdx, dtdx, dsdy, dtdy, nchannels,
+                                 result, dresultds, dresultdt, errormessage);
 #else
     return false;
 #endif
@@ -166,6 +172,9 @@ rs_texture(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
 
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_texture3d(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
+#if OSL_ARNOLD_COMPAT
+             OSL::ustringhash color_space,
+#endif
              OSL::TextureSystem::TextureHandle* texture_handle,
              OSL::TextureSystem::Perthread* texture_thread_info,
              OSL::TextureOpt& options, const OSL::Vec3& P,
@@ -176,10 +185,14 @@ rs_texture3d(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
 {
 #ifndef __CUDA_ARCH__
     auto sg = get_sg(exec_ctx);
-    return sg->renderer->texture3d(filename, texture_handle,
-                                   texture_thread_info, options, sg, P, dPdx,
-                                   dPdy, dPdz, nchannels, result, dresultds,
-                                   dresultdt, dresultdr, errormessage);
+    return sg->renderer->texture3d(filename,
+#    if OSL_ARNOLD_COMPAT
+                                   color_space,
+#    endif
+                                   texture_handle, texture_thread_info, options,
+                                   sg, P, dPdx, dPdy, dPdz, nchannels, result,
+                                   dresultds, dresultdt, dresultdr,
+                                   errormessage);
 #else
     return false;
 #endif
@@ -187,6 +200,9 @@ rs_texture3d(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
 
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_environment(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
+#if OSL_ARNOLD_COMPAT
+               OSL::ustringhash color_space,
+#endif
                OSL::TextureSystem::TextureHandle* texture_handle,
                OSL::TextureSystem::Perthread* texture_thread_info,
                OSL::TextureOpt& options, const OSL::Vec3& R,
@@ -196,10 +212,14 @@ rs_environment(OSL::OpaqueExecContextPtr exec_ctx, OSL::ustringhash filename,
 {
 #ifndef __CUDA_ARCH__
     auto sg = get_sg(exec_ctx);
-    return sg->renderer->environment(filename, texture_handle,
-                                     texture_thread_info, options, sg, R, dRdx,
-                                     dRdy, nchannels, result, dresultds,
-                                     dresultdt, errormessage);
+    return sg->renderer->environment(filename,
+#    if OSL_ARNOLD_COMPAT
+                                     color_space,
+#    endif
+                                     texture_handle, texture_thread_info,
+                                     options, sg, R, dRdx, dRdy, nchannels,
+                                     result, dresultds, dresultdt,
+                                     errormessage);
 #else
     return false;
 #endif

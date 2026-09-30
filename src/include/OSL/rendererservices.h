@@ -374,6 +374,27 @@ public:
                          float* dresultds, float* dresultdt,
                          ustringhash* errormessage);
 
+#if OSL_ARNOLD_COMPAT
+    /// Arnold-compatible texture lookup with renderer-defined input colorspace.
+    /// The empty color_space delegates to the upstream overload above. A
+    /// nonempty color_space requires a renderer override; the default returns
+    /// false, zeros result and any derivatives, and reports an error using the
+    /// same errormessage convention as the upstream overload.
+    ///
+    /// color_space may be any runtime string, including an interactive or
+    /// varying value. OSL does not choose a working space or apply a transform.
+    /// texture_handle identifies the filename resource, not its colorspace:
+    /// renderers must distinguish the full selection when sampling or caching.
+    virtual bool texture(ustringhash filename, ustringhash color_space,
+                         TextureHandle* texture_handle,
+                         TexturePerthread* texture_thread_info,
+                         TextureOpt& options, ShaderGlobals* sg, float s,
+                         float t, float dsdx, float dtdx, float dsdy,
+                         float dtdy, int nchannels, float* result,
+                         float* dresultds, float* dresultdt,
+                         ustringhash* errormessage);
+#endif
+
     /// Filtered 3D texture lookup for a single point.
     ///
     /// P is the volumetric texture coordinate; dPd{x,y,z} are the
@@ -407,6 +428,19 @@ public:
                            float* dresultds, float* dresultdt, float* dresultdr,
                            ustringhash* errormessage);
 
+#if OSL_ARNOLD_COMPAT
+    /// Arnold-compatible 3D lookup. The color_space, filename-only handle,
+    /// empty-default delegation, and failure semantics are as for texture().
+    virtual bool texture3d(ustringhash filename, ustringhash color_space,
+                           TextureHandle* texture_handle,
+                           TexturePerthread* texture_thread_info,
+                           TextureOpt& options, ShaderGlobals* sg,
+                           const Vec3& P, const Vec3& dPdx, const Vec3& dPdy,
+                           const Vec3& dPdz, int nchannels, float* result,
+                           float* dresultds, float* dresultdt, float* dresultdr,
+                           ustringhash* errormessage);
+#endif
+
     /// Filtered environment lookup for a single point.
     ///
     /// R is the directional texture coordinate; dRd[xy] are the
@@ -436,6 +470,19 @@ public:
                              const Vec3& R, const Vec3& dRdx, const Vec3& dRdy,
                              int nchannels, float* result, float* dresultds,
                              float* dresultdt, ustringhash* errormessage);
+
+#if OSL_ARNOLD_COMPAT
+    /// Arnold-compatible environment lookup. The color_space, filename-only
+    /// handle, empty-default delegation, and failure semantics are as for
+    /// texture().
+    virtual bool environment(ustringhash filename, ustringhash color_space,
+                             TextureHandle* texture_handle,
+                             TexturePerthread* texture_thread_info,
+                             TextureOpt& options, ShaderGlobals* sg,
+                             const Vec3& R, const Vec3& dRdx, const Vec3& dRdy,
+                             int nchannels, float* result, float* dresultds,
+                             float* dresultdt, ustringhash* errormessage);
+#endif
 
     /// Get information about the given texture.  Return true if found
     /// and the data has been put in *data.  Return false if the texture

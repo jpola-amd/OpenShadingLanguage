@@ -2702,14 +2702,16 @@ BackendLLVM::run()
     if (use_optix() || use_hart())
         gpu_externals = build_llvm_gpu_callables();
 
+    // Recursive block generation may not propagate an opcode's failure.
+    // Do not publish a partial group after a rejected renderer contract.
+    if (m_llvm_codegen_failed
+        && (use_hart() || (OSL_ARNOLD_COMPAT && use_optix()))) {
+        ll.module(nullptr);
+        return;
+    }
+
 #if OSL_USE_HART
     if (use_hart()) {
-        // Recursive block generation may not propagate an opcode's failure.
-        // Never publish a partial group after a resource binding error.
-        if (m_llvm_codegen_failed) {
-            ll.module(nullptr);
-            return;
-        }
         const llvm::Function* seed = ll.module()->getFunction("osl_sin_ff");
         if (!seed || !seed->getFnAttribute("target-cpu").isStringAttribute()
             || seed->getFnAttribute("target-cpu").getValueAsString()

@@ -299,6 +299,108 @@ RendererServices::is_udim(TextureHandle* texture_handle)
 
 
 
+#if OSL_ARNOLD_COMPAT
+namespace {
+
+bool
+unsupported_texture_colorspace(string_view operation, ustringhash filename,
+                               ustringhash color_space, ShaderGlobals* sg,
+                               span<float> result, span<float> dresultds,
+                               span<float> dresultdt, span<float> dresultdr,
+                               ustringhash* errormessage)
+{
+    for (auto output : { result, dresultds, dresultdt, dresultdr })
+        for (float& value : output)
+            value = 0.0f;
+    const auto message = OSL::fmtformat(
+        "[RendererServices::{}] Unsupported texture colorspace '{}' for '{}': "
+        "renderer must override the colorspace-aware callback",
+        operation, color_space, filename);
+    if (errormessage)
+        *errormessage = ustringhash(message);
+    else if (sg && sg->context)
+        OSL::errorfmt(sg, "{}", message);
+    else
+        ErrorHandler::default_handler()(ErrorHandler::EH_ERROR, message);
+    return false;
+}
+
+}  // namespace
+
+
+
+bool
+RendererServices::texture(ustringhash filename, ustringhash color_space,
+                          TextureHandle* texture_handle,
+                          TexturePerthread* texture_thread_info,
+                          TextureOpt& options, ShaderGlobals* sg, float s,
+                          float t, float dsdx, float dtdx, float dsdy,
+                          float dtdy, int nchannels, float* result,
+                          float* dresultds, float* dresultdt,
+                          ustringhash* errormessage)
+{
+    if (color_space == ustringhash())
+        return texture(filename, texture_handle, texture_thread_info, options,
+                       sg, s, t, dsdx, dtdx, dsdy, dtdy, nchannels, result,
+                       dresultds, dresultdt, errormessage);
+    const size_t channels = static_cast<size_t>(nchannels);
+    return unsupported_texture_colorspace(
+        "texture", filename, color_space, sg, { result, result ? channels : 0 },
+        { dresultds, dresultds ? channels : 0 },
+        { dresultdt, dresultdt ? channels : 0 }, {}, errormessage);
+}
+
+
+
+bool
+RendererServices::texture3d(ustringhash filename, ustringhash color_space,
+                            TextureHandle* texture_handle,
+                            TexturePerthread* texture_thread_info,
+                            TextureOpt& options, ShaderGlobals* sg,
+                            const Vec3& P, const Vec3& dPdx, const Vec3& dPdy,
+                            const Vec3& dPdz, int nchannels, float* result,
+                            float* dresultds, float* dresultdt,
+                            float* dresultdr, ustringhash* errormessage)
+{
+    if (color_space == ustringhash())
+        return texture3d(filename, texture_handle, texture_thread_info, options,
+                         sg, P, dPdx, dPdy, dPdz, nchannels, result, dresultds,
+                         dresultdt, dresultdr, errormessage);
+    const size_t channels = static_cast<size_t>(nchannels);
+    return unsupported_texture_colorspace(
+        "texture3d", filename, color_space, sg,
+        { result, result ? channels : 0 },
+        { dresultds, dresultds ? channels : 0 },
+        { dresultdt, dresultdt ? channels : 0 },
+        { dresultdr, dresultdr ? channels : 0 }, errormessage);
+}
+
+
+
+bool
+RendererServices::environment(ustringhash filename, ustringhash color_space,
+                              TextureHandle* texture_handle,
+                              TexturePerthread* texture_thread_info,
+                              TextureOpt& options, ShaderGlobals* sg,
+                              const Vec3& R, const Vec3& dRdx, const Vec3& dRdy,
+                              int nchannels, float* result, float* dresultds,
+                              float* dresultdt, ustringhash* errormessage)
+{
+    if (color_space == ustringhash())
+        return environment(filename, texture_handle, texture_thread_info,
+                           options, sg, R, dRdx, dRdy, nchannels, result,
+                           dresultds, dresultdt, errormessage);
+    const size_t channels = static_cast<size_t>(nchannels);
+    return unsupported_texture_colorspace(
+        "environment", filename, color_space, sg,
+        { result, result ? channels : 0 },
+        { dresultds, dresultds ? channels : 0 },
+        { dresultdt, dresultdt ? channels : 0 }, {}, errormessage);
+}
+#endif
+
+
+
 bool
 RendererServices::texture(ustringhash filename, TextureHandle* texture_handle,
                           TexturePerthread* texture_thread_info,

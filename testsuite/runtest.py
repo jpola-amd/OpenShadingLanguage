@@ -390,6 +390,8 @@ def runtest (command, outputs, failureok=0, failthresh=0, failpercent=0, regress
                 testfiles = ["ref/"+out] + glob.glob (os.path.join ("ref", "*"+extension))
                 hartref = os.path.join("ref", os.path.splitext(out)[0]
                                        + "-hart" + extension)
+                arnoldref = os.path.join("ref", os.path.splitext(out)[0]
+                                         + "-arnold" + extension)
                 hart_noopt_ref = os.path.join("ref", os.path.splitext(out)[0]
                                               + "-noopt-hart" + extension)
                 hart_fused_ref = os.path.join("ref", os.path.splitext(out)[0]
@@ -404,9 +406,13 @@ def runtest (command, outputs, failureok=0, failthresh=0, failpercent=0, regress
                 if (int(os.environ.get('TESTSHADE_HART') or 0)
                         and os.path.isfile(hartref)) :
                     testfiles = [hartref]
+                elif (os.environ.get('OSL_ARNOLD_COMPAT') == "ON"
+                        and os.path.isfile(arnoldref)) :
+                    testfiles = [arnoldref]
                 else :
                     testfiles = [f for f in testfiles
-                                 if not os.path.splitext(f)[0].endswith("-hart")]
+                                 if not os.path.splitext(f)[0].endswith(
+                                     ("-hart", "-arnold"))]
             for testfile in (testfiles) :
                 # print ("comparing " + out + " to " + testfile)
                 if extension == ".tif" or extension == ".exr" :

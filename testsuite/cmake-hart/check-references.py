@@ -17,7 +17,8 @@ source = root / "source"
 source.mkdir(parents=True)
 (source / "ref").mkdir()
 references = (("out.txt", "cpu"), ("out-hart.txt", "gpu"),
-              ("out-noopt-hart.txt", "noopt"), ("out-fused-hart.txt", "fused"))
+              ("out-noopt-hart.txt", "noopt"), ("out-fused-hart.txt", "fused"),
+              ("out-arnold.txt", "arnold"))
 for name, text in references:
     (source / "ref" / name).write_text(text + "\n", encoding="ascii")
 emitter = root / "emit.py"
@@ -37,31 +38,35 @@ env = os.environ.copy()
 env.update(OSL_SOURCE_DIR=str(testsuite.parent),
            OSL_TESTSUITE_ROOT=str(testsuite), OSL_TESTSUITE_SRC=str(source),
            TESTSUITE_CLEANUP_ON_SUCCESS="0", TESTSHADE_OPTIX="0",
+           OSL_ARNOLD_COMPAT="OFF",
            TESTSHADE_FUSED="0", TESTSHADE_BATCHED="0", TESTSHADE_RS_BITCODE="0")
 env.pop("OSL_REGRESSION_TEST", None)
 success = False
 try:
-    cases = [(hart, optimize, fused, payload) for hart in (0, 1)
+    cases = [(hart, optimize, fused, arnold, payload) for hart in (0, 1)
              for optimize in ("0", "2", "") for fused in (0, 1)
-             for payload in ("cpu", "gpu", "noopt", "fused")]
-    for i, (hart, optimize, fused, payload) in enumerate(cases):
+             for arnold in (0, 1)
+             for payload in ("cpu", "gpu", "noopt", "fused", "arnold")]
+    for i, (hart, optimize, fused, arnold, payload) in enumerate(cases):
         work = root / str(i)
         work.mkdir()
         child_env = dict(env, TESTSHADE_HART=str(hart), TESTSHADE_OPT=optimize,
                          TESTSHADE_FUSED=str(fused),
+                         OSL_ARNOLD_COMPAT="ON" if arnold else "OFF",
                          REFERENCE_PAYLOAD=payload)
         result = subprocess.run(
             [sys.executable, str(testsuite / "runtest.py"), str(work)],
             cwd=root, env=child_env, capture_output=True, text=True, timeout=30,
         )
         output = result.stdout + result.stderr
-        wanted = ("cpu" if not hart else "noopt" if optimize == "0"
-                  else "fused" if fused else "gpu")
+        wanted = (("arnold" if arnold else "cpu") if not hart
+                  else "noopt" if optimize == "0" else "fused" if fused else "gpu")
         assert result.returncode == (0 if payload == wanted else 1), output
         if payload == wanted:
             filename = {"cpu": "out.txt", "gpu": "out-hart.txt",
                         "noopt": "out-noopt-hart.txt",
-                        "fused": "out-fused-hart.txt"}[wanted]
+                        "fused": "out-fused-hart.txt",
+                        "arnold": "out-arnold.txt"}[wanted]
             assert "PASS: " in output and filename in output, output
         else:
             assert "NO MATCH for  out.txt" in output, output
@@ -153,4 +158,4 @@ finally:
     else:
         print("Reference-selection failure artifacts retained in", root, flush=True)
 
-print("65 actual runner cases passed: references, source paths and native options")
+print("Actual runner cases passed: references, source paths and native options")

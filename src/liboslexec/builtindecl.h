@@ -382,9 +382,15 @@ DECL(osl_texture_set_subimage, "xXi")
 DECL(osl_texture_set_subimagename, "xXh")
 DECL(osl_texture_set_missingcolor_arena, "xXX")
 DECL(osl_texture_set_missingcolor_alpha, "xXif")
+#if OSL_ARNOLD_COMPAT
+DECL(osl_texture, "iXhhXXffffffiXXXXXXX")
+DECL(osl_texture3d, "iXhhXXXXXXiXXXXXXX")
+DECL(osl_environment, "iXhhXXXXXiXXXXXXX")
+#else
 DECL(osl_texture, "iXhXXffffffiXXXXXXX")
 DECL(osl_texture3d, "iXhXXXXXXiXXXXXXX")
 DECL(osl_environment, "iXhXXXXXiXXXXXXX")
+#endif
 DECL(osl_get_textureinfo, "iXhXhiiiXX")
 DECL(osl_get_textureinfo_st, "iXhXffhiiiXX")
 

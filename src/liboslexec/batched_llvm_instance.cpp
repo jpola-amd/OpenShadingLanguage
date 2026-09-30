@@ -2752,6 +2752,34 @@ BatchedBackendLLVM::build_offsets_of_BatchedTextureOptions(
 void
 BatchedBackendLLVM::run()
 {
+#if OSL_ARNOLD_COMPAT
+    for (int layer = 0; layer < group().nlayers(); ++layer) {
+        const ShaderInstance* instance = group()[layer];
+        for (const auto& op : instance->ops()) {
+            const bool texture = op.opname() == ustring("texture");
+            const bool tex3d   = op.opname() == ustring("texture3d");
+            if (!texture && !tex3d && op.opname() != ustring("environment"))
+                continue;
+            int first = texture ? 4 : 3;
+            if (op.nargs() > first
+                && !instance->argsymbol(op.firstarg() + first)
+                        ->typespec()
+                        .is_string())
+                first += texture ? 4 : tex3d ? 3 : 2;
+            for (int arg = first; arg + 1 < op.nargs(); arg += 2) {
+                const Symbol& token = *instance->argsymbol(op.firstarg() + arg);
+                if (token.is_constant() && token.typespec().is_string()
+                    && token.get_string() == Strings::colorspace) {
+                    shadingcontext()->errorfmt(
+                        "Arnold texture colorspaces are not supported by "
+                        "batched execution ({}:{})",
+                        op.sourcefile(), op.sourceline());
+                    return;
+                }
+            }
+        }
+    }
+#endif
     // We choose to always run a JIT function to allow scalar default values to be
     // broadcast out to GroupData, so do not skip running if a group().does_nothing()
     // TODO: Technically we could run just 1 time, then not bother afterwards

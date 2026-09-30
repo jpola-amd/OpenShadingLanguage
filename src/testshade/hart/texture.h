@@ -127,6 +127,9 @@ texture_wrap_supported(OSL::TextureOpt::Wrap wrap)
 
 OSL_RSOP OSL_HOSTDEVICE bool
 rs_texture(OSL::OpaqueExecContextPtr ec, OSL::ustringhash,
+#if OSL_ARNOLD_COMPAT
+           OSL::ustringhash color_space,
+#endif
            OSL::TextureSystem::TextureHandle* handle,
            OSL::TextureSystem::Perthread*, OSL::TextureOpt& options, float s,
            float t, float dsdx, float dtdx, float dsdy, float dtdy,
@@ -139,6 +142,10 @@ rs_texture(OSL::OpaqueExecContextPtr ec, OSL::ustringhash,
     const auto* state  = render ? render->textures : nullptr;
     const uint64_t id  = reinterpret_cast<uintptr_t>(handle);
     unsigned int error = 0;
+#if OSL_ARNOLD_COMPAT
+    if (color_space != OSL::ustringhash())
+        error |= testshade::HartTextureInvalidOptions;
+#endif
     if (!state || !state->textures || !id || id > state->count)
         error |= testshade::HartTextureInvalidHandle;
     if (!isfinite(s) || !isfinite(t) || !isfinite(dsdx) || !isfinite(dtdx)
