@@ -15,6 +15,8 @@ param(
     [string]$RocmRoot = $env:ROCM_PATH,
     [string]$Architectures = "gfx1201",
     [switch]$Build,
+    [switch]$Install,
+    [switch]$SmokeTest,
     [switch]$Test
 )
 
@@ -62,6 +64,7 @@ if ($DependencyProfile -eq "Arnold") {
     }
     $prefixes += $current
     $argsCmake += @(
+        "-DBUILD_SHARED_LIBS=OFF",
         "-DOSL_ALLOW_OIIO_26=ON",
         "-DOpenImageIO_ROOT=$oiio",
         "-DOpenImageIO_DIR=$oiio\lib\cmake\OpenImageIO",
@@ -81,6 +84,7 @@ if ($DependencyProfile -eq "Arnold") {
     $oiioBin = "$oiio\bin;$ArnoldRoot\bin"
 } else {
     $argsCmake += @(
+        "-DBUILD_SHARED_LIBS=ON",
         "-DOSL_ALLOW_OIIO_26=OFF",
         "-DOpenImageIO_ROOT=",
         "-DOpenImageIO_DIR=$current\share\openimageio",
@@ -98,15 +102,21 @@ try {
     if ($RocmRoot) { $env:HIP_PATH = $RocmRoot }
     & cmake @argsCmake
     if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
-    if ($Build -or $Test) {
+    if ($Build -or $Install -or $SmokeTest -or $Test) {
         & cmake --build $buildDir --config Release --parallel 8
         if ($LASTEXITCODE -ne 0) { throw "OSL build failed" }
     }
-    if ($Test) {
+    if ($SmokeTest -or $Test) {
+        $runtimeTests = "hart-oiio-compat-smoke"
+        if ($Test) { $runtimeTests += "|hart-generated-runtime" }
         & ctest --test-dir $buildDir -C Release --output-on-failure `
-            -R "^(oiio-compat-staging|cmake-hart-discovery|hart-codegen-.*|hart-.*bitcode.*|hart-generated-runtime)$" `
+            -R "^(oiio-compat-.*|cmake-hart-discovery|hart-codegen-.*|hart-.*bitcode.*|$runtimeTests)$" `
             --timeout 600 --no-tests=error
         if ($LASTEXITCODE -ne 0) { throw "OSL tests failed" }
+    }
+    if ($Install) {
+        & cmake --install $buildDir --config Release
+        if ($LASTEXITCODE -ne 0) { throw "OSL installation failed" }
     }
 } finally {
     $env:PATH = $savedPath

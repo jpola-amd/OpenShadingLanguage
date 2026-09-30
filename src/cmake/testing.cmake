@@ -20,6 +20,14 @@ add_custom_target ( CopyFiles ALL DEPENDS "${CMAKE_BINARY_DIR}/testsuite/runtest
 set (OSL_TEST_BIG_TIMEOUT 800 CACHE STRING "Timeout for tests that take a long time")
 
 if (BUILD_TESTING)
+    if (OSL_BUILD_TESTS)
+        add_executable (oiio_compat_test
+            "${PROJECT_SOURCE_DIR}/testsuite/oiio-compat/consumer.cpp")
+        target_link_libraries (oiio_compat_test PRIVATE oslexec oslcomp)
+        target_include_directories (oiio_compat_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+        add_test (NAME oiio-compat-strings COMMAND oiio_compat_test
+            "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")
+    endif ()
     add_test (NAME oiio-compat-staging
         COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/testsuite/oiio-compat/test_prepare.py")

@@ -668,6 +668,13 @@ set (CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #    install_targets (target1 [target2 ...])
 #
 macro (install_targets)
+    foreach (_target ${ARGN})
+        get_target_property (_target_type ${_target} TYPE)
+        if (_target_type STREQUAL "STATIC_LIBRARY")
+            target_compile_definitions (${_target}
+                INTERFACE ${PROJECT_NAME}_STATIC_DEFINE=1)
+        endif ()
+    endforeach ()
     install (TARGETS ${ARGN}
              EXPORT ${PROJ_NAME}_EXPORTED_TARGETS
              RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT user

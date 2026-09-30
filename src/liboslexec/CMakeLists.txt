@@ -139,12 +139,8 @@ if (OSL_BUILD_BATCHED)
         )
 endif()    
 
-if (BUILD_SHARED_LIBS)
-    # oslcomp symbols used in oslexec
-    list(APPEND lib_src
-        ../liboslcomp/symtab.cpp
-        )
-endif ()
+# Keep the execution library usable without linking the shader compiler.
+list (APPEND lib_src ../liboslcomp/symtab.cpp)
 
 file (GLOB exec_headers "*.h")
 file (GLOB compiler_headers "../liboslcomp/*.h")

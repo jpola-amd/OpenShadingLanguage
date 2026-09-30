@@ -1,0 +1,9 @@
+// Copyright Contributors to the Open Shading Language project.
+// SPDX-License-Identifier: BSD-3-Clause
+
+shader oiio_compat_smoke(output color Cout = 0)
+{
+    string space = u < v ? "myspace" : "common";
+    point p = transform(space, "common", point(u, v, 1));
+    Cout = color(p) + color(0, 0, space == "myspace");
+}

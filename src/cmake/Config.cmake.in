@@ -9,6 +9,9 @@ include(CMakeFindDependencyMacro)
 # add here all the find_dependency() whenever switching to config based dependencies
 find_dependency(Imath @Imath_VERSION@)
 find_dependency(OpenImageIO @OpenImageIO_VERSION@ REQUIRED)
+if (NOT @BUILD_SHARED_LIBS@)
+    find_dependency(pugixml)
+endif ()
 
 # Compute the installation prefix relative to this file
 get_filename_component(_IMPORT_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../../" ABSOLUTE)
