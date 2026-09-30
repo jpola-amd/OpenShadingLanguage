@@ -258,8 +258,13 @@ osl_texture_set_subimagename(void* opt, ustringhash_pod subimagename_)
     // TODO: HACK to get this data through in some form, it won't be a valid
     // ustring but the GPU clients can at least convert it back to a hash.
     static_assert(sizeof(ustring) == sizeof(ustringhash), "Sizes must match");
+#    if defined(__HIP_DEVICE_COMPILE__)
+    __builtin_memcpy((void*)(&((TextureOpt*)opt)->subimagename),
+                     &subimagename_hash, sizeof(subimagename_hash));
+#    else
     memcpy((void*)(&((TextureOpt*)opt)->subimagename), &subimagename_hash,
            sizeof(subimagename_hash));
+#    endif
 #endif
 }
 

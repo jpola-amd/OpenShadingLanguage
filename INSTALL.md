@@ -2044,6 +2044,81 @@ OSL's `osl_hart_bitcode` target afterward. A vcpkg reinstall or binary-cache
 restore can overwrite these edits, so reapply the patch after installation;
 use a patched overlay port if the change must be part of the package build.
 
+#### Switching between OIIO 3 and Arnold's customized OIIO 2.6 on Windows
+
+The [HART configuration helper](src/build-scripts/configure-hart.ps1) selects
+one of two isolated Release profiles. Run it from any working directory:
+
+**Experimental status:** The Arnold profile compiles and links, including
+HART bitcode for `gfx1201`, but the current shared-OSL layout does **not** pass
+runtime validation. Arnold's static OIIO is linked independently into the
+OSL DLLs and test programs, producing separate interned-string tables.
+Strings with identical text and hashes then compare unequal across modules.
+This breaks CPU output lookup and renderer-output retention; the latter
+removes required transform code. `hart-codegen-gfx1201` and
+`hart-generated-runtime` currently fail. Linking the real Arnold allocator
+does not unify these tables.
+
+Before renderer use, the integration must provide one OIIO string-state
+owner across participating modules. A standalone static-OSL test build
+would not establish compatibility with an already-built Arnold DLL.
+
+```powershell
+# Existing HIP-patched OIIO 3 installation
+.\src\build-scripts\configure-hart.ps1 -DependencyProfile Current -Build
+
+# Arnold OIIO, without modifying Arnold's installed packages
+.\src\build-scripts\configure-hart.ps1 -DependencyProfile Arnold -Build
+
+# Build and run the focused compiler, bitcode and GPU smoke tests
+.\src\build-scripts\configure-hart.ps1 -DependencyProfile Arnold -Test
+```
+
+`Current` uses `D:\OSL\dependencies\x64-windows`. `Arnold` stages
+`openimageio\autodesk-arnold-2.6.3.2-1-3` and `imath\3.1.10-9` from
+`D:\autodesk\arnold-core\build\windows\dependencies`. It retains the original
+binary libraries and host interfaces, and backports HIP annotations,
+device math/hash paths, SIMD exclusions and device-safe bit casts only in
+the staged headers. The package's CMake version is **2.6.3.0**, despite its
+Arnold package name being **2.6.3.2**.
+
+The profiles use separate `build\hart-current` / `build\hart-arnold` and
+`install\hart-current` / `install\hart-arnold` directories. The latter are
+install destinations; `-Build` does not run installation. Switching is just
+rerunning the helper with the other profile; it never reuses the existing
+`build` or `build\hart-validation` cache. Do not mix their libraries or headers.
+
+Override local paths with `-Dependencies`, `-ArnoldDependencies`, `-ArnoldRoot`,
+`-LLVMRoot`, `-HartRoot` and `-RocmRoot`. `-Architectures` accepts a quoted
+semicolon-separated list, defaulting to `gfx1201`. Existing OIIO 3 headers
+must already have the HIP patch described above. The helper needs Python
+3.9+, CMake and Visual Studio 2022, and temporarily sets the test/runtime
+environment without changing the calling shell's PATH.
+
+Arnold's static OIIO also requires its matching OpenEXR, libdeflate, PNG,
+TIFF, JPEG, zlib and FreeType packages. Their versions are pinned in the
+helper; LLVM, pugixml, Robinmap and the parser tools retain the current
+dependency installation. The staging helper completes OIIO's static CMake
+dependency export. In particular, **AiMalloc/AiFree require the real Arnold
+runtime**, not allocator stubs. `-ArnoldRoot` defaults to
+`D:\autodesk\arnold-core\build\windows\x86_64\icx_dev\dist`, containing
+`lib\ai.lib` and `bin\ai.dll`. The runtime and its dependent DLLs must remain
+available when executing this validation build.
+
+The [staging helper](src/build-scripts/prepare-arnold-deps.py) verifies exact
+input-header SHA256 fingerprints before writing, fails on unknown packages,
+and preserves unchanged staged files' timestamps. It does not rebuild OIIO,
+replace its customized color manager, or change Arnold's original packages.
+Restaging after moving the Arnold runtime refreshes the generated CMake
+paths. Consumers must use this same staged dependency set and its associated
+transitive packages.
+
+Ordinary CMake builds still require OIIO >= 3.0. The explicit
+`OSL_ALLOW_OIIO_26=ON` option enables experimental 2.6.3+ compatibility; lowering
+the minimum alone does not supply HIP header support or Arnold's runtime.
+This dependency experiment does **not** port Arnold's custom OSL interfaces
+or closure allocator, and is not evidence of drop-in renderer ABI compatibility.
+
 ### Keep OSL LLVM and ROCm LLVM separate
 
 OSL still discovers and links its own LLVM/Clang libraries through

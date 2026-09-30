@@ -564,7 +564,6 @@ foreach(batched_target ${BATCHED_TARGET_LIST})
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
             $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-            ${IMATH_INCLUDES}
         PRIVATE
             ${ROBINMAP_INCLUDES}
         )
@@ -586,7 +585,6 @@ target_include_directories (${local_lib}
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
         $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${IMATH_INCLUDES}
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_SOURCE_DIR}/src/liboslcomp"

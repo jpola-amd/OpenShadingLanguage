@@ -47,9 +47,27 @@ set (OSL_USING_IMATH 3)
 
 
 # OpenImageIO
+option (OSL_ALLOW_OIIO_26 "Allow experimental OpenImageIO 2.6 compatibility" OFF)
+set (_osl_oiio_min 3.0)
+if (OSL_ALLOW_OIIO_26)
+    # Arnold's 2.6.3.2 package exports the upstream version as 2.6.3.0.
+    set (_osl_oiio_min 2.6.3)
+endif ()
 checked_find_package (OpenImageIO REQUIRED
-                      VERSION_MIN 3.0
+                      VERSION_MIN ${_osl_oiio_min}
                       DEFINITIONS OIIO_HIDE_FORMAT=1)
+if (OpenImageIO_VERSION VERSION_LESS 3.0)
+    message (WARNING "Building with experimental OpenImageIO 2.6 compatibility")
+    # Do not let normal includes from another dependency's shared prefix
+    # precede these imported headers (which CMake otherwise treats as system).
+    set_property (TARGET OpenImageIO::OpenImageIO OpenImageIO::OpenImageIO_Util
+                         Imath::Imath PROPERTY IMPORTED_NO_SYSTEM TRUE)
+    if (TARGET Imath::ImathConfig)
+        set_property (TARGET Imath::ImathConfig PROPERTY IMPORTED_NO_SYSTEM TRUE)
+    endif ()
+    get_target_property (_osl_imath_includes Imath::Imath INTERFACE_INCLUDE_DIRECTORIES)
+    include_directories (BEFORE ${OpenImageIO_INCLUDES} ${_osl_imath_includes})
+endif ()
 
 checked_find_package (pugixml REQUIRED
                       VERSION_MIN 1.8)
