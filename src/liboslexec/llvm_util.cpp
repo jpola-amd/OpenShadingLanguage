@@ -1823,7 +1823,7 @@ llvm::TargetMachine*
 LLVM_Util::nvptx_target_machine()
 {
     if (m_nvptx_target_machine == nullptr) {
-        llvm::Triple ModuleTriple(module()->getTargetTriple());
+        llvm::Triple ModuleTriple("nvptx64-nvidia-cuda");
         llvm::TargetOptions options;
         options.AllowFPOpFusion = llvm::FPOpFusion::Standard;
         // N.B. 'Standard' only allow fusion of 'blessed' ops (currently just
@@ -4106,11 +4106,22 @@ LLVM_Util::call_function(llvm::Value* func, cspan<llvm::Value*> args)
         llvm::outs() << "\t" << *a << "\n";
 #endif
     //llvm_gen_debug_printf (std::string("start ") + std::string(name));
-    llvm::Value* r = builder().CreateCall(
-        static_cast<llvm::Function*>(func)->getFunctionType(), func,
-        llvm::ArrayRef<llvm::Value*>(args.data(), args.size()));
+    llvm::Value* r
+        = call_function(llvm::cast<llvm::Function>(func)->getFunctionType(),
+                        func, args);
     //llvm_gen_debug_printf (std::string(" end  ") + std::string(name));
     return r;
+}
+
+
+
+llvm::Value*
+LLVM_Util::call_function(llvm::FunctionType* type, llvm::Value* func,
+                         cspan<llvm::Value*> args)
+{
+    return builder().CreateCall(type, func,
+                                llvm::ArrayRef<llvm::Value*>(args.data(),
+                                                             args.size()));
 }
 
 

@@ -5,6 +5,10 @@
 #pragma once
 
 #cmakedefine01 OSL_USE_OPTIX
+#cmakedefine01 OSL_ARNOLD_COMPAT
+#if OSL_ARNOLD_COMPAT
+#    define OSL_ARNOLD_MODIFIED_API
+#endif
 #cmakedefine01 OSL_BUILD_BATCHED
 #define OSL_USE_BATCHED OSL_BUILD_BATCHED
 

@@ -323,6 +323,19 @@ OSL_RSOP OSL_HOSTDEVICE void*
 rs_allocate_closure(OSL::OpaqueExecContextPtr oec, size_t size,
                     size_t alignment);
 
+/// HART renderer-owned component construction, enabled by supports(
+/// "HARTClosureAllocator"). No host callback is transferred to the device.
+/// Return a constructed ClosureComponent followed immediately by its payload.
+/// Its data() must satisfy payload_alignment and provide payload_size bytes.
+/// The renderer sets id and weight (null means unit weight); OSL only writes
+/// registered parameters, never clears the payload. Null indicates failure,
+/// which the renderer must record and report through its device error channel.
+/// Closure add/multiply nodes still use rs_allocate_closure.
+OSL_RSOP OSL_HOSTDEVICE void*
+rs_hart_allocate_closure_component(OSL::OpaqueExecContextPtr oec, int id,
+                                   int payload_size, int payload_alignment,
+                                   const OSL::Color3* weight);
+
 /// Report errors, warnings, printf, and fprintf.
 /// Fmtlib style format specifier is used (vs. printf style)
 /// Arguments are represented as EncodedTypes (encodedtypes.h) and

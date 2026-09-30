@@ -1370,6 +1370,45 @@ check_color_layout(string_view arch, string_view filename)
                     { 0, 8, 16, 24, 28 });
     renderer_record("osl_hart_transform_desc_abi_probe",
                     sizeof(testshade::HartTransformDesc), { 0, 8, 12, 16, 80 });
+    renderer_record("osl_hart_shaderglobals_abi_probe", sizeof(ShaderGlobals),
+                    { offsetof(ShaderGlobals, P),
+                      offsetof(ShaderGlobals, dPdx),
+                      offsetof(ShaderGlobals, dPdy),
+                      offsetof(ShaderGlobals, dPdz),
+                      offsetof(ShaderGlobals, I),
+                      offsetof(ShaderGlobals, dIdx),
+                      offsetof(ShaderGlobals, dIdy),
+                      offsetof(ShaderGlobals, N),
+                      offsetof(ShaderGlobals, Ng),
+                      offsetof(ShaderGlobals, u),
+                      offsetof(ShaderGlobals, dudx),
+                      offsetof(ShaderGlobals, dudy),
+                      offsetof(ShaderGlobals, v),
+                      offsetof(ShaderGlobals, dvdx),
+                      offsetof(ShaderGlobals, dvdy),
+                      offsetof(ShaderGlobals, dPdu),
+                      offsetof(ShaderGlobals, dPdv),
+                      offsetof(ShaderGlobals, time),
+                      offsetof(ShaderGlobals, dtime),
+                      offsetof(ShaderGlobals, dPdtime),
+                      offsetof(ShaderGlobals, Ps),
+                      offsetof(ShaderGlobals, dPsdx),
+                      offsetof(ShaderGlobals, dPsdy),
+                      offsetof(ShaderGlobals, renderstate),
+                      offsetof(ShaderGlobals, tracedata),
+                      offsetof(ShaderGlobals, objdata),
+                      offsetof(ShaderGlobals, context),
+                      offsetof(ShaderGlobals, shadingStateUniform),
+                      offsetof(ShaderGlobals, thread_index),
+                      offsetof(ShaderGlobals, shade_index),
+                      offsetof(ShaderGlobals, renderer),
+                      offsetof(ShaderGlobals, object2common),
+                      offsetof(ShaderGlobals, shader2common),
+                      offsetof(ShaderGlobals, Ci),
+                      offsetof(ShaderGlobals, surfacearea),
+                      offsetof(ShaderGlobals, raytype),
+                      offsetof(ShaderGlobals, flipHandedness),
+                      offsetof(ShaderGlobals, backfacing) });
     for (const char* name : { "osl_hart_transform_abi_probe",
                               "osl_hart_transform_desc_abi_probe" }) {
         const auto* object = module.getNamedGlobal(name);
@@ -1593,6 +1632,10 @@ check_color_layout(string_view arch, string_view filename)
     OIIO_CHECK_ASSERT(
         !shadeops.getFunction("osl_hart_transform_abi_addresses"));
     OIIO_CHECK_ASSERT(!shadeops.getFunction("osl_hart_userdata_abi_addresses"));
+    OIIO_CHECK_ASSERT(
+        !shadeops.getNamedGlobal("osl_hart_shaderglobals_abi_probe"));
+    OIIO_CHECK_ASSERT(
+        !shadeops.getFunction("osl_hart_shaderglobals_abi_address"));
     int setters = 0;
     for (const auto& setter : shadeops) {
         if (setter.getName().find("11ColorSystem14set_colorspace")
@@ -1879,6 +1922,65 @@ check_diagnostic_abi(llvm::Module& module, int optimize,
     }
     for (int calls : seen)
         OIIO_CHECK_EQUAL(calls, 1);
+}
+
+
+
+void
+check_shaderglobals_init(const llvm::Function& init)
+{
+    const struct {
+        size_t offset;
+        size_t size;
+    } expected[] = {
+        { offsetof(ShaderGlobals, dtime), sizeof(float) },
+        { offsetof(ShaderGlobals, dPdtime), sizeof(Vec3) },
+        { offsetof(ShaderGlobals, Ps), 3 * sizeof(Vec3) },
+        { offsetof(ShaderGlobals, object2common), sizeof(TransformationPtr) },
+        { offsetof(ShaderGlobals, shader2common), sizeof(TransformationPtr) },
+        { offsetof(ShaderGlobals, flipHandedness), sizeof(int) },
+        { offsetof(ShaderGlobals, Ci), sizeof(ClosureColor*) },
+        { offsetof(ShaderGlobals, renderer), sizeof(RendererServices*) },
+        { offsetof(ShaderGlobals, shadingStateUniform),
+          sizeof(OpaqueShadingStateUniformPtr) },
+        { offsetof(ShaderGlobals, thread_index), sizeof(int) },
+        { offsetof(ShaderGlobals, shade_index), sizeof(int) },
+    };
+    const auto& layout            = init.getParent()->getDataLayout();
+    int seen[std::size(expected)] = {};
+    for (const auto& block : init)
+        for (const auto& inst : block) {
+            const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst);
+            if (!store)
+                continue;
+            int64_t offset   = 0;
+            const auto* base = llvm::GetPointerBaseWithConstantOffset(
+                store->getPointerOperand(), offset, layout);
+            if (base != init.getArg(0))
+                continue;
+            OIIO_CHECK_ASSERT(OSL_ARNOLD_COMPAT);
+            const auto* value = store->getValueOperand();
+            const auto size
+                = layout.getTypeStoreSize(value->getType()).getFixedValue();
+            size_t field = 0;
+            while (field < std::size(expected)
+                   && (offset != int64_t(expected[field].offset)
+                       || size != expected[field].size))
+                ++field;
+            // Reject writes to context, renderer inputs, or unrelated geometry.
+            OIIO_CHECK_ASSERT(field < std::size(expected));
+            if (field == std::size(expected))
+                continue;
+            ++seen[field];
+            if (offset == int64_t(offsetof(ShaderGlobals, shade_index))) {
+                OIIO_CHECK_EQUAL(value, init.getArg(4));
+            } else {
+                const auto* zero = llvm::dyn_cast<llvm::Constant>(value);
+                OIIO_CHECK_ASSERT(zero && zero->isNullValue());
+            }
+        }
+    for (int writes : seen)
+        OIIO_CHECK_EQUAL(writes, OSL_ARNOLD_COMPAT ? 1 : 0);
 }
 
 
@@ -2182,6 +2284,8 @@ check_module(ShadingSystem& ss, ShaderGroup& group, string_view arch,
     }
     auto* init    = bodies[0];
     auto* entry   = bodies[1];
+    if (init)
+        check_shaderglobals_init(*init);
     int callables = 0;
     for (const auto& function : module) {
         if (function.getName().find("__direct_callable__") == 0)

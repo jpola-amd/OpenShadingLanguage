@@ -4,6 +4,15 @@
 
 #########################################################################
 # Packaging
+if (OSL_DEPENDENCY_MANIFEST)
+    install (FILES "${OSL_DEPENDENCY_MANIFEST}"
+             DESTINATION "${CMAKE_INSTALL_DATADIR}/OSL")
+endif ()
+if (OSL_ARNOLD_COMPAT)
+    install (FILES "${PROJECT_SOURCE_DIR}/docs/dev/ArnoldCompatibility.md"
+                   "${PROJECT_SOURCE_DIR}/docs/dev/Arnold_Profile.md"
+             DESTINATION "${CMAKE_INSTALL_DATADIR}/OSL")
+endif ()
 set (CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set (CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set (CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})

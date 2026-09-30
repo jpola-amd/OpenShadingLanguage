@@ -4000,8 +4000,11 @@ LLVMGEN(llvm_gen_closure)
     Symbol& Id     = *rop.opargsym(op, 1 + weighted);
     OSL_DASSERT(Result.typespec().is_closure());
     OSL_DASSERT(Id.typespec().is_string());
+    const bool custom_closures = rop.shadingsys().renderer()->supports(
+        "HARTClosureAllocator");
     if (rop.use_hart()
-        && (!rop.shadingsys().renderer()->supports("HARTClosures")
+        && ((!custom_closures
+             && !rop.shadingsys().renderer()->supports("HARTClosures"))
             || !Id.is_constant())) {
         rop.shadingcontext()->errorfmt(
             "HART: closure requires HARTClosures and a literal name ({}:{})",
@@ -4024,16 +4027,19 @@ LLVMGEN(llvm_gen_closure)
     // Do not let an already optimized group bypass the host-callback guard.
     // Neither callbacks nor the host renderer may enter the device module.
     if (rop.use_hart()
-        && (clentry->prepare || clentry->setup || clentry->nformal < 0
+        && (clentry->prepare || clentry->setup
+            || (clentry->alloc && !custom_closures) || clentry->nformal < 0
             || clentry->nformal > op.nargs() - 2 - weighted
             || (op.nargs() - 2 - weighted - clentry->nformal) % 2
-            || (!rop.shadingsys().renderer()->supports("HARTClosureParameters")
+            || (!custom_closures
+                && !rop.shadingsys().renderer()->supports(
+                    "HARTClosureParameters")
                 && ((closure_name != ustring("diffuse")
                      && closure_name != ustring("emission"))
                     || op.nargs() != 2 + weighted + clentry->nformal)))) {
         rop.shadingcontext()->errorfmt(
             "HART: unsupported closure '{}', keyword arguments, or "
-            "prepare/setup callbacks ({}:{})",
+            "callbacks (custom allocation requires HARTClosureAllocator) ({}:{})",
             closure_name, op.sourcefile(), op.sourceline());
         return false;
     }
@@ -4045,13 +4051,35 @@ LLVMGEN(llvm_gen_closure)
     llvm::Value* sg_ptr   = rop.sg_void_ptr();
     llvm::Value* id_int   = rop.ll.constant(clentry->id);
     llvm::Value* size_int = rop.ll.constant(clentry->struct_size);
-    llvm::Value* return_ptr
-        = weighted
-              ? rop.ll.call_function("osl_allocate_weighted_closure_component",
-                                     sg_ptr, id_int, size_int,
-                                     rop.llvm_void_ptr(*weight))
-              : rop.ll.call_function("osl_allocate_closure_component", sg_ptr,
-                                     id_int, size_int);
+    llvm::Value* return_ptr;
+    if (clentry->alloc && !rop.use_gpu()) {
+        llvm::Type* types[] = { rop.ll.type_void_ptr(), rop.ll.type_int(),
+                                rop.ll.type_void_ptr() };
+        llvm::Value* args[] = { sg_ptr, id_int,
+                                weighted ? rop.llvm_void_ptr(*weight)
+                                         : rop.ll.void_ptr_null() };
+        return_ptr          = rop.ll.call_function(
+            rop.ll.type_function(rop.ll.type_void_ptr(), types),
+            rop.ll.constant_ptr((void*)clentry->alloc,
+                                rop.ll.type_function_ptr(rop.ll.type_void_ptr(),
+                                                         types)),
+            args);
+    } else if (rop.use_hart() && clentry->alloc) {
+        llvm::Value* args[] = {
+            sg_ptr, id_int, size_int,
+            rop.ll.constant(clentry->params.back().field_size),
+            weighted ? rop.llvm_void_ptr(*weight) : rop.ll.void_ptr_null()
+        };
+        return_ptr = rop.ll.call_function("osl_hart_allocate_closure_component",
+                                          args);
+    } else {
+        return_ptr
+            = weighted ? rop.ll.call_function(
+                             "osl_allocate_weighted_closure_component", sg_ptr,
+                             id_int, size_int, rop.llvm_void_ptr(*weight))
+                       : rop.ll.call_function("osl_allocate_closure_component",
+                                              sg_ptr, id_int, size_int);
+    }
     llvm::Value* comp_void_ptr = return_ptr;
 
     // We need a surrounding "if" so that it's safe for closure allocation to
@@ -4083,8 +4111,12 @@ LLVMGEN(llvm_gen_closure)
             = rop.ll.constant_ptr((void*)clentry->prepare,
                                   rop.llvm_type_prepare_closure_func());
         llvm::Value* args[] = { render_ptr, id_int, mem_void_ptr };
-        rop.ll.call_function(funct_ptr, args);
-    } else {
+        rop.ll.call_function(rop.ll.type_function(rop.ll.type_void(),
+                                                  { rop.ll.type_void_ptr(),
+                                                    rop.ll.type_int(),
+                                                    rop.ll.type_void_ptr() }),
+                             funct_ptr, args);
+    } else if (!clentry->alloc) {
         rop.ll.op_memset(mem_void_ptr, 0, clentry->struct_size, 4 /*align*/);
     }
 
@@ -4128,7 +4160,11 @@ LLVMGEN(llvm_gen_closure)
             = rop.ll.constant_ptr((void*)clentry->setup,
                                   rop.llvm_type_setup_closure_func());
         llvm::Value* args[] = { render_ptr, id_int, mem_void_ptr };
-        rop.ll.call_function(funct_ptr, args);
+        rop.ll.call_function(rop.ll.type_function(rop.ll.type_void(),
+                                                  { rop.ll.type_void_ptr(),
+                                                    rop.ll.type_int(),
+                                                    rop.ll.type_void_ptr() }),
+                             funct_ptr, args);
     }
 
     if (!llvm_gen_keyword_fill(rop, op, clentry, closure_name, mem_void_ptr,

@@ -304,6 +304,8 @@ ShadingContext::Batched<WidthT>::execute_init(
             }
             context().restoreFromJit(restore_state);
         }
+        if (!sgroup.batch_jitted())
+            return false;
         // To handle layers that were not used but still possibly had
         // render outputs, we always generate a run function even for
         // do nothing groups, so that a GroupData on the heap gets built

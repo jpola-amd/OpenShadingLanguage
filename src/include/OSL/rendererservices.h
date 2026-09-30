@@ -78,6 +78,8 @@ public:
     /// Given the name of a 'feature', return whether this RendererServices
     /// supports it. Feature names include:
     ///    "OptiX"
+    ///    "HARTClosureAllocator" (renderer-owned device components; implies
+    ///                            HARTClosures and HARTClosureParameters)
     ///    "build_attribute_getter"
     ///    "build_interpolated_getter"
     ///

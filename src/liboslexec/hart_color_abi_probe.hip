@@ -5,6 +5,7 @@
 #include "../testshade/harttextureparams.h"
 #include "../testshade/render_state.h"
 #include <OSL/hart_diagnostics.h>
+#include <OSL/shaderglobals.h>
 #include "opcolor.h"
 
 // Inspection-only bitcode: external objects keep the genuine target record
@@ -19,6 +20,7 @@ extern OSL_DEVICE testshade::HartUserdataDesc osl_hart_userdata_desc_abi_probe;
 extern OSL_DEVICE RenderContext osl_hart_attributes_abi_probe;
 extern OSL_DEVICE testshade::HartTransformState osl_hart_transform_abi_probe;
 extern OSL_DEVICE testshade::HartTransformDesc osl_hart_transform_desc_abi_probe;
+extern OSL_DEVICE OSL::ShaderGlobals osl_hart_shaderglobals_abi_probe;
 
 OSL_DEVICE const void*
 osl_hart_color_abi_address()
@@ -59,5 +61,13 @@ osl_hart_transform_abi_addresses(const void** addresses)
 {
     addresses[0] = &osl_hart_transform_abi_probe;
     addresses[1] = &osl_hart_transform_desc_abi_probe;
+}
+
+
+
+OSL_DEVICE const void*
+osl_hart_shaderglobals_abi_address()
+{
+    return &osl_hart_shaderglobals_abi_probe;
 }
 }

@@ -14,6 +14,10 @@ param(
     [string]$HartRoot = "D:\hart-repos\hart-radeon-pro\install",
     [string]$RocmRoot = $env:ROCM_PATH,
     [string]$Architectures = "gfx1201",
+    [string]$CudaRoot = "",
+    [string]$OptixRoot = "",
+    [string]$CudaArchitecture = "sm_60",
+    [string]$JpegRoot = "",
     [switch]$Build,
     [switch]$Install,
     [switch]$SmokeTest,
@@ -38,7 +42,7 @@ $argsCmake = @(
     "-DFLEX_EXECUTABLE=$current\bin\win_flex.exe",
     "-DBISON_EXECUTABLE=$current\bin\win_bison.exe",
     "-DUSE_QT=OFF", "-DUSE_PYTHON=OFF", "-DUSE_PARTIO=OFF",
-    "-DOSL_USE_OPTIX=OFF", "-DUSE_LLVM_BITCODE=ON", "-DSTOP_ON_WARNING=OFF",
+    "-DUSE_LLVM_BITCODE=ON", "-DSTOP_ON_WARNING=OFF",
     "-DOSL_USE_HART=ON", "-DHART_TARGET_ARCHITECTURES=$Architectures",
     "-DHART_ROOT=$HartRoot"
 )
@@ -47,6 +51,24 @@ if ($RocmRoot) {
 }
 
 if ($DependencyProfile -eq "Arnold") {
+    $llvmVersion = & "$LLVMRoot\bin\llvm-config.exe" --version
+    if ($LASTEXITCODE -ne 0 -or $llvmVersion -notmatch '^23\.') {
+        throw "The Arnold profile requires OSL LLVM 23; do not mix LLVM 20 archives."
+    }
+    if (-not $CudaRoot) { $CudaRoot = "$Dependencies\cuda\12.9" }
+    if (-not $OptixRoot) { $OptixRoot = "$Dependencies\optix\8.0.0" }
+    if (-not $JpegRoot) { $JpegRoot = "$buildDir\dependencies\jpeg-md" }
+    foreach ($required in @("$CudaRoot\bin\nvcc.exe", "$OptixRoot\include\optix.h",
+                            "$JpegRoot\lib\jpeg-static.lib", "$JpegRoot\include\jpeglib.h")) {
+        if (-not (Test-Path $required)) {
+            throw "Missing $required. Build an isolated /MD JPEG with build-arnold-jpeg.ps1, or select -JpegRoot."
+        }
+    }
+    $jpegDirectives = & "$LLVMRoot\bin\llvm-readobj.exe" --coff-directives "$JpegRoot\lib\jpeg-static.lib"
+    if ($LASTEXITCODE -ne 0 -or ($jpegDirectives -match 'DEFAULTLIB:.*LIBCMT') -or
+        -not ($jpegDirectives -match 'DEFAULTLIB:.*MSVCRT')) {
+        throw "Arnold's OSL profile requires a /MD JPEG archive. Do not suppress LNK4098."
+    }
     $stage = "$buildDir\dependencies"
     & python "$PSScriptRoot\prepare-arnold-deps.py" $ArnoldDependencies $stage `
         --arnold-root $ArnoldRoot
@@ -58,13 +80,32 @@ if ($DependencyProfile -eq "Arnold") {
         "libpng\1.6.55-0", "libtiff\4.7.0-2", "libjpeg-turbo\3.1.0-2",
         "zlib\1.3.1-9", "freetype\2.13.3-2"
     )
-    $prefixes = @($oiio, $imath)
+    $prefixes = @($oiio, $imath, $JpegRoot)
     foreach ($package in $packages) {
         $prefixes += (Resolve-Path "$ArnoldDependencies\$package").Path
     }
     $prefixes += $current
     $argsCmake += @(
         "-DBUILD_SHARED_LIBS=OFF",
+        "-DOSL_ARNOLD_COMPAT=ON",
+        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
+        "-DOSL_USE_OPTIX=ON",
+        "-DCUDA_TOOLKIT_ROOT_DIR:PATH=$CudaRoot",
+        "-DCUDA_TARGET_ARCH=$CudaArchitecture",
+        "-DCUDA_PREFER_STATIC_LIBS=OFF",
+        "-U", "cudart_lib",
+        "-DOptiX_ROOT=$OptixRoot",
+        "-DOPTIX_INCLUDE_DIR=$OptixRoot\include",
+        "-DOSL_EXTRA_NVCC_ARGS=-DFMT_UNICODE=0",
+        "-DLLVM_STATIC=ON",
+        "-U", "_CLANG_*", "-U", "LLVM_LIBRARY", "-U", "LLVM_MCJIT_LIBRARY",
+        "-DLLVM_CONFIG=$LLVMRoot\bin\llvm-config.exe",
+        "-DLLVM_BC_GENERATOR=$LLVMRoot\bin\clang++.exe",
+        "-DLLVM_AS_TOOL=$LLVMRoot\bin\llvm-as.exe",
+        "-DLLVM_LINK_TOOL=$LLVMRoot\bin\llvm-link.exe",
+        "-DLLVM_OPT_TOOL=$LLVMRoot\bin\opt.exe",
+        "-DLLVM_LLC_TOOL=$LLVMRoot\bin\llc.exe",
+        "-DOSL_DEPENDENCY_MANIFEST:FILEPATH=$buildDir\arnold-dependencies.json",
         "-DOSL_ALLOW_OIIO_26=ON",
         "-DOpenImageIO_ROOT=$oiio",
         "-DOpenImageIO_DIR=$oiio\lib\cmake\OpenImageIO",
@@ -75,16 +116,21 @@ if ($DependencyProfile -eq "Arnold") {
         "-DPNG_LIBRARY_RELEASE=$ArnoldDependencies\libpng\1.6.55-0\lib\libpng16_static.lib",
         "-DTIFF_INCLUDE_DIR=$ArnoldDependencies\libtiff\4.7.0-2\include",
         "-DTIFF_LIBRARY_RELEASE=$ArnoldDependencies\libtiff\4.7.0-2\lib\tiff.lib",
-        "-DJPEG_INCLUDE_DIR=$ArnoldDependencies\libjpeg-turbo\3.1.0-2\include",
-        "-DJPEG_LIBRARY_RELEASE=$ArnoldDependencies\libjpeg-turbo\3.1.0-2\lib\jpeg-static.lib",
+        "-DJPEG_INCLUDE_DIR=$JpegRoot\include",
+        "-DJPEG_LIBRARY_RELEASE=$JpegRoot\lib\jpeg-static.lib",
         "-DFREETYPE_INCLUDE_DIR_freetype2=$ArnoldDependencies\freetype\2.13.3-2\include\freetype2",
         "-DFREETYPE_INCLUDE_DIR_ft2build=$ArnoldDependencies\freetype\2.13.3-2\include\freetype2",
         "-DFREETYPE_LIBRARY_RELEASE=$ArnoldDependencies\freetype\2.13.3-2\lib\freetype.lib"
     )
     $oiioBin = "$oiio\bin;$ArnoldRoot\bin"
+    $query = "$buildDir\.cmake\api\v1\query"
+    New-Item -ItemType Directory -Force $query | Out-Null
+    New-Item -ItemType File -Force "$query\codemodel-v2" | Out-Null
 } else {
     $argsCmake += @(
         "-DBUILD_SHARED_LIBS=ON",
+        "-DOSL_ARNOLD_COMPAT=OFF",
+        "-DOSL_USE_OPTIX=OFF",
         "-DOSL_ALLOW_OIIO_26=OFF",
         "-DOpenImageIO_ROOT=",
         "-DOpenImageIO_DIR=$current\share\openimageio",
@@ -102,15 +148,19 @@ try {
     if ($RocmRoot) { $env:HIP_PATH = $RocmRoot }
     & cmake @argsCmake
     if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
+    if ($DependencyProfile -eq "Arnold") {
+        & python "$PSScriptRoot\write-arnold-manifest.py" $buildDir
+        if ($LASTEXITCODE -ne 0) { throw "Dependency manifest generation failed" }
+    }
     if ($Build -or $Install -or $SmokeTest -or $Test) {
         & cmake --build $buildDir --config Release --parallel 8
         if ($LASTEXITCODE -ne 0) { throw "OSL build failed" }
     }
     if ($SmokeTest -or $Test) {
-        $runtimeTests = "hart-oiio-compat-smoke"
-        if ($Test) { $runtimeTests += "|hart-generated-runtime" }
+        $runtimeTests = "hart-oiio-compat-smoke|arnold-compat-cpu"
+        if ($Test) { $runtimeTests += "|hart-generated-runtime|hart-custom-closures-O[02]" }
         & ctest --test-dir $buildDir -C Release --output-on-failure `
-            -R "^(oiio-compat-.*|cmake-hart-discovery|hart-codegen-.*|hart-.*bitcode.*|$runtimeTests)$" `
+            -R "^(oiio-compat-.*|cmake-hart-discovery|cmake-package-export|hart-codegen-.*|hart-.*bitcode.*|$runtimeTests)$" `
             --timeout 600 --no-tests=error
         if ($LASTEXITCODE -ne 0) { throw "OSL tests failed" }
     }

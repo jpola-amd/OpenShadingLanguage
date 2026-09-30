@@ -513,10 +513,12 @@ public:
         // Creation callbacks
         PrepareClosureFunc prepare;
         SetupClosureFunc setup;
+        AllocClosureFunc alloc;
     };
 
     void register_closure(string_view name, int id, const ClosureParam* params,
-                          PrepareClosureFunc prepare, SetupClosureFunc setup);
+                          PrepareClosureFunc prepare, SetupClosureFunc setup,
+                          AllocClosureFunc alloc);
 
     const ClosureEntry* get_entry(ustring name) const;
     const ClosureEntry* get_entry(int id) const
@@ -565,6 +567,7 @@ public:
     bool getattribute(ShaderGroup* group, string_view name, TypeDesc type,
                       void* val);
     bool LoadMemoryCompiledShader(string_view shadername, string_view buffer);
+    bool ShaderLoaded(string_view shadername);
     bool Parameter(ShaderGroup& group, string_view name, TypeDesc t,
                    const void* val, ParamHints props);
     bool Parameter(string_view name, TypeDesc t, const void* val,
@@ -762,7 +765,8 @@ public:
     ustring* alloc_string_constants(size_t n) { return m_string_pool.alloc(n); }
 
     void register_closure(string_view name, int id, const ClosureParam* params,
-                          PrepareClosureFunc prepare, SetupClosureFunc setup);
+                          PrepareClosureFunc prepare, SetupClosureFunc setup,
+                          AllocClosureFunc alloc = nullptr);
     bool query_closure(const char** name, int* id, const ClosureParam** params);
     const ClosureRegistry::ClosureEntry* find_closure(ustring name) const
     {
@@ -2134,6 +2138,7 @@ private:
     int m_globals_write = 0;
     std::vector<ustring> m_textures_needed;
     std::vector<ustring> m_closures_needed;
+    std::vector<ustring> m_shade_ops_needed;
     std::vector<ustring> m_globals_needed;  // semi-deprecated
     std::vector<ustring> m_userdata_names;
     std::vector<TypeDesc> m_userdata_types;

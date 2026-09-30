@@ -690,6 +690,15 @@ install_targets (${local_lib})
 
 # Unit tests
 if (OSL_BUILD_TESTS AND BUILD_TESTING)
+    find_package (Threads REQUIRED)
+    add_executable (arnold_compat_test arnold_compat_test.cpp)
+    target_compile_definitions (arnold_compat_test PRIVATE OSL_ARNOLD_TEST_INTERNAL=1)
+    target_link_libraries (arnold_compat_test PRIVATE oslexec oslcomp Threads::Threads)
+    target_include_directories (arnold_compat_test BEFORE PRIVATE ${OpenImageIO_INCLUDES})
+    set_target_properties (arnold_compat_test PROPERTIES FOLDER "Unit Tests")
+    add_test (NAME arnold-compat-cpu COMMAND arnold_compat_test
+        "${PROJECT_SOURCE_DIR}/src/shaders/stdosl.h")
+
     add_executable (accum_test accum_test.cpp)
     target_link_libraries (accum_test PRIVATE oslexec ${CMAKE_DL_LIBS})
     target_include_directories (accum_test  BEFORE PRIVATE ${OpenImageIO_INCLUDES})

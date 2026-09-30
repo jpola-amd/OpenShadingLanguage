@@ -19,6 +19,7 @@ class RendererServices;
 class ShaderGroup;
 typedef std::shared_ptr<ShaderGroup> ShaderGroupRef;
 struct ClosureParam;
+struct ClosureComponent;
 struct PerThreadInfo;
 class ShadingContext;
 class ShaderSymbol;
@@ -44,6 +45,8 @@ typedef const void* TransformationPtr;
 // Callbacks for closure creation
 typedef void (*PrepareClosureFunc)(RendererServices*, int id, void* data);
 typedef void (*SetupClosureFunc)(RendererServices*, int id, void* data);
+typedef ClosureComponent* (*AllocClosureFunc)(ShaderGlobals*, int id,
+                                              const Color3* w);
 
 
 namespace pvt {
@@ -507,6 +510,10 @@ public:
     ///                                needed, whose names can't be known
     ///                                without actually running the shader.
     ///   int num_closures_needed    The number of named closures needed.
+    ///   int num_shade_ops_needed   Number of distinct retained shade opcodes.
+    ///   ptr shade_ops_needed      Pointer to an OSL::ustring array owned by
+    ///                             the optimized group. Valid until the group
+    ///                             is destroyed; null when the count is zero.
     ///   ptr closures_needed        Retrieves a pointer to the ustring array
     ///                                containing all closures known to be
     ///                                needed.
@@ -641,6 +648,10 @@ public:
     /// Load compiled shader (oso) from a memory buffer, overriding
     /// shader lookups in the shader search path
     bool LoadMemoryCompiledShader(string_view shadername, string_view buffer);
+
+    /// Test for a shader cache entry, without loading it. As in Autodesk OSL,
+    /// a cached failed load also counts as present.
+    bool ShaderLoaded(string_view shadername);
 
     // The basic sequence for declaring a shader group looks like this:
     // ShadingSystem *ss = ...;
@@ -1080,6 +1091,14 @@ public:
 
     void register_closure(string_view name, int id, const ClosureParam* params,
                           PrepareClosureFunc prepare, SetupClosureFunc setup);
+
+    /// Register a renderer-owned component allocator. A null weight means
+    /// unit weight. The allocator constructs the component and its payload;
+    /// OSL writes only the supplied formal and keyword parameters to data().
+    /// The allocation must keep both the component and payload aligned and
+    /// alive until the renderer has finished consuming the closure tree.
+    void register_closure(string_view name, int id, const ClosureParam* params,
+                          AllocClosureFunc alloc);
 
     /// Query either by name or id an existing closure. If name is non
     /// NULL it will use it for the search, otherwise id would be used

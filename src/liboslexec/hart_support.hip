@@ -6,6 +6,16 @@
 #include <amd/hart/hart_device.h>
 
 #include <OSL/oslconfig.h>
+#include <OSL/rs_free_function.h>
+
+extern "C" __device__ void*
+osl_hart_allocate_closure_component(void* ec, int id, int size, int alignment,
+                                    const OSL::Color3* weight)
+{
+    if (weight && weight->x == 0.0f && weight->y == 0.0f && weight->z == 0.0f)
+        return nullptr;
+    return rs_hart_allocate_closure_component(ec, id, size, alignment, weight);
+}
 
 extern "C" __device__ bool
 rs_hart_get_userdata(void* ec, int shade_index, OSL::ustringhash_pod name,

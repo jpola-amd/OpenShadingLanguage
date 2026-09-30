@@ -187,6 +187,16 @@ if (OSL_USE_OPTIX)
         endif ()
         # Is it really a good idea to completely reset CUDA_LIBRARIES here?
         set(CUDA_LIBRARIES ${cudart_lib})
+        if (WIN32 AND NOT cudart_lib MATCHES "cudart_static")
+            file (GLOB _osl_cuda_runtime_files
+                  "${CUDA_TOOLKIT_ROOT_DIR}/bin/cudart64_*.dll")
+            if (NOT _osl_cuda_runtime_files)
+                message (FATAL_ERROR
+                    "Missing CUDA runtime DLL in ${CUDA_TOOLKIT_ROOT_DIR}/bin")
+            endif ()
+            install (FILES ${_osl_cuda_runtime_files}
+                     DESTINATION "${CMAKE_INSTALL_BINDIR}")
+        endif ()
         if (NOT WIN32)
             set(CUDA_EXTRA_LIBS ${CUDA_EXTRA_LIBS} dl rt)
         endif ()
@@ -209,6 +219,12 @@ if (OSL_USE_OPTIX)
         ## XXX: Should -DPTX_PATH point to (or include) CMAKE_CURRENT_BINARY_DIR so tests can run before installation ?
         target_compile_definitions (${TARGET} PRIVATE PTX_PATH="${OSL_PTX_FULL_INSTALL_DIR}")
         target_link_libraries (${TARGET} PRIVATE ${CUDA_LIBRARIES} ${CUDA_EXTRA_LIBS} ${OPTIX_LIBRARIES} ${OPTIX_EXTRA_LIBS})
+        if (_osl_cuda_runtime_files)
+            add_custom_command (TARGET ${TARGET} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    ${_osl_cuda_runtime_files} "$<TARGET_FILE_DIR:${TARGET}>"
+                VERBATIM)
+        endif ()
     endfunction()
 else ()
     message(STATUS "CUDA/OptiX support disabled")

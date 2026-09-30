@@ -3279,6 +3279,7 @@ RuntimeOptimizer::run()
     m_unknown_attributes_needed = false;
     m_textures_needed.clear();
     m_closures_needed.clear();
+    m_shade_ops_needed.clear();
     m_globals_read  = 0;
     m_globals_write = 0;
     m_globals_needed.clear();
@@ -3364,6 +3365,7 @@ RuntimeOptimizer::run()
                 ++new_deriv_syms;
         }
         for (auto&& op : inst()->ops()) {
+            m_shade_ops_needed.insert(op.opname());
             const OpDescriptor* opd = shadingsys().op_descriptor(op.opname());
             if (!opd)
                 continue;

@@ -499,6 +499,7 @@ private:
     std::vector<ustring> m_local_messages_sent;  ///< Messages set in this inst
     std::set<ustring> m_textures_needed;
     std::set<ustring> m_closures_needed;
+    std::set<ustring> m_shade_ops_needed;
     std::set<ustring> m_globals_needed;
     int m_globals_read  = 0;
     int m_globals_write = 0;

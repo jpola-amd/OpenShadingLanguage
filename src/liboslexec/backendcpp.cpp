@@ -2270,6 +2270,11 @@ cpp_gen_closure(BackendCpp& rop, int opnum)
         return false;
     }
 
+    if (clentry->alloc) {
+        rop.shadingcontext()->errorfmt(
+            "Renderer-owned closure allocation is not supported by the C++ backend");
+        return false;
+    }
     std::string comp = fmtformat("___clcomp{}", opnum);
     std::string mem  = fmtformat("___clmem{}", opnum);
     if (weighted)

@@ -477,7 +477,10 @@ ShaderInstance::validate_hart() const
 {
     // Check the original code before constant folding can execute host-only
     // operations or hide unsupported paths in a particular specialization.
-    const bool closures = shadingsys().renderer()->supports("HARTClosures");
+    const bool custom_closures = shadingsys().renderer()->supports(
+        "HARTClosureAllocator");
+    const bool closures = custom_closures
+                          || shadingsys().renderer()->supports("HARTClosures");
     const bool bounds   = shadingsys().renderer()->supports("HARTArrayBounds");
     const bool geometry = shadingsys().renderer()->supports("HARTGeometry");
     auto resolved_array_length = [&](int index) {
@@ -778,8 +781,9 @@ ShaderInstance::validate_hart() const
             return fail("closure names must be literal strings");
         const ustring name    = id.get_string();
         const bool diffuse    = name == ustring("diffuse");
-        const bool parameters = shadingsys().renderer()->supports(
-            "HARTClosureParameters");
+        const bool parameters = custom_closures
+                                || shadingsys().renderer()->supports(
+                                    "HARTClosureParameters");
         if (!parameters && !diffuse && name != ustring("emission"))
             return fail(fmtformat("unsupported closure '{}'", name));
         const auto* entry = shadingsys().find_closure(name);
@@ -788,6 +792,10 @@ ShaderInstance::validate_hart() const
         if (entry->prepare || entry->setup)
             return fail(fmtformat(
                 "closure '{}' prepare/setup callbacks are unsupported", name));
+        if (entry->alloc && !custom_closures)
+            return fail(fmtformat(
+                "closure '{}' requires HARTClosureAllocator; host allocators cannot run on the device",
+                name));
         if (parameters) {
             auto bad_layout = [&]() {
                 return fail(
@@ -804,12 +812,13 @@ ShaderInstance::validate_hart() const
             const int alignment = finish.field_size;
             if (finish.type != TypeDesc() || finish.key
                 || finish.offset != entry->struct_size || alignment <= 0
-                || alignment > 16 || (alignment & (alignment - 1))
+                || (!entry->alloc && alignment > 16)
+                || (alignment & (alignment - 1))
                 || entry->struct_size % alignment)
                 return bad_layout();
             const int count = entry->nformal + entry->nkeyword;
             for (int i = 0; i < count; ++i) {
-                const auto& p = entry->params[i];
+                const auto& p          = entry->params[i];
                 const TypeDesc element = p.type.elementtype();
                 const bool numeric
                     = element == TypeInt || element == TypeFloat

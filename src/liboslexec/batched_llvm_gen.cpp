@@ -7359,6 +7359,11 @@ LLVMGEN(llvm_gen_closure)
     }
 
     OSL_DASSERT(op.nargs() >= (2 + weighted + clentry->nformal));
+    if (clentry->alloc) {
+        rop.shadingcontext()->errorfmt(
+            "Renderer-owned closure allocation is not supported by batched execution");
+        return false;
+    }
     OSL_DASSERT(
         !Result.is_uniform());  // we don't optimize for when closures happen to be uniform
 
@@ -7444,7 +7449,11 @@ LLVMGEN(llvm_gen_closure)
                 = rop.ll.constant_ptr((void*)clentry->prepare,
                                       rop.llvm_type_prepare_closure_func());
             llvm::Value* args[] = { render_ptr, id_int, mem_void_ptr };
-            rop.ll.call_function(funct_ptr, args);
+            rop.ll.call_function(
+                rop.ll.type_function(rop.ll.type_void(),
+                                     { rop.ll.type_void_ptr(), rop.ll.type_int(),
+                                       rop.ll.type_void_ptr() }),
+                funct_ptr, args);
         } else {
             rop.ll.op_memset(mem_void_ptr, 0, clentry->struct_size,
                              4 /*align*/);
@@ -7528,7 +7537,11 @@ LLVMGEN(llvm_gen_closure)
                 = rop.ll.constant_ptr((void*)clentry->setup,
                                       rop.llvm_type_setup_closure_func());
             llvm::Value* args[] = { render_ptr, id_int, mem_void_ptr };
-            rop.ll.call_function(funct_ptr, args);
+            rop.ll.call_function(
+                rop.ll.type_function(rop.ll.type_void(),
+                                     { rop.ll.type_void_ptr(), rop.ll.type_int(),
+                                       rop.ll.type_void_ptr() }),
+                funct_ptr, args);
         }
 
         llvm_gen_keyword_fill(rop, op, clentry, closure_name, mem_void_ptr,

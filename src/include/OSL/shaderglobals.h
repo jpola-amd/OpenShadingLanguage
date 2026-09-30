@@ -36,6 +36,13 @@ typedef const void* OpaqueShadingStateUniformPtr;
 ///
 /// All points, vectors and normals are given in "common" space.
 ///
+/// With OSL_ARNOLD_COMPAT, the layout remains unchanged. Generated group
+/// initialization zeros dtime, dPdtime, Ps and its derivatives, object2common,
+/// shader2common, and flipHandedness, which the Arnold caller does not supply.
+/// GPU group initialization also clears Ci, renderer, shadingStateUniform,
+/// and thread_index, and sets shade_index from the callable argument. It
+/// preserves the renderer's context, renderstate, tracedata, and objdata.
+///
 
 /// We are working towards making ShaderGlobals a private implementation
 /// detail.  Preference is given to utilizing an Opaque Execution Context

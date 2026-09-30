@@ -68,14 +68,19 @@ execute_shader(ShaderGlobalsType& sg, const int shader_id,
     sg.context = &shading_context;
 
     // Run the OSL callable
+    const unsigned int shaderIdx = shader_id + 0u;
+#if OSL_ARNOLD_COMPAT
+    optixDirectCall<void, ShaderGlobalsType*, void*, void*, void*, int>(
+        shaderIdx, &sg, nullptr, nullptr, nullptr, 0);
+#else
     void* interactive_ptr = reinterpret_cast<void**>(
         render_params.interactive_params)[shader_id];
-    const unsigned int shaderIdx = shader_id + 0u;
     optixDirectCall<void, ShaderGlobalsType*, void*, void*, void*, int, void*>(
         shaderIdx, &sg /*shaderglobals_ptr*/, nullptr /*groupdata_ptr*/,
         nullptr /*userdata_base_ptr*/, nullptr /*output_base_ptr*/,
         0 /*shadeindex - unused*/, interactive_ptr /*interactive_params_ptr*/
     );
+#endif
 }
 
 

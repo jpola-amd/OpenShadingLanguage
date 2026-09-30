@@ -842,6 +842,9 @@ public:
     /// arg list.  Return an llvm::Value* corresponding to the return
     /// value of the function, if any.
     llvm::Value* call_function(llvm::Value* func, cspan<llvm::Value*> args);
+    /// Indirect calls require an explicit signature with opaque pointers.
+    llvm::Value* call_function(llvm::FunctionType* type, llvm::Value* func,
+                               cspan<llvm::Value*> args);
     /// Generate code for a call to the named function with the given arg
     /// list.  Return an llvm::Value* corresponding to the return value of
     /// the function, if any.

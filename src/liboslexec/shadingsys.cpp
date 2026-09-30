@@ -675,6 +675,28 @@ ShadingSystem::register_closure(string_view name, int id,
 
 
 
+void
+ShadingSystem::register_closure(string_view name, int id,
+                                const ClosureParam* params,
+                                AllocClosureFunc alloc)
+{
+    if (!alloc) {
+        m_impl->errorfmt("Closure '{}' requires a non-null allocator", name);
+        return;
+    }
+    m_impl->register_closure(name, id, params, nullptr, nullptr, alloc);
+}
+
+
+
+bool
+ShadingSystem::ShaderLoaded(string_view shadername)
+{
+    return m_impl->ShaderLoaded(shadername);
+}
+
+
+
 bool
 ShadingSystem::query_closure(const char** name, int* id,
                              const ClosureParam** params)
@@ -1509,8 +1531,13 @@ void
 ShadingSystemImpl::register_closure(string_view name, int id,
                                     const ClosureParam* params,
                                     PrepareClosureFunc prepare,
-                                    SetupClosureFunc setup)
+                                    SetupClosureFunc setup,
+                                    AllocClosureFunc alloc)
 {
+    if (id < 0 || name.empty() || (alloc && !params)) {
+        errorfmt("Invalid registration for closure '{}' (id {})", name, id);
+        return;
+    }
     for (int i = 0; params && params[i].type != TypeDesc(); ++i) {
         if (params[i].key == NULL
             && params[i].type.size() != (size_t)params[i].field_size) {
@@ -1520,7 +1547,8 @@ ShadingSystemImpl::register_closure(string_view name, int id,
             return;
         }
     }
-    m_closure_registry.register_closure(name, id, params, prepare, setup);
+    m_closure_registry.register_closure(name, id, params, prepare, setup,
+                                        alloc);
 }
 
 
@@ -2431,6 +2459,20 @@ ShadingSystemImpl::getattribute(ShaderGroup* group, string_view name,
         return true;
     }
 
+    if (name == "num_shade_ops_needed" && type == TypeInt) {
+        if (!group->optimized())
+            return false;
+        *(int*)val = (int)group->m_shade_ops_needed.size();
+        return true;
+    }
+    if (name == "shade_ops_needed" && type == TypeDesc::PTR) {
+        if (!group->optimized())
+            return false;
+        *(ustring**)val = group->m_shade_ops_needed.empty()
+                              ? nullptr
+                              : group->m_shade_ops_needed.data();
+        return true;
+    }
     if (name == "num_closures_needed" && type == TypeInt) {
         *(int*)val = (int)group->m_closures_needed.size();
         return true;
@@ -4185,6 +4227,8 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         group.m_unknown_closures_needed = rop.m_unknown_closures_needed;
         for (auto&& f : rop.m_closures_needed)
             group.m_closures_needed.push_back(f);
+        group.m_shade_ops_needed.assign(rop.m_shade_ops_needed.begin(),
+                                        rop.m_shade_ops_needed.end());
         for (auto&& f : rop.m_globals_needed)
             group.m_globals_needed.push_back(f);
         group.m_globals_read  = rop.m_globals_read;
@@ -4212,8 +4256,14 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         }
         group.m_optimized = true;
 
-        if (use_optix_cache())
-            group.generate_optix_cache_key(rop.serialize());
+        if (use_optix_cache()) {
+            std::string cache_source = rop.serialize();
+#if OSL_ARNOLD_COMPAT
+            // Never reuse six-argument PTX for the five-argument profile.
+            cache_source += "\nOSL_ARNOLD_COMPAT optix5 v1";
+#endif
+            group.generate_optix_cache_key(cache_source);
+        }
 
         spin_lock stat_lock(m_stat_mutex);
         if (!need_jit) {
@@ -4225,7 +4275,34 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         m_stat_specialization_time += rop.m_stat_specialization_time;
     }
 
+#if OSL_ARNOLD_COMPAT
+    if (use_optix() && group.m_interactive_arena_size != 0) {
+        errorfmt("OSL_ARNOLD_COMPAT OptiX group '{}' requires interactive "
+                 "parameters, which are unsupported by the five-argument "
+                 "callable ABI",
+                 group.name());
+        if (ctx_allocated) {
+            release_context(ctx);
+            destroy_thread_info(thread_info);
+        }
+        return;
+    }
+#endif
+
     if (debug_output_cpp() >= 1) {
+        for (ustring name : group.m_closures_needed) {
+            const auto* entry = find_closure(name);
+            if (entry && entry->alloc) {
+                errorfmt("Renderer-owned closure '{}' is not supported by "
+                         "the C++ backend",
+                         name);
+                if (ctx_allocated) {
+                    release_context(ctx);
+                    destroy_thread_info(thread_info);
+                }
+                return;
+            }
+        }
         BackendCpp cpper(*this, group, ctx);
         cpper.run();
         // Include the group's unique id: a renderer may give multiple groups
@@ -4362,6 +4439,20 @@ ShadingSystemImpl::Batched<WidthT>::jit_group(ShaderGroup& group,
 
     if (!group.optimized())
         m_ssi.optimize_group(group, ctx, false /*do_jit*/);
+
+    for (ustring name : group.m_closures_needed) {
+        const auto* entry = m_ssi.find_closure(name);
+        if (entry && entry->alloc) {
+            m_ssi.errorfmt("Renderer-owned closure '{}' is not supported by "
+                           "batched execution",
+                           name);
+            if (ctx_allocated) {
+                m_ssi.release_context(ctx);
+                m_ssi.destroy_thread_info(thread_info);
+            }
+            return;
+        }
+    }
 
     OIIO::Timer timer;
     // TODO: we could have separate mutexes for jit vs. batched_jit
@@ -4843,7 +4934,8 @@ void
 ClosureRegistry::register_closure(string_view name, int id,
                                   const ClosureParam* params,
                                   PrepareClosureFunc prepare,
-                                  SetupClosureFunc setup)
+                                  SetupClosureFunc setup,
+                                  AllocClosureFunc alloc)
 {
     if (m_closure_table.size() <= (size_t)id)
         m_closure_table.resize(id + 1);
@@ -4853,6 +4945,7 @@ ClosureRegistry::register_closure(string_view name, int id,
     entry.nformal       = 0;
     entry.nkeyword      = 0;
     entry.struct_size   = 0; /* params could be NULL */
+    entry.params.clear();
     for (int i = 0; params; ++i) {
         /* always push so the end marker is there */
         entry.params.push_back(params[i]);
@@ -4862,7 +4955,7 @@ ClosureRegistry::register_closure(string_view name, int id,
              * make sure that the closure struct doesn't want more alignment than ClosureComponent
              * because we will be allocating the real struct inside it. */
             OSL_ASSERT_MSG(
-                params[i].field_size <= int(alignof(ClosureComponent)),
+                alloc || params[i].field_size <= int(alignof(ClosureComponent)),
                 "Closure %s wants alignment of %d which is larger than that of ClosureComponent",
                 std::string(name).c_str(), params[i].field_size);
             break;
@@ -4874,6 +4967,7 @@ ClosureRegistry::register_closure(string_view name, int id,
     }
     entry.prepare                       = prepare;
     entry.setup                         = setup;
+    entry.alloc                         = alloc;
     m_closure_name_to_id[ustring(name)] = id;
 }
 

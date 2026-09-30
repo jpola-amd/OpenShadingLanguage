@@ -21,6 +21,8 @@
 #include "oslexec_pvt.h"
 #include "backendllvm.h"
 
+#include <llvm/Target/TargetMachine.h>
+
 #if OSL_USE_HART
 #    include "hart_bitcode.h"
 #    include <llvm/ADT/StringExtras.h>
@@ -1404,6 +1406,30 @@ BackendLLVM::build_llvm_init()
     }
 #endif
 
+#if OSL_ARNOLD_COMPAT
+    // Arnold omits these fields because its former ShaderGlobals was compact.
+    // Initialize the full upstream layout at execution, not during construction.
+    auto zero_global = [&](const char* name) {
+        ustring field(name);
+        int index  = ShaderGlobalNameToIndex(field);
+        auto* type = ll.type_struct_field_at_index(llvm_type_sg(), index);
+        ll.op_store(llvm::Constant::getNullValue(type),
+                    llvm_global_symbol_ptr(field));
+    };
+    for (const char* name : { "dtime", "dPdtime", "Ps", "object2common",
+                              "shader2common", "flipHandedness" })
+        zero_global(name);  // Ps includes both position derivatives.
+    if (use_optix() || use_hart()) {
+        // GPU callers bypass execute(), but supply their own context and
+        // renderstate. Never replace those renderer-owned pointers.
+        for (const char* name :
+             { "Ci", "renderer", "shadingStateUniform", "thread_index" })
+            zero_global(name);
+        ll.op_store(m_llvm_shadeindex,
+                    llvm_global_symbol_ptr(ustring("shade_index")));
+    }
+#endif
+
     // Group init clears all the "layer_run" and "userdata_initialized" flags.
     if (m_num_used_layers > 1) {
         int sz = (m_num_used_layers + 3) & (~3);  // round up to 32 bits
@@ -1471,6 +1497,15 @@ std::vector<llvm::Function*>
 BackendLLVM::build_llvm_gpu_callables()
 {
     std::vector<llvm::Function*> funcs;
+    const bool arnold_optix   = OSL_ARNOLD_COMPAT && use_optix();
+    llvm::Type* param_types[] = {
+        llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+        ll.type_void_ptr(),  // userdata_base_ptr
+        ll.type_void_ptr(),  // output_base_ptr
+        ll.type_int(),
+        ll.type_void_ptr(),  // interactive params
+    };
+    cspan<llvm::Type*> exported_params(param_types, arnold_optix ? 5 : 6);
 
     // Build a callable for the entry layer function
     {
@@ -1478,26 +1513,31 @@ BackendLLVM::build_llvm_gpu_callables()
         ShaderInstance* inst      = group()[nlayers - 1];
         std::string dc_entry_name = layer_function_name(group(), *inst, true);
 
-        ll.current_function(
-            ll.make_function(dc_entry_name, false,
-                             ll.type_void(),  // return type
-                             {
-                                 llvm_type_sg_ptr(),
-                                 llvm_type_groupdata_ptr(),
-                                 ll.type_void_ptr(),  // userdata_base_ptr
-                                 ll.type_void_ptr(),  // output_base_ptr
-                                 ll.type_int(),
-                                 ll.type_void_ptr(),  // interactive params
-                             }));
+        ll.current_function(ll.make_function(dc_entry_name, false,
+                                             ll.type_void(),  // return type
+                                             exported_params));
 
         llvm::BasicBlock* entry_bb = ll.new_basic_block(dc_entry_name);
         ll.new_builder(entry_bb);
 
         llvm::Value* args[] = {
-            ll.current_function_arg(0), ll.current_function_arg(1),
-            ll.current_function_arg(2), ll.current_function_arg(3),
-            ll.current_function_arg(4), ll.current_function_arg(5),
+            ll.current_function_arg(0),
+            ll.current_function_arg(1),
+            ll.current_function_arg(2),
+            ll.current_function_arg(3),
+            ll.current_function_arg(4),
+            arnold_optix ? ll.constant_ptr(nullptr)
+                         : ll.current_function_arg(5),
         };
+
+#if OSL_ARNOLD_COMPAT
+        // Arnold calls only the OptiX entry, without a separate init. Keep
+        // its supplied Groupdata: the fused callable may allocate its own.
+        if (use_optix()) {
+            std::string init_name = init_function_name(shadingsys(), group());
+            ll.call_function(init_name.c_str(), args);
+        }
+#endif
 
         llvm_call_group_entries(args);
 
@@ -1512,25 +1552,21 @@ BackendLLVM::build_llvm_gpu_callables()
         std::string dc_init_name = init_function_name(shadingsys(), group(),
                                                       true);
 
-        ll.current_function(
-            ll.make_function(dc_init_name, false,
-                             ll.type_void(),  // return type
-                             {
-                                 llvm_type_sg_ptr(),
-                                 llvm_type_groupdata_ptr(),
-                                 ll.type_void_ptr(),  // userdata_base_ptr
-                                 ll.type_void_ptr(),  // output_base_ptr
-                                 ll.type_int(),
-                                 ll.type_void_ptr(),  // interactive params
-                             }));
+        ll.current_function(ll.make_function(dc_init_name, false,
+                                             ll.type_void(),  // return type
+                                             exported_params));
 
         llvm::BasicBlock* init_bb = ll.new_basic_block(dc_init_name);
         ll.new_builder(init_bb);
 
         llvm::Value* args[] = {
-            ll.current_function_arg(0), ll.current_function_arg(1),
-            ll.current_function_arg(2), ll.current_function_arg(3),
-            ll.current_function_arg(4), ll.current_function_arg(5),
+            ll.current_function_arg(0),
+            ll.current_function_arg(1),
+            ll.current_function_arg(2),
+            ll.current_function_arg(3),
+            ll.current_function_arg(4),
+            arnold_optix ? ll.constant_ptr(nullptr)
+                         : ll.current_function_arg(5),
         };
 
         // Call init
@@ -1562,20 +1598,21 @@ BackendLLVM::build_llvm_gpu_callables()
 llvm::Function*
 BackendLLVM::build_llvm_fused_callable(void)
 {
-    std::string fused_name = fused_function_name(group());
+    std::string fused_name    = fused_function_name(group());
+    const bool arnold_optix   = OSL_ARNOLD_COMPAT && use_optix();
+    llvm::Type* param_types[] = {
+        llvm_type_sg_ptr(), llvm_type_groupdata_ptr(),
+        ll.type_void_ptr(),  // userdata_base_ptr
+        ll.type_void_ptr(),  // output_base_ptr
+        ll.type_int(),
+        ll.type_void_ptr(),  // interactive params
+    };
 
     // Start building the fused function
     ll.current_function(
         ll.make_function(fused_name, false,
                          ll.type_void(),  // return type
-                         {
-                             llvm_type_sg_ptr(),
-                             llvm_type_groupdata_ptr(),
-                             ll.type_void_ptr(),  // userdata_base_ptr
-                             ll.type_void_ptr(),  // output_base_ptr
-                             ll.type_int(),
-                             ll.type_void_ptr(),  // interactive params
-                         }));
+                         cspan<llvm::Type*>(param_types, arnold_optix ? 5 : 6)));
 
     llvm::BasicBlock* entry_bb = ll.new_basic_block(fused_name);
     ll.new_builder(entry_bb);
@@ -1604,9 +1641,12 @@ BackendLLVM::build_llvm_fused_callable(void)
     }
 
     llvm::Value* args[] = {
-        ll.current_function_arg(0), llvm_groupdata_ptr,
-        ll.current_function_arg(2), ll.current_function_arg(3),
-        ll.current_function_arg(4), ll.current_function_arg(5),
+        ll.current_function_arg(0),
+        llvm_groupdata_ptr,
+        ll.current_function_arg(2),
+        ll.current_function_arg(3),
+        ll.current_function_arg(4),
+        arnold_optix ? ll.constant_ptr(nullptr) : ll.current_function_arg(5),
     };
 
     // Call init
@@ -2371,7 +2411,7 @@ BackendLLVM::run()
             // The target triple and data layout used here are those specified
             // for NVPTX (https://www.llvm.org/docs/NVPTXUsage.html#triples).
             ll.module()->setDataLayout(
-                "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64");
+                ll.nvptx_target_machine()->createDataLayout());
 #        if OSL_LLVM_VERSION < 210
             ll.module()->setTargetTriple("nvptx64-nvidia-cuda");
 #        else
@@ -2476,7 +2516,7 @@ BackendLLVM::run()
                     err);
 
             shadeops_module->setDataLayout(
-                "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64");
+                ll.nvptx_target_machine()->createDataLayout());
 #        if OSL_LLVM_VERSION < 210
             shadeops_module->setTargetTriple("nvptx64-nvidia-cuda");
 #        else
@@ -2508,7 +2548,7 @@ BackendLLVM::run()
                         err);
 
                 rend_lib_module->setDataLayout(
-                    "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64");
+                    ll.nvptx_target_machine()->createDataLayout());
 #        if OSL_LLVM_VERSION < 210
                 rend_lib_module->setTargetTriple("nvptx64-nvidia-cuda");
 #        else
@@ -2537,7 +2577,7 @@ BackendLLVM::run()
             ll.module()->setTargetTriple(llvm::Triple("nvptx64-nvidia-cuda"));
 #    endif
             ll.module()->setDataLayout(
-                "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64");
+                ll.nvptx_target_machine()->createDataLayout());
 
             // Tag each function as an OSL library function to help with
             // inlining and optimization after codegen.

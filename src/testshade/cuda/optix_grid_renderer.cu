@@ -80,7 +80,9 @@ __raygen__()
     uint3 launch_dims  = optixGetLaunchDimensions();
     uint3 launch_index = optixGetLaunchIndex();
 
+#if !OSL_ARNOLD_COMPAT
     auto sbtdata = reinterpret_cast<GenericData*>(optixGetSbtDataPointer());
+#endif
 
     const float invw      = render_params.invw;
     const float invh      = render_params.invh;
@@ -144,6 +146,12 @@ __raygen__()
     sg.renderstate           = &renderState;
 
     // Run the OSL group and init functions
+#if OSL_ARNOLD_COMPAT
+    // The profile's entry wrapper includes init, just like the fused wrapper.
+    const unsigned int entry_index = render_params.fused_callable ? 0u : 1u;
+    optixDirectCall<void, OSL_CUDA::ShaderGlobals*, void*, void*, void*, int>(
+        entry_index, &sg, params, nullptr, nullptr, 0);
+#else
     if (render_params.fused_callable)
         // call osl_init_func
         optixDirectCall<void, OSL_CUDA::ShaderGlobals*, void*, void*, void*,
@@ -171,6 +179,7 @@ __raygen__()
                                     0 /*shadeindex - unused*/,
                                     sbtdata->data /*interactive_params_ptr*/);
     }
+#endif
 
     float* f_output      = (float*)params;
     int pixel            = launch_index.y * launch_dims.x + launch_index.x;

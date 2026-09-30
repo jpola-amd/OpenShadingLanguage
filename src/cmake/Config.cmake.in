@@ -6,11 +6,25 @@
 
 include(CMakeFindDependencyMacro)
 
+set (OSL_USE_HART @OSL_USE_HART@)
+set (OSL_USE_OPTIX @OSL_USE_OPTIX@)
+set (OSL_ARNOLD_COMPAT @OSL_ARNOLD_COMPAT@)
+set (OSL_LLVM_VERSION "@LLVM_VERSION@")
+
 # add here all the find_dependency() whenever switching to config based dependencies
 find_dependency(Imath @Imath_VERSION@)
 find_dependency(OpenImageIO @OpenImageIO_VERSION@ REQUIRED)
 if (NOT @BUILD_SHARED_LIBS@)
     find_dependency(pugixml)
+    if ("@partio_FOUND@")
+        find_dependency(partio CONFIG)
+        find_dependency(ZLIB)
+    endif ()
+    # libtestshade's private SDK links become transitive for static archives.
+    if (@OSL_USE_HART@ AND @OSL_BUILD_TESTS@)
+        find_dependency(hip CONFIG)
+        find_dependency(amd.hart CONFIG)
+    endif ()
 endif ()
 
 # Compute the installation prefix relative to this file

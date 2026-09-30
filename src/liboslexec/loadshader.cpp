@@ -609,6 +609,16 @@ ShadingSystemImpl::loadshader(string_view cname)
 
 
 bool
+ShadingSystemImpl::ShaderLoaded(string_view shadername)
+{
+    lock_guard guard(m_mutex);
+    const auto found = m_shader_masters.find(ustring(shadername));
+    return found != m_shader_masters.end();
+}
+
+
+
+bool
 ShadingSystemImpl::LoadMemoryCompiledShader(string_view shadername,
                                             string_view buffer)
 {
