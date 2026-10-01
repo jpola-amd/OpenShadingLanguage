@@ -88,6 +88,33 @@ simulate(Accumulator& accum, const char** events, size_t testno)
 int
 main()
 {
+#if OSL_ARNOLD_COMPAT
+    {
+        AccumAutomata automata;
+        std::string error;
+        int error_pos = -1;
+        OIIO_CHECK_ASSERT(
+            !automata.addRule("C(", 0, false, &error, &error_pos));
+        OIIO_CHECK_EQUAL(error, "Reached end of line looking for )");
+        OIIO_CHECK_EQUAL(error_pos, 2);
+        OIIO_CHECK_ASSERT(automata.getRuleList().empty());
+
+        OIIO_CHECK_ASSERT(
+            automata.addRule("C<RD'coat'>L", 0, false, &error, &error_pos));
+        OIIO_CHECK_ASSERT(error.empty());
+        OIIO_CHECK_EQUAL(error_pos, -1);
+        OIIO_CHECK_ASSERT(automata.addRule("C<RD'coat'><L.'key'>", 1, false,
+                                           nullptr, nullptr));
+        automata.compile();
+        const auto symbols = automata.getSymbolList();
+        OIIO_CHECK_EQUAL(symbols.count(ustring("coat")), 1);
+        OIIO_CHECK_EQUAL(symbols.count(ustring("key")), 1);
+        OIIO_CHECK_EQUAL(symbols.count(ustring("C")), 1);
+        OIIO_CHECK_EQUAL(symbols.count(Labels::STOP), 1);
+        OIIO_CHECK_EQUAL(symbols.count(ustring("unused")), 0);
+    }
+#endif
+
     // Some constants to avoid referring to AOV's by number
     const int beauty       = 0;
     const int diffuse2_3   = 1;

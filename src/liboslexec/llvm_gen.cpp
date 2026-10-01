@@ -271,7 +271,8 @@ LLVMGEN(llvm_gen_useparam)
         // initializing them lazily, now we have to do it.
         if ((sym.symtype() == SymTypeParam
              || sym.symtype() == SymTypeOutputParam)
-            && sym.interpolated() && !sym.typespec().is_closure()
+            && sym.interpolated()
+            && (OSL_ARNOLD_COMPAT || !sym.typespec().is_closure())
             && !sym.connected() && !sym.connected_down()
             && rop.shadingsys().lazy_userdata()) {
             rop.llvm_assign_initial_value(sym);
@@ -2096,8 +2097,8 @@ LLVMGEN(llvm_gen_transform)
     ustring from, to;  // N.B.: initialize to empty strings
     if ((From == NULL || From->is_constant()) && To->is_constant()) {
         // We can know all the space names at this time
-        from        = From ? From->get_string() : Strings::common;
-        to          = To->get_string();
+        from = From ? From->get_string() : Strings::common;
+        to   = To->get_string();
         if (!rop.use_hart()) {
             ustring syn = rop.shadingsys().commonspace_synonym();
             if (from == syn)

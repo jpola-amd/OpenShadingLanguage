@@ -55,12 +55,34 @@ AccumAutomata::~AccumAutomata()
 AccumRule*
 AccumAutomata::addRule(const char* pattern, int outidx, bool toalpha)
 {
+#if OSL_ARNOLD_COMPAT
+    return addRule(pattern, outidx, toalpha, nullptr, nullptr);
+}
+
+
+
+AccumRule*
+AccumAutomata::addRule(const char* pattern, int outidx, bool toalpha,
+                       std::string* error, int* error_pos)
+{
+    if (error)
+        error->clear();
+    if (error_pos)
+        *error_pos = -1;
+#endif
     // First parse the lpexp and see if it fails
     Parser parser(&m_user_events, &m_user_scatterings);
     LPexp* e = parser.parse(pattern);
     if (parser.error()) {
-        std::cerr << "[pathexp] Parse error" << parser.getErrorMsg()
-                  << " at char " << parser.getErrorPos() << std::endl;
+#if OSL_ARNOLD_COMPAT
+        if (error_pos)
+            *error_pos = parser.getErrorPos();
+        if (error)
+            *error = parser.getErrorMsg();
+        else
+#endif
+            std::cerr << "[pathexp] Parse error" << parser.getErrorMsg()
+                      << " at char " << parser.getErrorPos() << std::endl;
         delete e;
         return NULL;
     }

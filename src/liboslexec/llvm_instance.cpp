@@ -844,7 +844,8 @@ BackendLLVM::llvm_assign_initial_value(const Symbol& sym, bool force)
     // such userdata was available.
     llvm::BasicBlock* after_userdata_block = nullptr;
     const SymLocationDesc* symloc          = nullptr;
-    if (sym.interpolated() && !sym.typespec().is_closure()) {
+    if (sym.interpolated()
+        && (OSL_ARNOLD_COMPAT || !sym.typespec().is_closure())) {
         ustring symname = sym.name();
         TypeDesc type   = sym.typespec().simpletype();
 
@@ -1834,8 +1835,8 @@ BackendLLVM::build_llvm_instance(bool groupentry)
         // initializing them lazily, or if it's an interactively-adjusted
         // parameter. HART's combined parameters still resolve per point.
         if ((s.symtype() == SymTypeParam || s.symtype() == SymTypeOutputParam)
-            && !s.typespec().is_closure() && !s.connected()
-            && !s.connected_down()
+            && (OSL_ARNOLD_COMPAT || !s.typespec().is_closure())
+            && !s.connected() && !s.connected_down()
             && ((s.interactive() && !hart_interactive_default(s))
                 || (s.interpolated() && shadingsys().lazy_userdata())))
             continue;
@@ -2360,9 +2361,9 @@ link_hart_renderer_library(LLVM_Util& ll, cspan<char> bytes, string_view arch,
         return fail("cannot link device bitcode");
     const auto digest = llvm::SHA256::hash(
         { reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size() });
-    auto& llvm_context = ll.module()->getContext();
-    llvm::Metadata* identity[]
-        = { llvm::MDString::get(llvm_context, llvm::toHex(digest)) };
+    auto& llvm_context         = ll.module()->getContext();
+    llvm::Metadata* identity[] = { llvm::MDString::get(llvm_context,
+                                                       llvm::toHex(digest)) };
     // Retain the whole library's identity even when unused code is pruned.
     auto* metadata = ll.module()->getOrInsertNamedMetadata(
         "osl.hart.renderer_library");

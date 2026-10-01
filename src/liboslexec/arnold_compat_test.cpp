@@ -280,6 +280,92 @@ collect_weights(const ClosureColor* closure, const Color3& weight,
 
 
 
+#if OSL_ARNOLD_COMPAT
+class ClosureInputRenderer final : public RendererServices {
+public:
+    ClosureColor* value = nullptr;
+    bool found          = true;
+    int calls           = 0;
+
+    bool get_userdata(bool derivatives, ustringhash name, TypeDesc type,
+                      ShaderGlobals*, void* destination) override
+    {
+        OIIO_CHECK_EQUAL(name, ustringhash("input"));
+        OIIO_CHECK_ASSERT(!derivatives);
+        OIIO_CHECK_EQUAL(type, TypeDesc(TypeDesc::PTR));
+        ++calls;
+        if (found)
+            *static_cast<ClosureColor**>(destination) = value;
+        return found;
+    }
+};
+
+
+
+void
+test_closure_userdata(string_view stdosl, int optimize, int llvm_optimize)
+{
+    const auto bytecode = compile_shader(R"OSL(
+        shader closure_input(closure color input = 0 [[ int lockgeom = 0 ]])
+        {
+            Ci = input;
+        }
+    )OSL",
+                                         stdosl);
+    if (bytecode.empty())
+        return;
+    for (int lazy : { 0, 1 }) {
+        ClosureInputRenderer renderer;
+        ShadingSystem ss(&renderer);
+        ss.attribute("optimize", optimize);
+        ss.attribute("llvm_optimize", llvm_optimize);
+        ss.attribute("lazy_userdata", lazy);
+        OIIO_CHECK_ASSERT(
+            ss.LoadMemoryCompiledShader("closure_input", bytecode));
+        auto group   = make_group(ss, "closure_input");
+        auto* thread = ss.create_thread_info();
+        auto* ctx    = ss.get_context(thread);
+        ClosureComponent component {};
+        component.id = header_id;
+        component.w  = Color3(1);
+        for (int sample = 0; sample < 3; ++sample) {
+            renderer.value = sample == 0 ? &component : nullptr;
+            renderer.found = sample != 2;
+            renderer.calls = 0;
+            ShaderGlobals globals {};
+            OIIO_CHECK_ASSERT(
+                ss.execute(*ctx, *group, 0, sample, globals, nullptr, nullptr));
+            OIIO_CHECK_ASSERT(globals.Ci == renderer.value);
+            OIIO_CHECK_EQUAL(renderer.calls, 1);
+        }
+        int num_userdata = 0;
+        TypeDesc* types  = nullptr;
+        OIIO_CHECK_ASSERT(
+            ss.getattribute(group.get(), "num_userdata", num_userdata));
+        OIIO_CHECK_EQUAL(num_userdata, 1);
+        OIIO_CHECK_ASSERT(ss.getattribute(group.get(), "userdata_types",
+                                          TypeDesc::PTR, &types));
+        OIIO_CHECK_ASSERT(types && types[0] == TypeDesc::PTR);
+        ss.release_context(ctx);
+        ss.destroy_thread_info(thread);
+    }
+    ClosureInputRenderer renderer;
+    ShadingSystem ss(&renderer);
+    ss.attribute("debug_output_cpp", 1);
+    OIIO_CHECK_ASSERT(ss.LoadMemoryCompiledShader("closure_input", bytecode));
+    auto group   = make_group(ss, "closure_input");
+    auto* thread = ss.create_thread_info();
+    auto* ctx    = ss.get_context(thread);
+    ShaderGlobals globals {};
+    OIIO_CHECK_ASSERT(
+        !ss.execute(*ctx, *group, 0, 0, globals, nullptr, nullptr));
+    ss.release_context(ctx);
+    ss.destroy_thread_info(thread);
+}
+#endif
+
+
+
 void
 test_closures(string_view stdosl, int optimize, int llvm_optimize)
 {
@@ -1677,6 +1763,7 @@ main(int argc, char* argv[])
             test_metadata(argv[1], optimize, llvm_optimize);
             test_shaderglobals(argv[1], optimize, llvm_optimize);
 #if OSL_ARNOLD_COMPAT
+            test_closure_userdata(argv[1], optimize, llvm_optimize);
             test_texture_colorspaces(argv[1], optimize, llvm_optimize);
 #endif
 #if OSL_USE_OPTIX

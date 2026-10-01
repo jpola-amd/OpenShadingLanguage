@@ -3845,7 +3845,9 @@ ShadingSystemImpl::ReParameter(ShaderGroup& group, string_view layername_,
 
 PerThreadInfo*
 ShadingSystemImpl::create_thread_info()
-{ return new PerThreadInfo; }
+{
+    return new PerThreadInfo;
+}
 
 
 
@@ -4290,6 +4292,19 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
 #endif
 
     if (debug_output_cpp() >= 1) {
+        if (OSL_ARNOLD_COMPAT
+            && std::any_of(group.m_userdata_types.begin(),
+                           group.m_userdata_types.end(), [](TypeDesc type) {
+                               return type.basetype == TypeDesc::PTR;
+                           })) {
+            errorfmt("Renderer-provided closure parameters are not supported "
+                     "by the C++ backend");
+            if (ctx_allocated) {
+                release_context(ctx);
+                destroy_thread_info(thread_info);
+            }
+            return;
+        }
         for (ustring name : group.m_closures_needed) {
             const auto* entry = find_closure(name);
             if (entry && entry->alloc) {
@@ -4439,6 +4454,20 @@ ShadingSystemImpl::Batched<WidthT>::jit_group(ShaderGroup& group,
 
     if (!group.optimized())
         m_ssi.optimize_group(group, ctx, false /*do_jit*/);
+
+    if (OSL_ARNOLD_COMPAT
+        && std::any_of(group.m_userdata_types.begin(),
+                       group.m_userdata_types.end(), [](TypeDesc type) {
+                           return type.basetype == TypeDesc::PTR;
+                       })) {
+        m_ssi.errorfmt("Renderer-provided closure parameters are not supported "
+                       "by batched execution");
+        if (ctx_allocated) {
+            m_ssi.release_context(ctx);
+            m_ssi.destroy_thread_info(thread_info);
+        }
+        return;
+    }
 
     for (ustring name : group.m_closures_needed) {
         const auto* entry = m_ssi.find_closure(name);

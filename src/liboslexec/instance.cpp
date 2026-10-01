@@ -493,7 +493,7 @@ ShaderInstance::validate_hart() const
             length = m_instoverrides[index].arraylen();
         return length;
     };
-    auto validate_type  = [&](const Symbol& sym) {
+    auto validate_type = [&](const Symbol& sym) {
         const TypeSpec& type = sym.typespec();
         if (type.is_structure_array() && type.structspec()->numfields() == 0) {
             shadingsys().errorfmt(
@@ -616,7 +616,7 @@ ShaderInstance::validate_hart() const
             const int attribute     = object ? 2 : 1;
             const bool indexed      = op.nargs() == attribute + 3;
             const auto& destination = type(op.nargs() - 1);
-            valid                   = !symbol(0).is_constant()
+            valid = !symbol(0).is_constant()
                     && !symbol(op.nargs() - 1).is_constant() && type(0).is_int()
                     && type(1).is_string() && type(attribute).is_string()
                     && (op.nargs() == attribute + 2 || indexed)
@@ -1083,15 +1083,15 @@ ShaderInstance::validate_hart() const
                 return fail("noise option names must be literal strings");
             const ustring option = token.get_string();
             const TypeSpec& type = value.typespec();
-            const bool valid
-                = !type.is_array()
-                  && (((option == ustring("anisotropic")
-                        || option == ustring("do_filter"))
-                       && type.is_int())
-                      || (option == ustring("direction") && type.is_triple())
-                      || ((option == ustring("bandwidth")
-                           || option == ustring("impulses"))
-                          && (type.is_float() || type.is_int())));
+            const bool valid = !type.is_array()
+                               && (((option == ustring("anisotropic")
+                                     || option == ustring("do_filter"))
+                                    && type.is_int())
+                                   || (option == ustring("direction")
+                                       && type.is_triple())
+                                   || ((option == ustring("bandwidth")
+                                        || option == ustring("impulses"))
+                                       && (type.is_float() || type.is_int())));
             if (!valid)
                 return fail(
                     fmtformat("unsupported noise option '{}' or type '{}'",
@@ -1189,13 +1189,16 @@ ShaderInstance::validate_hart() const
             const ustring name = space.get_string();
             // Constructors use to_rgb, whose built-ins intentionally differ
             // from transformc. Other RGB system names are only current aliases.
-            const bool builtin
-                = name == ustring("RGB") || name == ustring("rgb")
-                  || name == ustring("hsv") || name == ustring("hsl")
-                  || name == ustring("YIQ") || name == ustring("XYZ")
-                  || name == ustring("xyY")
-                  || (transform
-                      && (name == ustring("linear") || name == ustring("sRGB")));
+            const bool builtin = name == ustring("RGB")
+                                 || name == ustring("rgb")
+                                 || name == ustring("hsv")
+                                 || name == ustring("hsl")
+                                 || name == ustring("YIQ")
+                                 || name == ustring("XYZ")
+                                 || name == ustring("xyY")
+                                 || (transform
+                                     && (name == ustring("linear")
+                                         || name == ustring("sRGB")));
             if (!builtin
                 && ustringhash(name) != shadingsys().colorsystem().colorspace())
                 return fail(fmtformat("unsupported color space '{}'", name));
@@ -1207,7 +1210,9 @@ ShaderInstance::validate_hart() const
         if (!validate_type(sym))
             return false;
         const auto& hints = m_instoverrides[i];
-        if (hints.interpolated() && sym.typespec().is_closure_based()) {
+        if (hints.interpolated() && sym.typespec().is_closure_based()
+            && !(OSL_ARNOLD_COMPAT && sym.typespec().is_closure()
+                 && shadingsys().renderer()->supports("HARTClosureAllocator"))) {
             shadingsys().errorfmt(
                 "HART: interpolated parameter '{}' cannot be closure-based",
                 sym.name());

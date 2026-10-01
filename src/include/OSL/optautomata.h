@@ -7,8 +7,11 @@
 #include <OpenImageIO/ustring.h>
 
 #include <OSL/export.h>
-#include <OSL/oslversion.h>
+#include <OSL/oslconfig.h>
 
+#if OSL_ARNOLD_COMPAT
+#    include <set>
+#endif
 #include <vector>
 
 OSL_NAMESPACE_BEGIN
@@ -48,6 +51,18 @@ public:
         count = m_states[state].nrules;
         return &m_rules[m_states[state].begin_rules];
     }
+
+#if OSL_ARNOLD_COMPAT
+    /// Return the distinct symbols used by compiled transitions.
+    std::set<OIIO::ustring> getSymbolList() const
+    {
+        std::set<OIIO::ustring> symbols;
+        for (const State& state : m_states)
+            for (unsigned int trans = 0; trans < state.ntrans; ++trans)
+                symbols.insert(m_trans[state.begin_trans + trans].symbol);
+        return symbols;
+    }
+#endif
 
 protected:
     struct State {

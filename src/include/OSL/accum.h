@@ -117,6 +117,19 @@ public:
     ///
     AccumRule* addRule(const char* pattern, int outidx, bool toalpha = false);
 
+#if OSL_ARNOLD_COMPAT
+    /// Return parse diagnostics to the renderer instead of printing them when
+    /// error is non-null. Success clears error and sets error_pos to -1.
+    AccumRule* addRule(const char* pattern, int outidx, bool toalpha,
+                       std::string* error, int* error_pos = nullptr);
+
+    /// Return the distinct symbols after compile(), including custom labels.
+    std::set<ustring> getSymbolList() const
+    {
+        return m_dfoptautomata.getSymbolList();
+    }
+#endif
+
     /// Once all the desired rules have been added, compile the automata
     void compile();
 
