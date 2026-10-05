@@ -1111,7 +1111,9 @@ literals (string shader parameters are decoded at run time by the HART
 shadeops), all wrap modes are accepted, and the remaining options such as
 `blur`, `width`, `fill` and `missingcolor` reach the renderer's `rs_texture`.
 Renderers advertising `HARTTextureInfo` implement `rs_get_texture_info` and
-`rs_get_texture_info_st`, enabling `gettextureinfo`.
+`rs_get_texture_info_st`, enabling `gettextureinfo`. Renderers advertising
+`HARTTrace` implement `rs_trace` and `rs_trace_get`, enabling `trace` and
+`getmessage("trace", ...)` with a literal source.
 
 HART normally validates shaders before optimization, so that constant folding
 cannot hide unsupported operations. Renderers advertising

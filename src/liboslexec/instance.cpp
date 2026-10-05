@@ -671,7 +671,8 @@ ShaderInstance::validate_hart() const
         } else if (op.nargs() == 2
                    && (name == ustring("hash") || name == ustring("raytype"))) {
             valid = type(0).is_int() && type(1).is_string();
-        } else if (name == ustring("getattribute")) {
+        } else if (name == ustring("getattribute") || name == ustring("trace")
+                   || name == ustring("getmessage")) {
             valid = true;  // The complete operation is validated first.
         }
         if (!valid)
@@ -1424,7 +1425,15 @@ ShaderInstance::validate_hart() const
         const bool texture_info
             = op.opname() == ustring("gettextureinfo")
               && shadingsys().renderer()->supports("HARTTextureInfo");
-        if (!texture_info
+        // trace() and getmessage("trace", ...) lower to rs_trace/rs_trace_get.
+        const bool trace = shadingsys().renderer()->supports("HARTTrace")
+                           && (op.opname() == ustring("trace")
+                               || (op.opname() == ustring("getmessage")
+                                   && op.nargs() == 4
+                                   && syms[args[op.firstarg() + 1]].is_constant()
+                                   && syms[args[op.firstarg() + 1]].get_string()
+                                          == ustring("trace")));
+        if (!texture_info && !trace
             && std::find(std::begin(supported), std::end(supported),
                          op.opname())
                    == std::end(supported)) {
