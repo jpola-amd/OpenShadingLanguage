@@ -4152,9 +4152,13 @@ ShadingSystemImpl::validate_hart_group(const ShaderGroup& group)
         errorfmt("HART: interactive parameter device storage is invalid");
         return false;
     }
-    if (!group.optimized()) {
+    // Validate exactly once: before optimization by default, or the optimized
+    // instances for renderers that request OptiX-like semantics.
+    if (group.optimized()
+        == bool(renderer()->supports("HARTValidateOptimized"))) {
         for (int layer = 0; layer < group.nlayers(); ++layer)
-            if (!group[layer]->validate_hart())
+            if (!(group.optimized() && group[layer]->unused())
+                && !group[layer]->validate_hart())
                 return false;
     }
     return true;
@@ -4359,7 +4363,9 @@ ShadingSystemImpl::optimize_group(ShaderGroup& group, ShadingContext* ctx,
         }
     }
 
-    if (use_hart() && !group.m_device_interactive_arena_valid) {
+    if (use_hart()
+        && (!group.m_device_interactive_arena_valid
+            || !validate_hart_group(group))) {
         if (ctx_allocated) {
             release_context(ctx);
             destroy_thread_info(thread_info);

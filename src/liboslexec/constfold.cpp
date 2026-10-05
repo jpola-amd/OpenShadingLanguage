@@ -2360,8 +2360,10 @@ DECLFOLDER(constfold_getattribute)
     }
 
     if (!found) {
-        // Mutable renderer attributes must come from launch-time device state.
-        if (rop.shadingsys().use_hart())
+        // Mutable renderer attributes must come from launch-time device state,
+        // unless the renderer recompiles groups whenever they change.
+        if (rop.shadingsys().use_hart()
+            && !rop.renderer()->supports("HARTFoldAttributes"))
             return 0;
         // If the object name is not supplied, it implies that we are
         // supposed to search the shaded object first, then if that fails,

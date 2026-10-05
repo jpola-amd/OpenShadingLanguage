@@ -479,6 +479,12 @@ ShaderInstance::validate_hart() const
 {
     // Check the original code before constant folding can execute host-only
     // operations or hide unsupported paths in a particular specialization.
+    // Renderers advertising HARTValidateOptimized instead have the optimized
+    // instance checked, as on OptiX, so folded host-only operations pass.
+    const bool optimized = !m_instsymbols.empty();
+    const auto& code     = optimized ? m_instops : m_master->m_ops;
+    const auto& args     = optimized ? m_instargs : m_master->m_args;
+    const auto& syms     = optimized ? m_instsymbols : m_master->m_symbols;
     const bool custom_closures = shadingsys().renderer()->supports(
         "HARTClosureAllocator");
     const bool closures = custom_closures
@@ -486,11 +492,11 @@ ShaderInstance::validate_hart() const
     const bool bounds   = shadingsys().renderer()->supports("HARTArrayBounds");
     const bool geometry = shadingsys().renderer()->supports("HARTGeometry");
     auto resolved_array_length = [&](int index) {
-        const Symbol& sym = m_master->m_symbols[index];
+        const Symbol& sym = syms[index];
         const auto& type  = sym.typespec();
         int length        = type.is_unsized_array() ? sym.initializers()
                                                     : type.arraylength();
-        if (index >= firstparam() && index < lastparam()
+        if (!optimized && index >= firstparam() && index < lastparam()
             && m_instoverrides[index].arraylen())
             length = m_instoverrides[index].arraylen();
         return length;
@@ -525,7 +531,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_transform = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto type = [&](int arg) -> const TypeSpec& {
             return symbol(arg).typespec();
@@ -607,7 +613,7 @@ ShaderInstance::validate_hart() const
             return false;
         }
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto type = [&](int arg) -> const TypeSpec& {
             return symbol(arg).typespec();
@@ -637,7 +643,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_string_operands = [&](const Opcode& op) {
         auto type = [&](int arg) -> const TypeSpec& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
+            return syms[args[op.firstarg() + arg]]
                 .typespec();
         };
         const ustring name = op.opname();
@@ -677,7 +683,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_hash = [&](const Opcode& op) {
         auto type = [&](int arg) -> const TypeSpec& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]]
+            return syms[args[op.firstarg() + arg]]
                 .typespec();
         };
         const bool valid
@@ -696,7 +702,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_diagnostic = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto fail = [&](string_view message) {
             shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
@@ -759,7 +765,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_closure = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto fail = [&](string_view message) {
             shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
@@ -867,7 +873,7 @@ ShaderInstance::validate_hart() const
                 TypeDesc actual_type = actual.simpletype();
                 if (actual.is_array()) {
                     actual_type.arraylen = resolved_array_length(
-                        m_master->m_args[op.firstarg() + arg]);
+                        args[op.firstarg() + arg]);
                     if (actual_type.arraylen <= 0)
                         return false;
                 }
@@ -936,7 +942,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_texture = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto fail = [&](string_view message) {
             shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
@@ -959,7 +965,10 @@ ShaderInstance::validate_hart() const
             return fail("invalid texture argument list");
         const bool defaults = shadingsys().renderer()->supports(
             "HARTTextureDefaults");
-        bool interp = defaults, swrap = defaults, twrap = defaults;
+        const bool all_options = shadingsys().renderer()->supports(
+            "HARTTextureOptions");
+        bool interp = defaults || all_options;
+        bool swrap = interp, twrap = interp;
         for (int a = first_option; a < op.nargs(); a += 2) {
             const Symbol& token = symbol(a);
             const Symbol& value = symbol(a + 1);
@@ -972,8 +981,9 @@ ShaderInstance::validate_hart() const
                 continue;
             }
             if (name == Strings::firstchannel) {
-                if (!value.is_constant() || !value.typespec().is_int()
-                    || value.get_int() < 0)
+                if (!value.typespec().is_int()
+                    || (!all_options
+                        && (!value.is_constant() || value.get_int() < 0)))
                     return fail(
                         "texture firstchannel requires a literal nonnegative integer");
                 continue;
@@ -989,10 +999,18 @@ ShaderInstance::validate_hart() const
             }
 #endif
             if (name != ustring("interp") && name != ustring("wrap")
-                && name != ustring("swrap") && name != ustring("twrap"))
+                && name != ustring("swrap") && name != ustring("twrap")) {
+                // Renderers with HARTTextureOptions handle (or deliberately
+                // ignore) every other standard option themselves.
+                if (all_options)
+                    continue;
                 return fail(fmtformat("unsupported texture option '{}'", name));
-            if (!value.is_constant() || !value.typespec().is_string())
+            }
+            if (!value.typespec().is_string() || value.typespec().is_array()
+                || (!value.is_constant() && !all_options))
                 return fail("texture option values must be literal strings");
+            if (all_options)
+                continue;  // Modes are decoded by the shadeops at run time.
             const ustring mode = value.get_string();
             if (name == ustring("interp")) {
                 if (mode != ustring("closest") && mode != ustring("linear"))
@@ -1018,7 +1036,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_noise = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto fail = [&](string_view message) {
             shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
@@ -1103,7 +1121,7 @@ ShaderInstance::validate_hart() const
     };
     auto validate_spline = [&](const Opcode& op) {
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto fail = [&](string_view message) {
             shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
@@ -1141,7 +1159,7 @@ ShaderInstance::validate_hart() const
             || (op.nargs() == 5 && !symbol(3).typespec().is_int()))
             return fail("invalid spline knot/value types");
         const int length = resolved_array_length(
-            m_master->m_args[op.firstarg() + op.nargs() - 1]);
+            args[op.firstarg() + op.nargs() - 1]);
         if (length < 4)
             return fail("at least four resolved spline knots are required");
         if (op.nargs() == 4 || symbol(3).is_constant()) {
@@ -1156,7 +1174,7 @@ ShaderInstance::validate_hart() const
         if (constructor && op.nargs() == 4)
             return true;
         auto symbol = [&](int arg) -> const Symbol& {
-            return m_master->m_symbols[m_master->m_args[op.firstarg() + arg]];
+            return syms[args[op.firstarg() + arg]];
         };
         auto fail = [&](string_view message) {
             shadingsys().errorfmt("HART: {} in shader '{}' ({}:{})", message,
@@ -1208,10 +1226,17 @@ ShaderInstance::validate_hart() const
         return true;
     };
     for (int i = firstparam(); i < lastparam(); ++i) {
-        const Symbol& sym = *mastersymbol(i);
+        const Symbol& sym = syms[i];
         if (!validate_type(sym))
             return false;
-        const auto& hints = m_instoverrides[i];
+        // Optimization moves the overrides into the instance symbols.
+        SymOverrideInfo hints = optimized ? SymOverrideInfo()
+                                          : m_instoverrides[i];
+        if (optimized) {
+            hints.valuesource(sym.valuesource());
+            hints.interpolated(sym.interpolated());
+            hints.interactive(sym.interactive());
+        }
         if (hints.interpolated() && sym.typespec().is_closure_based()
             && !(OSL_ARNOLD_COMPAT && sym.typespec().is_closure()
                  && shadingsys().renderer()->supports("HARTClosureAllocator"))) {
@@ -1395,9 +1420,14 @@ ShaderInstance::validate_hart() const
         ustring("N"),    ustring("Ng"), ustring("dPdu"),
         ustring("dPdv"), ustring("I"),  ustring("time"),
     };
-    for (const Opcode& op : m_master->m_ops) {
-        if (std::find(std::begin(supported), std::end(supported), op.opname())
-            == std::end(supported)) {
+    for (const Opcode& op : code) {
+        const bool texture_info
+            = op.opname() == ustring("gettextureinfo")
+              && shadingsys().renderer()->supports("HARTTextureInfo");
+        if (!texture_info
+            && std::find(std::begin(supported), std::end(supported),
+                         op.opname())
+                   == std::end(supported)) {
             shadingsys().errorfmt("HART: unsupported operation '{}' in shader "
                                   "'{}' ({}:{})",
                                   op.opname(), shadername(), op.sourcefile(),
@@ -1455,7 +1485,7 @@ ShaderInstance::validate_hart() const
             const int first = op.opname() == ustring("mxcompref") ? 2 : 1;
             for (int a = first; a < first + 2; ++a) {
                 const Symbol& index
-                    = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                    = syms[args[op.firstarg() + a]];
                 if (!index.typespec().is_int()
                     || (index.is_constant()
                         && (index.get_int() < 0 || index.get_int() >= 4))
@@ -1480,14 +1510,14 @@ ShaderInstance::validate_hart() const
             const int first = array_ref || component_ref || matrix_ref ? 2 : 1;
             const int count = matrix_ref || matrix_assign ? 2 : 1;
             const Symbol& aggregate
-                = m_master->m_symbols[m_master->m_args[op.firstarg()
+                = syms[args[op.firstarg()
                                                        + (first == 2 ? 1 : 0)]];
             const int length = array_ref || array_assign
                                    ? aggregate.typespec().arraylength()
                                    : (count == 2 ? 4 : 3);
             for (int a = first; a < first + count; ++a) {
                 const Symbol& index
-                    = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                    = syms[args[op.firstarg() + a]];
                 if (index.is_constant() && index.get_int() >= 0
                     && index.get_int() < length)
                     continue;
@@ -1502,7 +1532,7 @@ ShaderInstance::validate_hart() const
         }
         for (int a = 0; a < op.nargs(); ++a) {
             const Symbol& sym
-                = m_master->m_symbols[m_master->m_args[op.firstarg() + a]];
+                = syms[args[op.firstarg() + a]];
             if (op.opname() == ustring("closure") && sym.typespec().is_string())
                 continue;  // Validated literal constructor name, not a string.
             if (op.opname() == ustring("texture") && sym.typespec().is_string())

@@ -91,6 +91,18 @@ decode_wrapmode(ustringhash_pod name_)
     ustring name = ustring_from(name_hash);
     return OIIO::TextureOpt::decode_wrapmode(name);
 #    endif
+#elif defined(__HIPCC__)
+    // Runtime (non-literal) wrap modes reach HART shadeops as string hashes.
+    ustringhash name = ustringhash_from(name_);
+    if (name == Hashes::black)
+        return TextureOpt::WrapBlack;
+    if (name == Hashes::clamp)
+        return TextureOpt::WrapClamp;
+    if (name == Hashes::periodic)
+        return TextureOpt::WrapPeriodic;
+    if (name == Hashes::mirror)
+        return TextureOpt::WrapMirror;
+    return TextureOpt::WrapDefault;
 #else
     return TextureOpt::WrapDefault;
 #endif

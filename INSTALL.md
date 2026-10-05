@@ -1099,6 +1099,27 @@ Existing immutable `osl:version` and literal `shader:*name` folds remain;
 dynamic shader metadata and unoptimized shader-name queries are not invented
 as runtime services. The native path tracer does not yet opt into this service.
 
+Renderers that recompile shader groups whenever their attributes change may
+additionally advertise `HARTFoldAttributes`. HART then constant-folds
+`getattribute` calls with a constant, non-empty object name through the host
+`get_attribute` callback during optimization, exactly as on CPU and OptiX.
+Arnold relies on this for queries such as `getattribute("options", "xres", r)`.
+
+Renderers whose texture service handles every standard texture option may
+advertise `HARTTextureOptions`. Wrap and interpolation modes then need not be
+literals (string shader parameters are decoded at run time by the HART
+shadeops), all wrap modes are accepted, and the remaining options such as
+`blur`, `width`, `fill` and `missingcolor` reach the renderer's `rs_texture`.
+Renderers advertising `HARTTextureInfo` implement `rs_get_texture_info` and
+`rs_get_texture_info_st`, enabling `gettextureinfo`.
+
+HART normally validates shaders before optimization, so that constant folding
+cannot hide unsupported operations. Renderers advertising
+`HARTValidateOptimized` instead have the optimized instances of used layers
+validated, as OptiX effectively does: operations that are folded away (for
+example `concat`, `format` or `gettextureinfo` on constant arguments) are then
+accepted, while any that remain are still rejected.
+
 The grid uploads a fresh camera `RenderContext` with no host journal pointer
 before each render. Its pointer is at offset 48 in `HartTextureState`;
 the six-argument callable ABI is unchanged. Genuine HIP probes
