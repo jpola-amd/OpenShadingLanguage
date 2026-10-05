@@ -336,7 +336,9 @@ ShaderInstance::parameters(const ParamValueList& params,
                 // indefinite- sized array case, which is why we have it in
                 // the 'else' clause of that test.
                 void* defaultdata = m_master->param_default_storage(i);
-                if (lockgeom && !sm->has_init_ops()
+                // Arnold supplies every parameter, so its unchanged defaults
+                // must still let init ops run, as before upstream #1578.
+                if (lockgeom && (OSL_ARNOLD_COMPAT || !sm->has_init_ops())
                     && memcmp(defaultdata, data, valuetype.size()) == 0) {
                     // Must reset valuesource to default, in case the parameter
                     // was set already, and now is being changed back to default.
