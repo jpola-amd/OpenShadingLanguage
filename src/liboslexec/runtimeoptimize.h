@@ -340,6 +340,11 @@ public:
 
     int remove_unused_params();
 
+    /// Turn the code after an unconditional 'return' (to the end of its
+    /// inlined function) or 'exit' (to the end of the main code) into nops.
+    /// Return the number of ops changed.
+    int elide_unreachable_after_return();
+
     /// Turn isconnected() calls into constant assignments
     void resolve_isconnected();
 

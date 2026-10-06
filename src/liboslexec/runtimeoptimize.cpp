@@ -1873,6 +1873,48 @@ RuntimeOptimizer::mark_outgoing_connections()
 
 
 
+int
+RuntimeOptimizer::elide_unreachable_after_return()
+{
+    OpcodeVec& code(inst()->ops());
+    const int mainbegin = inst()->maincodebegin();
+    const int mainend   = std::min(inst()->maincodeend(), (int)code.size());
+    int changed         = 0;
+    for (int r = mainbegin; r < mainend; ++r) {
+        const ustring name = code[r].opname();
+        if (name != u_return && name != u_exit)
+            continue;
+        // A 'return' leaves its innermost inlined function; 'exit' leaves
+        // the main code.
+        int begin = mainbegin, end = mainend;
+        if (name == u_return) {
+            begin = -1;
+            for (int f = mainbegin; f < r; ++f)
+                if ((code[f].opname() == u_functioncall
+                     || code[f].opname() == u_functioncall_nr)
+                    && code[f].jump(0) > r) {
+                    begin = f;
+                    end   = code[f].jump(0);
+                }
+            if (begin < 0)
+                continue;
+        }
+        // Inside a live conditional or loop the return is not unconditional.
+        bool conditional = false;
+        for (int c = begin + 1; c < r && !conditional; ++c) {
+            const ustring cname = code[c].opname();
+            conditional = (cname == u_if || cname == u_for || cname == u_while
+                           || cname == u_dowhile)
+                          && code[c].farthest_jump() > r;
+        }
+        if (!conditional)
+            changed += turn_into_nop(r + 1, end, "unreachable after return");
+    }
+    return changed;
+}
+
+
+
 /// Check all params and output params to find any that are neither used
 /// in the shader (aside from their own init ops, which shouldn't count)
 /// nor connected to downstream layers, and for those, remove their init
@@ -2411,6 +2453,11 @@ RuntimeOptimizer::optimize_instance()
         // Here is the meat of the optimization, where we pass over the
         // code for this instance and make various transformations.
         int changed = optimize_ops(0, (int)inst()->ops().size());
+
+        // Constant folding can make an early return unconditional (e.g.
+        // an inlined 'if (file == "") return;'); drop the dead code after it.
+        if (optimize() >= 2 && m_opt_constant_fold)
+            changed += elide_unreachable_after_return();
 
         // Now that we've rewritten the code, we need to re-track the
         // variable lifetimes.
