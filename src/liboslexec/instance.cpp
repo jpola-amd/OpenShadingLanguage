@@ -899,10 +899,16 @@ ShaderInstance::validate_hart() const
                         break;
                     }
                 }
-                if (!found)
+                if (!found) {
+                    // Like CPU/OptiX, renderers may opt into warning about and
+                    // ignoring unknown or mismatched keywords at codegen.
+                    if (shadingsys().renderer()->supports(
+                            "HARTLenientClosureKeywords"))
+                        continue;
                     return fail(fmtformat(
                         "unsupported or incompatible keyword '{}' to closure '{}'",
                         key.get_string(), name));
+                }
             }
             return true;
         }

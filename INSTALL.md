@@ -1113,7 +1113,10 @@ shadeops), all wrap modes are accepted, and the remaining options such as
 Renderers advertising `HARTTextureInfo` implement `rs_get_texture_info` and
 `rs_get_texture_info_st`, enabling `gettextureinfo`. Renderers advertising
 `HARTTrace` implement `rs_trace` and `rs_trace_get`, enabling `trace` and
-`getmessage("trace", ...)` with a literal source.
+`getmessage("trace", ...)` with a literal source. Renderers advertising
+`HARTLenientClosureKeywords` get the CPU/OptiX behaviour for closure keyword
+arguments that are unknown or have a mismatched type: a warning, and the argument
+is ignored, instead of a HART compile error. Keyword names must still be literal.
 
 HART normally validates shaders before optimization, so that constant folding
 cannot hide unsupported operations. Renderers advertising

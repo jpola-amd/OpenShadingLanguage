@@ -4005,7 +4005,8 @@ llvm_gen_keyword_fill(BackendLLVM& rop, Opcode& op,
             }
         }
         if (!legal) {
-            if (rop.use_hart()) {
+            if (rop.use_hart()
+                && !rop.renderer()->supports("HARTLenientClosureKeywords")) {
                 rop.shadingcontext()->errorfmt(
                     "HART: unsupported closure keyword '{}' for '{}' ({}:{})",
                     key, clname, op.sourcefile(), op.sourceline());
