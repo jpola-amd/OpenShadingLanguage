@@ -1298,6 +1298,7 @@ ShaderInstance::validate_hart() const
         ustring("end"),
         ustring("useparam"),
         ustring("isconstant"),
+        ustring("isconnected"),
         ustring("assign"),
         ustring("add"),
         ustring("sub"),
@@ -1561,6 +1562,10 @@ ShaderInstance::validate_hart() const
                 continue;  // Validated literal color spaces, not device strings.
             if (diagnostic && sym.typespec().is_string_based())
                 continue;  // Literal format and typed argument payload.
+            // The optimizer always folds isconnected() to a constant before
+            // code generation, so the queried parameter is never read.
+            if (op.opname() == ustring("isconnected") && a == 1)
+                continue;
             if (spatial && sym.typespec().is_string())
                 continue;
             // Inlined function markers carry a name, not a device string.

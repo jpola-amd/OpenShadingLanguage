@@ -3416,6 +3416,49 @@ shader hart_constants(float A=1, string label="literal", output color Cout=0) {
 
 
 bool
+check_isconnected_modules(string_view arch, string_view stdosl)
+{
+    const string_view producer = R"osl(
+shader hart_producer(output float value=0) { value=sin(7*u)+v*v; }
+)osl";
+    const string_view consumer = R"osl(
+shader hart_consumer(float value=0, string label="literal",
+                     output color Cout=0) {
+    Cout=color(isconnected(value)+value, isconnected(label),
+               isconnected(Cout));
+}
+)osl";
+    OSLCompiler producer_compiler, consumer_compiler;
+    std::string producer_oso, consumer_oso;
+    if (!producer_compiler.compile_buffer(producer, producer_oso, {}, stdosl)
+        || !consumer_compiler.compile_buffer(consumer, consumer_oso, {}, stdosl))
+        return false;
+    for (bool connected : { false, true }) {
+        for (int osl_optimize : { 0, 2 }) {
+            HartServices renderer;
+            Diagnostics errors;
+            ShadingSystem ss(&renderer, nullptr, &errors);
+            ss.attribute("hart_arch", arch);
+            ss.attribute("optimize", osl_optimize);
+            ss.attribute("llvm_optimize", 10);
+            auto group = connected ? make_connected_group(ss, producer_oso,
+                                                          consumer_oso)
+                                   : make_group(ss, consumer_oso);
+            ss.optimize_group(group.get(), nullptr);
+            if (errors.errors)
+                print(stderr, "isconnected (OSL {}, connected {}): {}\n",
+                      osl_optimize, connected, errors.last_error);
+            OIIO_CHECK_EQUAL(errors.errors, 0);
+            check_module(ss, *group, arch, {}, 10, connected, false, false,
+                         connected ? 2 : 0);
+        }
+    }
+    return true;
+}
+
+
+
+bool
 check_numeric_math_modules(string_view arch, string_view stdosl)
 {
     const struct {
@@ -14577,6 +14620,7 @@ main(int argc, char* argv[])
         || !check_material_modules(arch, argv[2])
         || !check_math_modules(arch, argv[2])
         || !check_isconstant_modules(arch, argv[2])
+        || !check_isconnected_modules(arch, argv[2])
         || !check_numeric_math_modules(arch, argv[2])
         || !check_spline_modules(arch, argv[2])
         || !check_color_modules(arch, argv[2])
