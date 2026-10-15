@@ -50,7 +50,7 @@ Pop-Location
 
 .\src\build-scripts\configure-hart.ps1 -DependencyProfile Arnold `
   -LLVMRoot D:\OSL\LLVM\llvm-23.0.0-rocm-install `
-  -HartRoot D:\hart-repos\hart-radeon-pro\install `
+  -HartRoot D:\hart-repos\amd-cae-hart\install `
   -RocmRoot D:\opt\rocm\therock-dist-windows-gfx120X-all-7.14.0rc3 `
   -Architectures gfx1201 `
   -CudaRoot D:\OSL\dependencies\cuda\12.9 `
@@ -91,7 +91,7 @@ Configuration verified on 2026-09-30:
 | Host | Visual Studio 2022, toolset 14.44.35207, compiler 19.44.35228.0, x64, Windows SDK 10.0.26100.0 |
 | CMake | 4.3.3 |
 | OSL LLVM | `23.0.0git`, targets X86, NVPTX, AMDGPU |
-| HART | package 0.1.0, `D:\hart-repos\hart-radeon-pro\install` |
+| HART | package 0.1.0, `D:\hart-repos\amd-cae-hart\install` |
 | ROCm / HIP | TheRock `7.14.0rc3`; HIP headers `7.14.60850`, hash `2b22ab01`; ROCm clang 23.0.0 |
 | HART device | `gfx1201` |
 | CUDA | SDK 12.9.1, nvcc 12.9.86, cudart 12.9.79 |
