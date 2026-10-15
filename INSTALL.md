@@ -187,7 +187,7 @@ to your existing host dependency and `LLVM_DIRECTORY`/`LLVM_ROOT` settings):
 ```powershell
  -DOSL_USE_HART=ON `
  -DUSE_LLVM_BITCODE=ON `
- "-DHART_ROOT=D:\hart-repos\hart-radeon-pro\install" `
+ "-DHART_ROOT=D:\hart-repos\amd-cae-hart\install" `
  "-DROCM_ROOT=D:\opt\rocm\therock-dist-windows-gfx120X-all-7.14.0rc3" `
  "-DHART_TARGET_ARCHITECTURES=gfx1201;gfx1100;gfx1151"
 ```
