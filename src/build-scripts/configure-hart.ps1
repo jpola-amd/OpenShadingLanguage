@@ -11,7 +11,7 @@ param(
     [string]$ArnoldDependencies = "D:\autodesk\arnold-core\build\windows\dependencies",
     [string]$ArnoldRoot = "D:\autodesk\arnold-core\build\windows\x86_64\icx_dev\dist",
     [string]$LLVMRoot = "D:\OSL\LLVM\llvm-23.0.0-rocm-install",
-    [string]$HartRoot = "D:\hart-repos\hart-radeon-pro\install",
+    [string]$HartRoot = "D:\hart-repos\amd-cae-hart\install",
     [string]$RocmRoot = $env:ROCM_PATH,
     [string]$Architectures = "gfx1201",
     [string]$CudaRoot = "",
