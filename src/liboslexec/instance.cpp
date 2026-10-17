@@ -641,6 +641,38 @@ ShaderInstance::validate_hart() const
                 shadername(), op.sourcefile(), op.sourceline());
         return valid;
     };
+    auto validate_pointcloud = [&](const Opcode& op) {
+        auto type = [&](int arg) -> const TypeSpec& {
+            return syms[args[op.firstarg() + arg]].typespec();
+        };
+        auto output_ok = [&](int arg) {
+            const TypeSpec& t = type(arg);
+            return !syms[args[op.firstarg() + arg]].is_constant()
+                   && !t.is_structure_based() && !t.is_closure_based();
+        };
+        bool valid = false;
+        if (op.opname() == ustring("pointcloud_search") && op.nargs() >= 5) {
+            int first_attr = 5;
+            if (op.nargs() > 5 && type(5).is_int())
+                ++first_attr;
+            valid = type(0).is_int() && type(1).is_string()
+                    && type(2).is_triple() && type(3).is_float()
+                    && type(4).is_int() && (op.nargs() - first_attr) % 2 == 0;
+            for (int a = first_attr; valid && a < op.nargs(); a += 2)
+                valid = type(a).is_string() && type(a + 1).is_array()
+                        && output_ok(a + 1);
+        } else if (op.opname() == ustring("pointcloud_get") && op.nargs() == 6) {
+            valid = type(0).is_int() && type(1).is_string()
+                    && type(2).is_array() && type(2).elementtype().is_int()
+                    && type(3).is_int() && type(4).is_string()
+                    && type(5).is_array() && output_ok(5);
+        }
+        if (!valid)
+            shadingsys().errorfmt(
+                "HART: invalid {} operands in shader '{}' ({}:{})",
+                op.opname(), shadername(), op.sourcefile(), op.sourceline());
+        return valid;
+    };
     auto validate_string_operands = [&](const Opcode& op) {
         auto type = [&](int arg) -> const TypeSpec& {
             return syms[args[op.firstarg() + arg]]
@@ -672,7 +704,9 @@ ShaderInstance::validate_hart() const
                    && (name == ustring("hash") || name == ustring("raytype"))) {
             valid = type(0).is_int() && type(1).is_string();
         } else if (name == ustring("getattribute") || name == ustring("trace")
-                   || name == ustring("getmessage")) {
+                   || name == ustring("getmessage")
+                   || name == ustring("pointcloud_search")
+                   || name == ustring("pointcloud_get")) {
             valid = true;  // The complete operation is validated first.
         }
         if (!valid)
@@ -1440,7 +1474,13 @@ ShaderInstance::validate_hart() const
                                    && syms[args[op.firstarg() + 1]].is_constant()
                                    && syms[args[op.firstarg() + 1]].get_string()
                                           == ustring("trace")));
-        if (!texture_info && !trace
+        // pointcloud_search() and pointcloud_get() lower to
+        // rs_pointcloud_search/rs_pointcloud_get.
+        const bool pointcloud = shadingsys().renderer()->supports(
+                                    "HARTPointClouds")
+                                && (op.opname() == ustring("pointcloud_search")
+                                    || op.opname() == ustring("pointcloud_get"));
+        if (!texture_info && !trace && !pointcloud
             && std::find(std::begin(supported), std::end(supported),
                          op.opname())
                    == std::end(supported)) {
@@ -1460,6 +1500,8 @@ ShaderInstance::validate_hart() const
             return false;
         }
         if (op.opname() == ustring("getattribute") && !validate_attribute(op))
+            return false;
+        if (pointcloud && !validate_pointcloud(op))
             return false;
         const bool spatial = op.opname() == ustring("matrix")
                              || op.opname() == ustring("getmatrix")
