@@ -12,26 +12,26 @@ import shutil
 
 
 PACKAGES = {
-    "openimageio": Path("openimageio") / "autodesk-arnold-2.6.3.2-1-3",
+    "openimageio": Path("openimageio") / "autodesk-arnold-3.0.0.3-0",
     "imath": Path("imath") / "3.1.10-9",
 }
 HEADER_HASHES = {
     "openimageio/include/OpenImageIO/platform.h":
-        "56f38173c9eb4713df3262b80d1f5154c82fcd826a9dfb2bc786f563c7416163",
+        "bed0a9ac66ce9945baca92610f4b9ba52749f3482c89f5dd1e6b5438aa54eeaf",
     "openimageio/include/OpenImageIO/simd.h":
-        "27fb3a786f58f46414c8a4b992243995d6c3c933ea2bfc888038842afae52b1f",
+        "35f48352313bbcb6bf208081f7ce5b7657d147b0c351bdceed8da9730f99a735",
     "openimageio/include/OpenImageIO/fmath.h":
-        "cc7a640857964cfec6cf5d73812b9fce0095cc0467bbc95b9a75117bcde232bd",
+        "cac1510a4d4e4dd889dd61af7c634d4d7e7b3f7674954fa4abf8e1a91ec87597",
     "openimageio/include/OpenImageIO/ustring.h":
-        "c5aaf93cf0027be7decbefbb5c8105cbd534d9ca286491fee5b16516fd84dc0e",
+        "76fc351290647aa7a5a1825cb4a3ebe6ef57c8dab5fd4aba8087e4fe24b17ebe",
     "openimageio/include/OpenImageIO/bit.h":
         "aa42da78365813d3bd89896347950392d5a16f54d07f6a672836ad8a007383c6",
     "openimageio/include/OpenImageIO/color.h":
-        "21eefdc022b4cc578f54e55c6014fe2a1590d0064b532ef6b349844cdaa0a55a",
+        "d087af7b16fc5d73f29e9666b209739118afb82e6e7e873edc51e07e5a4ef366",
     "openimageio/include/OpenImageIO/detail/farmhash.h":
         "da255e9c2c8e3ecb4d43331b4e4dab430f4ab87f92fd33cf5c4eaf6437288af6",
     "openimageio/include/OpenImageIO/detail/fmt.h":
-        "942939932c31a6891282c5b1e886003aba4981262a635de0b79efe163d0979ce",
+        "8278e44b69b803bc5558a27cb7c58acc24fe3df4ed62c826ffaae02e03be3d82",
     "imath/include/Imath/ImathConfig.h":
         "8650356a0ec689f7b07edeff33196729fd5078a8221ca3bc67c3cb76b46c5197",
     "imath/include/Imath/half.h":
@@ -117,7 +117,7 @@ def prepare(source, destination, arnold_root):
     arnold_runtime = (arnold_root / "bin" / "ai.dll").resolve(strict=True)
 
     # Validate every input before writing anything. Do not silently patch a
-    # different Arnold build or replace its headers with OIIO 3 headers.
+    # different Arnold build or replace its headers with another OIIO release.
     patches = {}
     for name, expected in HEADER_HASHES.items():
         package, relative = name.split("/", 1)
@@ -162,7 +162,7 @@ set_property(TARGET OpenImageIO::OpenImageIO APPEND PROPERTY
             elif not dst.exists() or dst.read_bytes() != data:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(data)
-    print(f"Staged Arnold OIIO 2.6.3.2 / Imath 3.1.10 in {destination}")
+    print(f"Staged Arnold OIIO 3.0.0.3 / Imath 3.1.10 in {destination}")
 
 
 if __name__ == "__main__":

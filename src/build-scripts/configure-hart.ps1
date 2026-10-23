@@ -78,7 +78,10 @@ if ($DependencyProfile -eq "Arnold") {
     $packages = @(
         "openexr\3.3.4-arnold-dev1-2", "libdeflate\1.24-2",
         "libpng\1.6.55-0", "libtiff\4.7.0-2", "libjpeg-turbo\3.1.0-2",
-        "zlib\1.3.1-9", "freetype\2.13.3-2"
+        "zlib\1.3.1-9", "freetype\2.13.3-2",
+        # OIIO 3.0.0.3 is built with OpenColorIO and exports it as a link dependency.
+        "ocio\2.5.2-0", "expat\2.7.3-7", "yaml-cpp\0.8.0-7", "pystring\1.1.4-7",
+        "minizip-ng\4.0.10-7"
     )
     $prefixes = @($oiio, $imath, $JpegRoot)
     foreach ($package in $packages) {
@@ -106,7 +109,7 @@ if ($DependencyProfile -eq "Arnold") {
         "-DLLVM_OPT_TOOL=$LLVMRoot\bin\opt.exe",
         "-DLLVM_LLC_TOOL=$LLVMRoot\bin\llc.exe",
         "-DOSL_DEPENDENCY_MANIFEST:FILEPATH=$buildDir\arnold-dependencies.json",
-        "-DOSL_ALLOW_OIIO_26=ON",
+        "-DOSL_ALLOW_OIIO_26=OFF",
         "-DOpenImageIO_ROOT=$oiio",
         "-DOpenImageIO_DIR=$oiio\lib\cmake\OpenImageIO",
         "-DImath_DIR=$imath\lib\cmake\Imath",

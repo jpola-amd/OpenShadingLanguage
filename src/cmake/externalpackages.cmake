@@ -58,6 +58,8 @@ checked_find_package (OpenImageIO REQUIRED
                       DEFINITIONS OIIO_HIDE_FORMAT=1)
 if (OpenImageIO_VERSION VERSION_LESS 3.0)
     message (WARNING "Building with experimental OpenImageIO 2.6 compatibility")
+endif ()
+if (OpenImageIO_VERSION VERSION_LESS 3.0 OR OSL_ARNOLD_COMPAT)
     # Do not let normal includes from another dependency's shared prefix
     # precede these imported headers (which CMake otherwise treats as system).
     set_property (TARGET OpenImageIO::OpenImageIO OpenImageIO::OpenImageIO_Util

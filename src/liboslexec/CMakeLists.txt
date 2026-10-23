@@ -576,6 +576,13 @@ foreach(batched_target ${BATCHED_TARGET_LIST})
 endforeach(batched_target)
 
 add_library (${local_lib} ${lib_src})
+if (OSL_USE_HART)
+    # The linked HART bitcode is produced by a custom command that both
+    # osl_hart_bitcode and this target (through the embedded .bc.cpp) reach.
+    # Visual Studio replicates such commands per target, so without this
+    # ordering a parallel build can embed a file that is still being written.
+    add_dependencies (${local_lib} osl_hart_bitcode)
+endif ()
 target_include_directories (${local_lib}
     PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
